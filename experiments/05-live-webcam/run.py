@@ -38,12 +38,17 @@ def parse_wh(s):
     return int(a), int(b)
 
 
-def boot_mode_name(mode_arg, still_arg):
+def boot_mode_name(mode_arg, still_arg, particles_flags=False):
     """--still PATH implies dithergirl unless --mode is given (DESIGN.md §3:
-    CLI flags mean 'boot into')."""
+    CLI flags mean 'boot into'). With no mode-implying flag at all, returns
+    None — the shell resumes the last-used mode from state.json (§3: launch
+    goes straight into the last-used mode; first run: Particles). Particles-
+    specific flags (--flock/--glitch) still mean 'boot into' flow."""
     if mode_arg:
         return mode_arg
-    return "dithergirl" if still_arg else "flow"
+    if still_arg:
+        return "dithergirl"
+    return "flow" if particles_flags else None
 
 
 def main():
@@ -83,18 +88,20 @@ def main():
         return
 
     device = int(args.device) if args.device.isdigit() else args.device
-    boot = boot_mode_name(args.mode, args.still)
+    boot = boot_mode_name(args.mode, args.still,
+                          particles_flags=(args.flock or args.glitch))
     if boot == "grid":
         live(device=device, res=parse_wh(args.res), mirror=not args.no_mirror)
         return
     # thin launcher: shell + mode (DESIGN.md §8 step 6)
-    if boot == "dithergirl":
+    preset = args.preset
+    if boot is None:
+        mode = None      # shell resumes the last-used mode from state.json (§3)
+    elif boot == "dithergirl":
         mode = DitherGirlMode(still=bool(args.still))
-        preset = args.preset
     else:
         mode = ParticlesMode(matte=args.matte, grid=parse_wh(args.grid),
                              n=args.particles, flock=args.flock, glitch=args.glitch)
-        preset = args.preset
     host = Host(mode, device=device, res=parse_wh(args.res),
                 preset=preset, audio=args.audio, still=args.still,
                 panel=(args.ui == "panel"), mirror=not args.no_mirror)

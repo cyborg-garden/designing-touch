@@ -395,6 +395,43 @@ def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
                         mode="dithergirl")[slot] == "neon dancer"
 
 
+# ---------- boot: hint + last-used-mode resume (DESIGN.md §3) ----------
+
+def test_boot_posts_the_4s_hud_hint(tmp_path):
+    """DESIGN.md §3: a HUD hint fades in for 4 s on boot — the three doors."""
+    host = _booted(tmp_path)
+    hint = next((t for t in host.hud.toasts._hints
+                 if t.text == "m menu - TAB panel - ? keys"), None)
+    assert hint is not None
+    assert hint.ttl == 4.0
+
+
+def test_no_explicit_mode_resumes_last_used_from_state(tmp_path):
+    """DESIGN.md §3: launch goes straight into the last-used mode — a Host
+    built with mode=None reads state.json and boots into it."""
+    p = _paths(tmp_path)
+    presets.save_state({"mode": "dithergirl", "preset": None, "bank": {}},
+                       path=p["state_path"])
+    host = Host(None, source=SyntheticSource(), res=RES, show=False,
+                preset=None, max_frames=1, **p)
+    host.run()
+    assert host.mode.id == "dithergirl"
+
+
+def test_no_state_file_resolves_boot_mode_to_particles(tmp_path):
+    from dtouch.modes.particles import ParticlesMode
+    host = _host(tmp_path)
+    assert isinstance(host._resolve_boot_mode(), ParticlesMode)
+
+
+def test_unknown_state_mode_resolves_to_particles(tmp_path):
+    from dtouch.modes.particles import ParticlesMode
+    p = _paths(tmp_path)
+    presets.save_state({"mode": "gone-forever"}, path=p["state_path"])
+    host = _host(tmp_path)
+    assert isinstance(host._resolve_boot_mode(), ParticlesMode)
+
+
 # ---------- corrupt presets file: the note reaches the toasts ----------
 
 def test_corrupt_presets_note_reaches_the_toasts(tmp_path):

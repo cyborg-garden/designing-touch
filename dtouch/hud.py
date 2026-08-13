@@ -169,9 +169,10 @@ class Toasts:
         """Center 3.0u flash (mode change, RESET, BLACKOUT...). Replaces the last."""
         self._center = _Toast(text, color, self._now(), CENTER_TOAST_S)
 
-    def hint(self, text, color=DIM):
-        """Small 0.75u hint ('? for keys', 'q again to quit'...)."""
-        self._hints.append(_Toast(text, color, self._now(), HINT_TOAST_S))
+    def hint(self, text, color=DIM, ttl=HINT_TOAST_S):
+        """Small 0.75u hint ('? for keys', 'q again to quit'...). `ttl` covers
+        the long-lived boot hint (DESIGN.md §3: 4 s), default stays 1.5 s."""
+        self._hints.append(_Toast(text, color, self._now(), ttl))
         self._hints = self._hints[-3:]
 
     def active(self):

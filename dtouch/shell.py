@@ -304,6 +304,14 @@ class Host:
         self.fps = 0.0
 
     # ----- mode lifecycle (DESIGN.md §2.1) -----
+    def _resolve_boot_mode(self):
+        """Boot with no explicit mode (DESIGN.md §3: launch goes straight into
+        the last-used mode; first run: Particles). state.json's autosaved mode
+        wins; an absent or unknown mode falls back to particles."""
+        st = _presets.load_state(self.state_path)
+        cls = mode_by_id(st.get("mode")) or mode_by_id("particles")
+        return cls()
+
     def set_mode(self, mode):
         """Idempotent stop of the current mode, then start the new one. A
         start() exception toasts the human summary and reinstates the previous
@@ -683,6 +691,9 @@ class Host:
     # ----- the loop -----
     def run(self):
         rw, rh = self.res
+        if self._boot_mode is None:
+            # no explicit --mode: resume the last-used mode (DESIGN.md §3)
+            self._boot_mode = self._resolve_boot_mode()
         if self._source is None:
             self._source = CameraSource(self._device)
         self.cam_name = getattr(self._source, "name", "source")
@@ -745,6 +756,10 @@ class Host:
             self._wire_keys()
         else:
             _register_quit(self.reg, self.ps, self.hud.toasts)
+
+        # boot HUD hint (DESIGN.md §3): a 4 s fading pointer at the three
+        # doors — menu, panel, key map. ASCII only (Hershey).
+        self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
 
         os.makedirs("out", exist_ok=True)
 
