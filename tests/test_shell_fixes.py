@@ -226,6 +226,19 @@ def test_menu_q_closes_and_arms_quit_confirm(tmp_path):
     assert host.ps.quit is True
 
 
+def test_open_menu_consumes_comma_period_before_param_nudge(tmp_path):
+    """','/'.' inside the open menu move card selection — the menu keeps
+    priority over the param-nudge selection (DESIGN.md §3 vs §6.2)."""
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    sel = host.menu.sel
+    host._route_key(ord(","))
+    assert host.menu.sel != sel              # the menu moved...
+    assert host.ui.nudge_idx == 0            # ...the nudge selection did not
+    assert host.hud.osd._show is None
+
+
 def test_menu_unknown_key_hints(tmp_path):
     host = _booted(tmp_path)
     host._wire_keys()

@@ -235,6 +235,10 @@ class OverlayUI:
         maps the generic _activate routes through."""
         self.spec = spec
         self.sections = {s.title: s.open for s in spec if isinstance(s, Section)}
+        # keyboard param-nudge selection (DESIGN.md §6.2): an index into the
+        # spec-order list of nudgeable widgets (Sliders + Cycles). Rebinding
+        # the spec (mode switch) resets it to the first control.
+        self.nudge_idx = 0
         self._toggles = {}    # hit key -> Toggle
         self._cycles = {}     # hit key -> Cycle
         self._sliders = {}    # attr -> Slider

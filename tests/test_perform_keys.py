@@ -282,6 +282,106 @@ def test_unknown_key_hints_question_mark():
     assert "? for keys" in r.hints()
 
 
+# ---------- param nudging + OSD (DESIGN.md §6.2) ----------
+
+def _nudgeables(ui):
+    from dtouch.panelspec import Cycle, Slider
+    return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+
+
+def test_nudge_selection_walks_the_spec_order_and_wraps():
+    r = Rig()
+    ws = _nudgeables(r.ui)
+    assert r.ui.nudge_idx == 0
+    r.press(".")
+    assert r.ui.nudge_idx == 1
+    assert r.hud.toasts is r.hud.toasts     # osd, not a toast:
+    assert r.hud.osd._show is not None
+    assert r.hud.osd._show[0] == ws[1].label
+    r.press(",")
+    r.press(",")
+    assert r.ui.nudge_idx == len(ws) - 1    # wrapped backwards
+    assert r.hud.osd._show[0] == ws[-1].label
+
+
+def test_nudge_math_1_40th_of_range_x5_and_clamped():
+    r = Rig()
+    ws = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws) if getattr(w, "attr", "") == "fade")
+    r.ui.nudge_idx = i
+    w = ws[i]
+    step = (w.hi - w.lo) / 40.0
+    r.ui.fade = 0.90
+    r.press("=")
+    assert r.ui.fade == pytest.approx(0.90 + step)
+    r.press("_")                            # x5 down
+    assert r.ui.fade == pytest.approx(0.90 + step - 5 * step)
+    r.ui.fade = w.hi
+    r.press("+")
+    assert r.ui.fade == w.hi                # clamped at the top
+    r.ui.fade = w.lo
+    r.press("-")
+    assert r.ui.fade == w.lo                # clamped at the bottom
+
+
+def test_nudge_rotates_a_cycle_by_one_option_even_x5():
+    r = Rig()
+    ws = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws) if getattr(w, "attr", "") == "matte_idx")
+    r.ui.nudge_idx = i
+    r.ui.matte_idx = 0
+    r.press("=")
+    assert r.ui.matte_idx == 1
+    r.press("+")                            # cycles rotate by ONE, x5 or not
+    assert r.ui.matte_idx == 2
+    r.press("-")
+    assert r.ui.matte_idx == 1
+    r.ui.matte_idx = 0
+    r.press("_")
+    assert r.ui.matte_idx == len(MATTES) - 1   # wraps backwards
+    # cycle OSD shows the option name, no bar
+    name, text, fill, _ = r.hud.osd._show
+    assert text == MATTES[r.ui.matte_idx] and fill is None
+
+
+def test_nudge_osd_shows_name_value_and_bar_for_sliders():
+    r = Rig()
+    ws = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws) if getattr(w, "attr", "") == "fade")
+    r.ui.nudge_idx = i
+    r.press("=")
+    name, text, fill, _ = r.hud.osd._show
+    assert name == "Trails"
+    assert text == f"{r.ui.fade:.2f}"
+    assert fill is not None and 0.0 <= fill <= 1.0
+
+
+def test_nudging_works_in_hidden_and_the_osd_draws_there():
+    r = Rig()
+    r.press(9); r.press(27); r.press(27)     # to PANEL then back to HIDDEN
+    assert r.overlay is OverlayState.HIDDEN
+    before = r.ui.matte_idx
+    r.press("=")
+    assert r.ui.matte_idx == before + 1      # the key worked in HIDDEN
+    img = np.zeros((360, 640, 3), np.uint8)
+    r.hud.draw(img, OverlayState.HIDDEN)
+    assert img.any(), "the OSD must draw in HIDDEN too"
+    r.clock.t += 10.0                        # fades out -> provably clean again
+    img2 = np.zeros((360, 640, 3), np.uint8)
+    r.hud.draw(img2, OverlayState.HIDDEN)
+    assert not img2.any()
+
+
+def test_nudge_selection_resets_on_spec_rebind():
+    """Mode switches rebind the spec (Host.set_mode -> ui.set_spec); the
+    nudge selection must reset sanely with it."""
+    from dtouch.overlay_ui import build_particles_spec
+    r = Rig()
+    r.ui.nudge_idx = 7
+    r.ui.set_spec(build_particles_spec(PRESETS, list(PALETTES), MATTES))
+    assert r.ui.nudge_idx == 0
+
+
 # ---------- rename typing still consumes everything ----------
 
 def test_no_global_keys_fire_while_renaming():

@@ -34,7 +34,7 @@ from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
-from .panelspec import apply_look, capture_look
+from .panelspec import Cycle, Slider, apply_look, capture_look
 from . import presets as _presets
 
 
@@ -159,6 +159,56 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             toasts.hint("save is a panel action - TAB to open the panel")
             return
         ui.pending_save = True
+
+    # ----- param nudging without the panel (DESIGN.md §6.2) -----
+    # ','/'.' select prev/next nudgeable control (Sliders + Cycles from the
+    # composed spec, spec order); '-'/'=' nudge by 1/40 of range ('_'/'+' =
+    # x5; cycles rotate by one option). The OSD (name + value + bar) is the
+    # feedback, and it works in every overlay state. Inside the open menu
+    # ','/'.' move card selection instead — the menu consumes keys before the
+    # registry (Host._route_key), so priority is already right.
+    def _nudgeables():
+        return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+
+    def _osd_show(w):
+        val = getattr(ui, w.attr)
+        if isinstance(w, Cycle):
+            opts = list(w.options)
+            hud.osd.show(w.label, str(opts[int(val) % len(opts)]))
+        else:
+            hud.osd.show(w.label, float(val), w.lo, w.hi,
+                         fmt="{:%s}" % w.fmt)
+
+    def nudge_select(d):
+        ws = _nudgeables()
+        if not ws:
+            return
+        ui.nudge_idx = (ui.nudge_idx + d) % len(ws)
+        _osd_show(ws[ui.nudge_idx])
+
+    def nudge(d, big=False):
+        ws = _nudgeables()
+        if not ws:
+            return
+        ui.nudge_idx %= len(ws)
+        w = ws[ui.nudge_idx]
+        if isinstance(w, Cycle):
+            opts = list(w.options)
+            setattr(ui, w.attr, (int(getattr(ui, w.attr)) + d) % len(opts))
+        else:
+            step = (w.hi - w.lo) / 40.0 * (5.0 if big else 1.0)
+            val = min(max(float(getattr(ui, w.attr)) + d * step, w.lo), w.hi)
+            setattr(ui, w.attr, val)
+        _osd_show(w)
+
+    reg.add("param.prev", "Select prev param", ",", lambda: nudge_select(-1))
+    reg.add("param.next", "Select next param", ".", lambda: nudge_select(+1))
+    reg.add("param.down", "Nudge param down", "-", lambda: nudge(-1))
+    reg.add("param.up", "Nudge param up", "=", lambda: nudge(+1))
+    reg.add("param.down.big", "Nudge param down x5", "_",
+            lambda: nudge(-1, big=True))
+    reg.add("param.up.big", "Nudge param up x5", "+",
+            lambda: nudge(+1, big=True))
 
     reg.add("output.blackout", "Blackout", " ", blackout)
     reg.add("preset.panic", "Panic reset", "0", panic)

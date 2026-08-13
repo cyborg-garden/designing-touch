@@ -260,8 +260,12 @@ class Hud:
         if blackout:
             draw_corner_tick(img, 2.0 * uu)   # all states, including HIDDEN
         if state is OverlayState.HIDDEN:
-            # Provably clean: only already-ticking toasts, then pixels untouched.
+            # Provably clean: only already-ticking toasts and the transient
+            # param OSD (both fade out), then pixels untouched. The OSD draws
+            # here too because param nudging works in every overlay state
+            # (DESIGN.md §6.2).
             self.toasts.draw(img)
+            self.osd.draw(img)
             return img
         ix, iy = int(w * TITLE_SAFE), int(h * TITLE_SAFE)
         px = int(0.75 * uu)
