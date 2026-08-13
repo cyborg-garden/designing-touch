@@ -443,7 +443,19 @@ class OverlayUI:
     def on_mouse(self, event, x, y, flags, param=None):
         self.mouse = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
+            # Fixed chrome first: the collapse button floats ABOVE scrolled
+            # content, so a row that scrolled underneath it (including a
+            # hovered preset's delete button, which front-inserts its hit)
+            # must never steal its click — that click-theft could arm and
+            # confirm a preset delete in two presses (data loss).
             for rect, kind, payload in self._hot:
+                if kind == "collapse" and _in(rect, (x, y)):
+                    self._flash_rect, self._flash = rect, 4
+                    self._activate(kind, payload, x)
+                    return
+            for rect, kind, payload in self._hot:
+                if kind == "collapse":
+                    continue
                 if _in(rect, (x, y)):
                     self._flash_rect, self._flash = rect, 4
                     self._activate(kind, payload, x)

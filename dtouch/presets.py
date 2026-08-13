@@ -37,9 +37,12 @@ the diffable presets file doesn't churn on every mode switch).
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
+import tempfile
+import time
 from typing import Dict, Optional
 
 # The v1 whitelist of live-applicable keys — retained ONLY for migrating v1
@@ -75,19 +78,77 @@ BUILTIN: Dict[str, dict] = {
 
 # ----- raw file I/O -----
 
+# Warnings queued for the shell to surface as toasts (silence-on-data-loss is
+# a bug — DESIGN.md §9: presets are the one user-data-loss surface).
+_notes: list = []
+
+
+def take_notes() -> list:
+    """Drain the queued store warnings (the shell toasts them if it can)."""
+    out = list(_notes)
+    _notes.clear()
+    return out
+
+
+def _corrupt_backup(path: str):
+    """An unreadable file is copied to {base}.corrupt.<ts>.bak.json before the
+    store proceeds empty — the next write would otherwise overwrite the user's
+    looks with no recovery path. Backed up once per distinct corruption (a
+    re-read of the same bad bytes never stacks duplicates). Returns the
+    warning note, or None when this corruption is already backed up."""
+    try:
+        with open(path, "rb") as f:
+            bad = f.read()
+    except OSError:
+        return None
+    base, ext = os.path.splitext(path)
+    ext = ext or ".json"
+    for bak in glob.glob(f"{glob.escape(base)}.corrupt.*.bak{ext}"):
+        try:
+            with open(bak, "rb") as f:
+                if f.read() == bad:
+                    return None
+        except OSError:
+            pass
+    bak = f"{base}.corrupt.{time.strftime('%Y%m%d_%H%M%S')}.bak{ext}"
+    try:
+        shutil.copy2(path, bak)
+    except OSError:
+        return None
+    return (f"{os.path.basename(path)} unreadable - "
+            f"backup saved to {os.path.basename(bak)}")
+
+
 def _read(path: str) -> dict:
     if os.path.exists(path):
         try:
             with open(path) as f:
                 return json.load(f)
         except Exception:
-            pass
+            note = _corrupt_backup(path)
+            if note:
+                print(note)
+                _notes.append(note)
     return {}
 
 
 def _write(data: dict, path: str):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomic write: temp file in the same directory, then os.replace — a
+    crash mid-write leaves either the old or the new content, never a
+    truncated file."""
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".",
+                               suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ----- v1 → v2 migration -----

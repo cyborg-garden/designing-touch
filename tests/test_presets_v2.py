@@ -115,6 +115,56 @@ def test_modes_are_isolated(tmp_path):
     assert "girl" not in presets.load(path, mode="particles")
 
 
+# ---------- corrupt file: backup + note, atomic writes (DESIGN.md §9) ----------
+
+def test_corrupt_file_backed_up_with_note_and_survives_saves(tmp_path):
+    path = str(tmp_path / "presets.json")
+    garbage = "{not json"
+    with open(path, "w") as f:
+        f.write(garbage)
+    loaded = presets.load(path)                 # built-ins still served
+    assert "abstract" in loaded
+    baks = list(tmp_path.glob("presets.corrupt.*.bak.json"))
+    assert len(baks) == 1
+    assert baks[0].read_text() == garbage       # original content preserved
+    notes = presets.take_notes()
+    assert notes and "backup" in notes[0]
+    # a subsequent save proceeds with the empty store, never touches the backup
+    presets.save("mine", CFG, path=path)
+    assert baks[0].read_text() == garbage
+    assert presets.load(path)["mine"] == CFG
+    assert presets.take_notes() == []           # healthy file: no further notes
+
+
+def test_corrupt_backup_not_duplicated_on_repeated_reads(tmp_path):
+    path = str(tmp_path / "presets.json")
+    with open(path, "w") as f:
+        f.write("[broken")
+    presets.load(path)
+    presets.load(path)
+    presets.user_names(path)
+    assert len(list(tmp_path.glob("presets.corrupt.*.bak.json"))) == 1
+    presets.take_notes()
+
+
+def test_write_is_atomic_old_content_survives_replace_failure(tmp_path,
+                                                              monkeypatch):
+    path = str(tmp_path / "p.json")
+    presets.save("mine", CFG, path=path)
+    with open(path) as f:
+        old = f.read()
+
+    def boom(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(presets.os, "replace", boom)
+    with pytest.raises(OSError):
+        presets.save("other", CFG, path=path)
+    monkeypatch.undo()
+    with open(path) as f:
+        assert f.read() == old                  # old content intact, never truncated
+    assert not list(tmp_path.glob("*.tmp"))     # temp file cleaned up
+
+
 # ---------- bank + setlist ----------
 
 def test_bank_absent_vs_explicit_empty(tmp_path):

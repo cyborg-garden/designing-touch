@@ -411,8 +411,13 @@ class Host:
 
     # ----- preset plumbing (per-mode: looks, bank, setlist — DESIGN.md §7) -----
     def _load_presets(self):
-        return _presets.load(self.presets_path, mode=self.mode.id,
-                             builtin=getattr(self.mode, "BUILTIN", {}))
+        loaded = _presets.load(self.presets_path, mode=self.mode.id,
+                               builtin=getattr(self.mode, "BUILTIN", {}))
+        for note in _presets.take_notes():
+            # store warnings (e.g. corrupt-file backup) surface as toasts —
+            # silence on a data-loss event is a bug (DESIGN.md §9)
+            self.hud.toasts.hint(note, AMBER)
+        return loaded
 
     def _reload_presets(self):
         self.all_presets = self._load_presets()
