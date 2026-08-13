@@ -53,6 +53,7 @@ class ParticlesMode:
     title = "Particles"
     accent = ACC                 # keeps the shipped ACC green (DESIGN.md §5 continuity)
     accepts_still = False
+    blurb = "webcam-matte\ninstrument"   # home-menu card copy (DESIGN.md §3)
 
     # Built-in looks stay in code, per mode (DESIGN.md §7) — immune to
     # rename/delete, bankable. Today's dict, owned here.

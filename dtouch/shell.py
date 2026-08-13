@@ -29,6 +29,8 @@ from .circuit_bent import CircuitBent
 from .commands import Command, CommandRegistry
 from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay, draw_help,
                   esc_overlay)
+from .menu import Menu, draw_menu, render_boot_card
+from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
 from .panelspec import apply_look, capture_look
 from . import presets as _presets
@@ -214,6 +216,25 @@ class CameraSource:
         self.cap.release()
 
 
+class StillSource:
+    """A loaded still image as a frame source (DESIGN.md §2.1: the shell owns
+    still sources; modes never special-case stills). read() returns the same
+    frame every tick."""
+
+    def __init__(self, path):
+        frame = cv2.imread(path, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise FileNotFoundError(f"could not read still image: {path}")
+        self.frame = frame
+        self.name = os.path.basename(path)
+
+    def read(self):
+        return True, self.frame
+
+    def release(self):
+        pass
+
+
 class Host:
     """The shell. Construct with a mode (and optionally an injected frame
     source), then ``run()`` — returns ``(frame_count, last_rgb_frame)`` exactly
@@ -223,12 +244,14 @@ class Host:
 
     def __init__(self, mode, source=None, device="builtin", res=(1920, 1080),
                  mirror=True, seed=1, preset="abstract", audio=False,
-                 panel=True, show=True, max_frames=None,
+                 panel=True, show=True, max_frames=None, still=None,
                  presets_path="presets.json", state_path="state.json"):
         self.mode = None
         self._boot_mode = mode
         self._source = source
         self._device = device
+        self._still_path = still if isinstance(still, str) else None
+        self.still = still if not isinstance(still, str) else None
         self.res = tuple(res)
         self.mirror = mirror
         self.seed = seed
@@ -245,6 +268,10 @@ class Host:
         self.overlay = OverlayState.HUD   # boot state: HUD (DESIGN.md §6.1)
         self.ps = PerformState()
         self.reg = CommandRegistry()
+        self.menu = Menu()                # home menu — a shell overlay state (§3)
+        self.pending_mode = None          # mode id posted by a key/menu commit
+        self._mode_instances = {}         # id -> constructed Mode (reused on switch)
+        self.help_rows = []
         self.cb = None                    # SIGNAL rack post-FX, built on first use
         self.mic = None
         self.writer = None
@@ -309,6 +336,78 @@ class Host:
             rack.widgets = [w for w in rack.widgets
                             if getattr(w, "store_key", None) not in claims]
         return mode.panel_spec() + [rack] + build_global_rows()
+
+    # ----- mode switching (DESIGN.md §3 / §8 step 8) -----
+    def request_mode(self, mode_id):
+        """Post a switch — the loop performs it at the top of the next frame
+        (boot card, stop → start, toast). Same-mode requests are a hint."""
+        if self.mode is not None and mode_id == self.mode.id:
+            self.hud.toasts.hint(f"already in {self.mode.title}")
+            return
+        self.pending_mode = mode_id
+
+    def _switch_mode(self, mode_id):
+        """One live mode switch: static boot card (shown + recorded — the
+        recorder captures the card, not a gray flash), old.stop() →
+        new.start(host) via set_mode (which toasts + reinstates the previous
+        mode on failure), then the mode-title center toast in the new mode's
+        accent. Overlay state, blackout, recording, and the audio toggle are
+        host/UI state and survive untouched."""
+        cls = mode_by_id(mode_id)
+        if cls is None:
+            self.hud.toasts.hint(f"unknown mode {mode_id}")
+            return False
+        new = self._mode_instances.get(mode_id) or cls()
+        card = render_boot_card(self.res, new.title, new.accent)
+        if self.writer is not None:
+            self.writer.append_data(cv2.cvtColor(card, cv2.COLOR_BGR2RGB))
+        if self.show:
+            cv2.imshow(self.WIN, card)
+            cv2.waitKey(1)
+        if not self.set_mode(new):
+            return False                       # toasted + previous reinstated
+        self._mode_instances[mode_id] = new
+        # land on the mode's known-good look (predictable from 2 m away)
+        safe = new.safe_look()
+        if isinstance(safe, str) and safe in self.ui.presets:
+            self.ui.preset_idx = self.ui.presets.index(safe)
+            self.ui.pending_preset = safe
+        if self.show:
+            self._wire_keys()                  # mode-local commands changed
+        self.hud.toasts.flash(new.title, new.accent)
+        return True
+
+    def _register_shell_commands(self):
+        """Menu + direct mode-switch keys (DESIGN.md §6.2: `m` opens the menu
+        from any overlay state; each mode's letter switches directly)."""
+        self.reg.add("menu.open", "Menu", "m",
+                     lambda: self.menu.toggle(self.mode.id if self.mode else None))
+        for cls in REGISTRY:
+            self.reg.add(f"mode.{cls.id}", f"Switch to {cls.title}", cls.id[:1],
+                         lambda mid=cls.id: self.request_mode(mid))
+
+    def _wire_keys(self):
+        """(Re)build the command registry for the active mode — called at boot
+        and after every switch (mode-local commands differ per mode)."""
+        self.reg = CommandRegistry()
+        _wire_perform_keys(self.reg, self.ui, self.hud, self.ps,
+                           lambda name: setattr(self.ui, "pending_preset", name),
+                           mode_commands=self.mode.commands())
+        self._register_shell_commands()
+        self.help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
+                                             ("Esc", "Step toward hidden")]
+
+    def _on_mouse(self, event, x, y, flags, param=None):
+        """Window mouse routing: the open menu eats clicks (a card commits a
+        switch); otherwise the panel gets the event."""
+        if self.menu.open:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                mode_id = self.menu.click((x, y))
+                if mode_id:
+                    self.request_mode(mode_id)
+            return
+        if self.ui is not None:
+            self.ui.on_mouse(event, x, y, flags, param)
 
     # ----- preset plumbing (per-mode: looks, bank, setlist — DESIGN.md §7) -----
     def _load_presets(self):
@@ -421,6 +520,17 @@ class Host:
                 ui.preset_idx = names.index(sel) if sel in names else 0
                 print("deleted preset", ui.pending_delete)
             ui.pending_delete = None
+        if getattr(ui, "pending_still_path", None):
+            # still-image mailbox (v1: filled by the CLI --still flag or a
+            # future drop event — there is no file dialog)
+            path = ui.pending_still_path
+            frame = cv2.imread(path, cv2.IMREAD_COLOR)
+            if frame is None:
+                self.hud.toasts.hint(f"could not read still: {path[-40:]}")
+            else:
+                self.still = frame
+                self.hud.toasts.hint(f"still loaded - {os.path.basename(path)}")
+            ui.pending_still_path = None
         if ui.pending_rename:
             old, new = ui.pending_rename
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
@@ -463,10 +573,15 @@ class Host:
         if self._source is None:
             self._source = CameraSource(self._device)
         self.cam_name = getattr(self._source, "name", "source")
+        if self._still_path is not None and self.still is None:
+            self.still = cv2.imread(self._still_path, cv2.IMREAD_COLOR)
+            if self.still is None:
+                print("could not read still:", self._still_path)
 
         if not self.set_mode(self._boot_mode):
             raise RuntimeError("boot mode failed to start")
         mode = self.mode
+        self._mode_instances[mode.id] = mode
         self.all_presets = self._load_presets()
         preset = self._boot_preset
         if preset is None:
@@ -511,16 +626,12 @@ class Host:
             # 'output' resolution; the window resizes to match natively.
             cv2.namedWindow(self.WIN, cv2.WINDOW_AUTOSIZE)
             if self.panel:
-                cv2.setMouseCallback(self.WIN, ui.on_mouse)
+                cv2.setMouseCallback(self.WIN, self._on_mouse)
             # Key routing goes through the command registry (DESIGN.md
             # principle 7) — the full perform layer, panel shown or not.
-            _wire_perform_keys(self.reg, ui, self.hud, self.ps,
-                               lambda name: setattr(ui, "pending_preset", name),
-                               mode_commands=mode.commands())
+            self._wire_keys()
         else:
             _register_quit(self.reg, self.ps, self.hud.toasts)
-        help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
-                                        ("Esc", "Step toward hidden")]
 
         os.makedirs("out", exist_ok=True)
 
@@ -532,8 +643,24 @@ class Host:
         out = None
         try:
             while True:
+                if self.pending_mode is not None:
+                    mode_id, self.pending_mode = self.pending_mode, None
+                    self._switch_mode(mode_id)
+                    mode = self.mode
+
                 ok, frame = self._source.read()
-                if not ok:
+                # Still input (DESIGN.md §2.2: modes never special-case stills
+                # — the shell substitutes the loaded still for the camera when
+                # an accepts_still mode's input cycle selects it)
+                use_still = (getattr(mode, "accepts_still", False)
+                             and getattr(ui, "input_idx", 0) == 1)
+                if use_still and self.still is None:
+                    ui.input_idx = 0        # snap back; v1 has no file dialog
+                    self.hud.toasts.hint("no still loaded - launch with --still PATH")
+                    use_still = False
+                if use_still:
+                    frame, camera_lost = self.still, False
+                elif not ok:
                     # Camera loss: hold the last good frame and say so on the HUD
                     # (DESIGN.md §6.4); recovery is automatic when reads resume.
                     # Modes never see None (DESIGN.md §2.2).
@@ -545,7 +672,8 @@ class Host:
                         break
                 else:
                     last_frame, camera_lost = frame, False
-                black_streak = black_streak + 1 if float(frame.mean()) < 3.0 else 0
+                black_streak = (0 if use_still else
+                                black_streak + 1 if float(frame.mean()) < 3.0 else 0)
 
                 self._pump_preset_mailboxes()
                 self._sync_host_state()
@@ -575,7 +703,11 @@ class Host:
                     cb.scan_drift = ui.drift
                     cb.bit_crush = int(ui.crush)
                     cb.scanlines = ui.scanlines
-                    cb.dither_mode = None if ui.dither_name == "off" else ui.dither_name
+                    # suppression rule (DESIGN.md §2.4): a mode that claims
+                    # "dither" owns dithering — the rack runs minus its dither
+                    claimed = frozenset(getattr(mode, "claims", ()))
+                    cb.dither_mode = (None if "dither" in claimed
+                                      or ui.dither_name == "off" else ui.dither_name)
                     out = cb.process(out)
                 if self.ps.blackout:
                     # Hard black AFTER mode render/composite/glitch, BEFORE the
@@ -592,29 +724,49 @@ class Host:
                 self.fps = fps
 
                 if self.show:
-                    # HUD/panel draw AFTER the recorder write above — recordings
-                    # never contain HUD or panel (the shipped invariant, kept).
+                    # HUD/panel/menu draw AFTER the recorder write above —
+                    # recordings never contain HUD, panel, or menu (the shipped
+                    # invariant, kept; the boot card is the one deliberate
+                    # recorded UI frame, DESIGN.md §3).
                     rw, rh = self.res
                     status = mode.status_line(self.cam_name)
                     dbg = f"{fps:4.1f}fps  {1000.0 / fps if fps > 0 else 0.0:5.1f}ms  {rw}x{rh}"
-                    if self.panel and self.overlay is OverlayState.PANEL:
-                        ui.draw(bgr, {"status": ""})
+                    if self.menu.open:
+                        # home menu (DESIGN.md §3): live camera through 1-bit
+                        # blue noise + 65% scrim + mode cards; the running mode
+                        # keeps stepping untouched behind it
+                        ui._hot = []
+                        self.menu.rects = draw_menu(bgr, frame, self.menu.cards,
+                                                    self.menu.sel)
+                        # HIDDEN-state HUD = toasts + blackout tick only
+                        self.hud.draw(bgr, OverlayState.HIDDEN,
+                                      blackout=self.ps.blackout)
                     else:
-                        ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
-                    self.hud.draw(bgr, self.overlay, status=status, debug_status=dbg,
-                                  recording=(self.writer is not None),
-                                  blackout=self.ps.blackout,
-                                  camera_lost=(camera_lost or black_streak > 15))
+                        if self.panel and self.overlay is OverlayState.PANEL:
+                            ui.draw(bgr, {"status": ""})
+                        else:
+                            ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
+                        self.hud.draw(bgr, self.overlay, status=status,
+                                      debug_status=dbg,
+                                      recording=(self.writer is not None),
+                                      blackout=self.ps.blackout,
+                                      camera_lost=(camera_lost or black_streak > 15))
                     if self.ps.help_open:
-                        draw_help(bgr, help_rows)   # works in every overlay state
+                        draw_help(bgr, self.help_rows)   # works in every overlay state
                     cv2.imshow(self.WIN, bgr)
                     key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
-                    # rename-typing consumes every key; Esc only cancels the rename —
-                    # while renaming, no global keys fire (DESIGN.md §6.2)
-                    consumed = ui.on_key(key) if key != 255 else False
-                    if not consumed and key != 255:
-                        self.overlay = _perform_key(key, self.overlay, self.ps,
-                                                    self.reg, self.hud)
+                    # the open menu consumes every key (DESIGN.md §3); then
+                    # rename-typing consumes every key; Esc only cancels the
+                    # rename — while renaming, no global keys fire (§6.2)
+                    if key != 255 and self.menu.open:
+                        action, mode_id = self.menu.key(key)
+                        if action == "switch":
+                            self.request_mode(mode_id)
+                    elif key != 255:
+                        consumed = ui.on_key(key)
+                        if not consumed:
+                            self.overlay = _perform_key(key, self.overlay, self.ps,
+                                                        self.reg, self.hud)
                     if self.ps.quit or ui.quit:
                         break
                     # quit only when the window is actually destroyed (red X) ->
