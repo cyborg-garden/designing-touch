@@ -31,3 +31,6 @@ dev = ["pytest>=8.0"]
 
 [tool.setuptools]
 packages = ["dtouch"]
+
+[tool.setuptools.package-data]
+dtouch = ["assets/*.npy"]

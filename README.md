@@ -48,7 +48,8 @@ The panel is grouped into **collapsible sections** — click a header to open it
   by the camera. Costs ~4 ms at 200k particles — the neighbourhood is approximated on a spatial
   grid, because true all-pairs boids at this particle count is ~4x10^10 pair terms.
 - **Signal** — **Glitch**: the circuit-bent chain (chroma bleed, scan drift and sync tears,
-  glitch blocks, bit-crush, CRT scan lines) plus Bayer / Floyd-Steinberg **dithering**, applied
+  glitch blocks, bit-crush, CRT scan lines) plus Bayer / blue-noise / Floyd-Steinberg /
+  Riemersma **dithering** (sRGB gamma-correct — quantised in linear light), applied
   to the finished frame. Costs ~6 ms at 720p, ~14 ms at 1080p. The control panel is drawn
   *after* it, so the panel never glitches into unreadability, and recordings capture what you
   see. Start it from the CLI with `--glitch` (or `--flock`).

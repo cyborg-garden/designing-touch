@@ -152,6 +152,23 @@ class TestDithering:
         assert out.shape == frame.shape
         assert int(out.min()) >= 0 and int(out.max()) <= 255
 
+    def test_blue_noise_dither_mode(self):
+        cb = CircuitBent(seed=0, chroma_shift=0, scan_drift=0, glitch_prob=0,
+                         bit_crush=0, scanlines=False, dither_mode="blue",
+                         dither_bits=2, dither_size=None)
+        out = cb.process(_grey_ramp_frame())
+        unique = len(np.unique(out[:, :, 0]))
+        assert unique <= 5   # 2-bit = max 4 levels (plus tolerance)
+
+    def test_riemersma_dither_mode(self):
+        cb = CircuitBent(seed=0, chroma_shift=0, scan_drift=0, glitch_prob=0,
+                         bit_crush=0, scanlines=False, dither_mode="riemersma",
+                         dither_bits=2, dither_size=None)
+        frame = _grey_ramp_frame(h=16, w=32)
+        out = cb.process(frame)
+        assert out.shape == frame.shape
+        assert int(out.min()) >= 0 and int(out.max()) <= 255
+
 
 class TestMultiFrame:
     def test_evolves_across_frames(self):

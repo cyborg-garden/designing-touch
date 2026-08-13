@@ -29,7 +29,7 @@ BASE_H = 1080   # resolution the layout literals are authored against
 
 # Post-FX dither modes, in cycle order. "off" is a deliberate third choice rather than a
 # disabled state — the glitch chain is still worth having without the dither.
-DITHERS = ["bayer", "fs", "off"]
+DITHERS = ["bayer", "blue", "fs", "riemersma", "off"]
 
 
 def _in(rect, p):

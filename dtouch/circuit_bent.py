@@ -23,7 +23,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from .dither import bayer_dither, floyd_steinberg
+from .dither import bayer_dither, blue_noise_dither, floyd_steinberg, riemersma_dither
 
 
 class CircuitBent:
@@ -54,8 +54,10 @@ class CircuitBent:
     scanline_strength : float
         Darkening amount for scan lines (0 = invisible, 1 = fully black rows).
     dither_mode : str or None
-        ``'bayer'`` = fast ordered dithering, ``'fs'`` = Floyd-Steinberg,
-        ``None`` = skip dithering.
+        ``'bayer'`` = fast ordered dithering, ``'blue'`` = blue-noise ordered
+        dithering, ``'fs'`` = Floyd-Steinberg, ``'riemersma'`` =
+        Hilbert-curve error diffusion, ``None`` = skip dithering. All modes
+        dither in linear light (sRGB gamma-correct) by default.
     dither_bits : int
         Bit depth used for dithering.
     dither_size : int or None
@@ -252,6 +254,10 @@ class CircuitBent:
     def _dither_array(self, img: np.ndarray) -> np.ndarray:
         if self.dither_mode == "bayer":
             return bayer_dither(img, bits=self.dither_bits)
+        if self.dither_mode == "blue":
+            return blue_noise_dither(img, bits=self.dither_bits)
+        if self.dither_mode == "riemersma":
+            return riemersma_dither(img, bits=self.dither_bits)
         if self.dither_mode == "fs":
             result = np.empty_like(img)
             for c in range(img.shape[2]):
