@@ -200,6 +200,7 @@ class OverlayUI:
         # setlist means "all looks, load order".
         self.bank = {}               # {"1": name, ...} — digits 1-9 recall these
         self.setlist = []            # [ / ] walk this order
+        self.pending_slot = None     # preset name whose slot badge was clicked
         self.pending_commands = []   # Action commands with no dedicated mailbox
         self.user_presets = set()    # names that can be renamed/deleted (saved looks)
         self.pending_delete = None   # name confirmed for deletion (live loop applies)
@@ -397,8 +398,11 @@ class OverlayUI:
         raise TypeError(f"unknown panel-spec widget {wdg!r}")
 
     def _draw_preset_list(self, frame, x, y, cw, px):
-        """TEMPLATES rows (rename box, hover manage buttons) + Save current look."""
+        """TEMPLATES rows (slot badges, rename box, hover manage buttons) +
+        Save current look. Badge hits go to the FRONT of `hot` (like the manage
+        buttons) so they win over the full-row rect they sit on."""
         g = self._gui
+        slots = {n: s for s, n in (self.bank or {}).items()}
         for i, name in enumerate(self.presets):
             if name == self.renaming:
                 g.rename_box(frame, self.rename_buf, self._blink, x, y, cw, px)
@@ -406,6 +410,8 @@ class OverlayUI:
                 continue
             r = g.row(frame, name, "preset", x, y, cw,
                       active=(i == self.preset_idx), payload=i)
+            br = g.slot_badge(frame, slots.get(name), x, y, cw)
+            self._hot.insert(0, (br, "slot", name))
             if name in self.user_presets and (_in(r, self.mouse) or name == self._del_armed):
                 g.manage_buttons(frame, name, x, y, cw, self._del_armed == name)
             y += g.S(28)
@@ -466,6 +472,9 @@ class OverlayUI:
         if kind == "ren":
             self.renaming = payload
             self.rename_buf = payload    # prefill with the current name
+            return
+        if kind == "slot":
+            self.pending_slot = payload  # the shell assigns/clears + persists
             return
         if kind == "collapse":
             self.open = not self.open

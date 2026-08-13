@@ -162,6 +162,20 @@ class Gui:
         self.hot.append((rb, "cycle", (key, +1)))
         return ry + self.S(32)
 
+    def slot_badge(self, img, slot, x, y, cw):
+        """Bank-slot badge on a preset row (DESIGN.md §4.1 / §6.3): an assigned
+        row shows its digit in the accent; an unassigned row shows an empty
+        well. Clicking assigns the next free slot (the shell owns the policy).
+        Sits left of the hover manage buttons — no overlap. Returns its rect;
+        the caller appends the hit with the row's name."""
+        r = (x + cw - self.S(78), y + self.S(2), x + cw - self.S(56), y + self.S(22))
+        if slot:
+            self.box(img, r, DARK, border=ACC)
+            self.text(img, str(slot), r[0] + self.S(7), r[3] - self.S(6), ACC, 0.42)
+        else:
+            self.box(img, r, HOVER if in_rect(r, self.mouse) else BTN)
+        return r
+
     def manage_buttons(self, img, name, x, y, cw, armed):
         """Hover-revealed rename (~) and delete (x) buttons on a saved look's row.
         Their hit rects go to the FRONT of `hot` so they win over the full-row rect.

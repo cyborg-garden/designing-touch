@@ -350,11 +350,36 @@ class Host:
             self._autosave_state()
         ui.pending_preset = None
 
+    def _assign_slot(self, name):
+        """Slot-badge click (DESIGN.md §6.3): an unbanked look takes the next
+        free slot (1-9); clicking an assigned look's badge clears its slot
+        (the cheap, reversible correction path — §6.3 names only assignment,
+        clearing is the resolved counterpart). Persists to presets.json (the
+        bank's authority) and snapshots state.json."""
+        ui, toasts = self.ui, self.hud.toasts
+        slot = next((s for s, n in ui.bank.items() if n == name), None)
+        if slot is not None:
+            del ui.bank[slot]
+            toasts.hint(f"slot {slot} cleared - {name}")
+        else:
+            free = next((str(i) for i in range(1, 10) if str(i) not in ui.bank),
+                        None)
+            if free is None:
+                toasts.hint("bank full (1-9)")
+                return
+            ui.bank[free] = name
+            toasts.flash(f"{free} - {name}")
+        _presets.set_bank(ui.bank, path=self.presets_path, mode=self.mode.id)
+        self._autosave_state()
+
     def _pump_preset_mailboxes(self):
         """The pending_* mailboxes a panel click posts to (shipped semantics)."""
         ui = self.ui
         if ui.pending_preset:
             self._apply_pending_preset()
+        if ui.pending_slot:
+            self._assign_slot(ui.pending_slot)
+            ui.pending_slot = None
         if ui.pending_save:
             name = "mine_%s" % time.strftime("%H%M%S")
             _presets.save(name, self._capture_cfg(), path=self.presets_path,

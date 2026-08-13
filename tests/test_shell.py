@@ -214,6 +214,26 @@ def test_no_state_file_boots_the_safe_look(tmp_path):
     assert host.ui.preset_name == "abstract"
 
 
+def test_slot_badge_click_assigns_next_free_then_clears(tmp_path):
+    """DESIGN.md §6.3: clicking a preset row's slot badge assigns the next
+    free bank number; clicking an assigned badge clears it. Both persist."""
+    p = _paths(tmp_path)
+    presets.set_bank({"1": "abstract"}, path=p["presets_path"])
+    host = _host(tmp_path, max_frames=1)
+    host.run()
+
+    host.ui.pending_slot = "embers"
+    host._pump_preset_mailboxes()
+    assert host.ui.bank == {"1": "abstract", "2": "embers"}
+    assert presets.bank(p["presets_path"]) == {"1": "abstract", "2": "embers"}
+    assert host.ui.pending_slot is None
+
+    host.ui.pending_slot = "embers"                 # assigned → clears
+    host._pump_preset_mailboxes()
+    assert host.ui.bank == {"1": "abstract"}
+    assert presets.bank(p["presets_path"]) == {"1": "abstract"}
+
+
 # ---------- GL lifecycle soak (DESIGN.md §8 step 6 / §9) ----------
 
 def test_gl_soak_start_stop_25_cycles(tmp_path):

@@ -157,3 +157,35 @@ def test_rename_escape_cancels():
 def test_keys_ignored_when_not_typing():
     ui = _ui()
     assert ui.on_key(ord("q")) is False
+
+
+# ---------- slot badges (DESIGN.md §4.1 / §6.3, step 7) ----------
+
+def test_every_preset_row_has_a_slot_badge_hit():
+    ui = _ui()
+    names = [p for _, k, p in ui._hot if k == "slot"]
+    assert names == list(reversed(ui.presets))      # front-inserted, all rows
+
+
+def test_clicking_a_badge_posts_pending_slot():
+    ui = _ui()
+    _click(ui, "slot", "mine")
+    assert ui.pending_slot == "mine"
+
+
+def test_badge_wins_over_the_row_it_sits_on():
+    """The badge rect overlaps the full-row preset hit; the badge must win."""
+    ui = _ui()
+    rect = next(r for r, k, p in ui._hot if k == "slot" and p == "abstract")
+    before = ui.pending_preset
+    ui.on_mouse(cv2.EVENT_LBUTTONDOWN, (rect[0] + rect[2]) // 2,
+                (rect[1] + rect[3]) // 2, 0)
+    assert ui.pending_slot == "abstract"
+    assert ui.pending_preset == before              # the row click did NOT fire
+
+
+def test_assigned_badge_shows_and_survives_redraw():
+    ui = _ui()
+    ui.bank = {"3": "mine"}
+    ui.draw(np.zeros((1080, 1920, 3), np.uint8), {"status": ""})
+    assert any(k == "slot" for _, k, _ in ui._hot)
