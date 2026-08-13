@@ -9,6 +9,7 @@ across swaps — soak test before the menu ships).
 import numpy as np
 import pytest
 
+from dtouch import presets
 from dtouch.live import live_flow
 from dtouch.modes import REGISTRY, mode_by_id
 from dtouch.modes.particles import ParticlesMode
@@ -64,18 +65,31 @@ def _mode(**kw):
     return ParticlesMode(**kw)
 
 
+def _paths(tmp_path):
+    """Isolated preset/state files so tests never touch the launch dir's."""
+    return dict(presets_path=str(tmp_path / "presets.json"),
+                state_path=str(tmp_path / "state.json"))
+
+
+def _host(tmp_path, mode=None, src=None, **kw):
+    kw.setdefault("res", RES)
+    kw.setdefault("show", False)
+    return Host(mode or _mode(), source=src or SyntheticSource(),
+                **_paths(tmp_path), **kw)
+
+
 # ---------- the headless loop ----------
 
-def test_headless_loop_runs_max_frames_and_releases():
+def test_headless_loop_runs_max_frames_and_releases(tmp_path):
     src = SyntheticSource()
     count, out = live_flow(source=src, res=RES, grid=GRID, n=N,
-                           show=False, max_frames=5)
+                           show=False, max_frames=5, **_paths(tmp_path))
     assert count == 5
     assert out.shape == (RES[1], RES[0], 3) and out.dtype == np.uint8
     assert src.released, "the shell owns the source's lifecycle"
 
 
-def test_modes_never_see_none_frames_on_camera_loss():
+def test_modes_never_see_none_frames_on_camera_loss(tmp_path):
     """DESIGN.md §2.2: on camera loss the host passes the last good frame."""
     seen = []
 
@@ -87,7 +101,7 @@ def test_modes_never_see_none_frames_on_camera_loss():
 
     src = SyntheticSource(fail_after=2)
     mode = SpyMode(grid=GRID, n=N, seed=0)
-    host = Host(mode, source=src, res=RES, show=False, max_frames=6)
+    host = _host(tmp_path, mode=mode, src=src, max_frames=6)
     count, _ = host.run()
     assert count == 6 and len(seen) == 6
     # frames 3..6 are the held (mirrored) copy of frame 2
@@ -95,17 +109,17 @@ def test_modes_never_see_none_frames_on_camera_loss():
     assert np.array_equal(seen[5], seen[1])
 
 
-def test_loss_with_no_good_frame_ends_bounded_run():
+def test_loss_with_no_good_frame_ends_bounded_run(tmp_path):
     src = SyntheticSource(fail_after=0)     # never yields a frame
     count, out = live_flow(source=src, res=RES, grid=GRID, n=N,
-                           show=False, max_frames=4)
+                           show=False, max_frames=4, **_paths(tmp_path))
     assert count == 0 and out is None
 
 
 # ---------- mode lifecycle ----------
 
-def test_stop_is_idempotent():
-    host = Host(_mode(), source=SyntheticSource(), res=RES, show=False)
+def test_stop_is_idempotent(tmp_path):
+    host = _host(tmp_path)
     m = _mode()
     m.start(host)
     m.stop()
@@ -113,7 +127,7 @@ def test_stop_is_idempotent():
     assert m.glow is None and m.pf is None
 
 
-def test_set_mode_start_failure_reinstates_previous():
+def test_set_mode_start_failure_reinstates_previous(tmp_path):
     """DESIGN.md §2.2: start() may raise — the shell catches, toasts, and
     reinstates the previous mode."""
 
@@ -124,7 +138,7 @@ def test_set_mode_start_failure_reinstates_previous():
         def start(self, host):
             raise RuntimeError("no engine for you")
 
-    host = Host(_mode(), source=SyntheticSource(), res=RES, show=False)
+    host = _host(tmp_path)
     good = _mode()
     assert host.set_mode(good) is True
     bad = BrokenMode(grid=GRID, n=N)
@@ -135,13 +149,12 @@ def test_set_mode_start_failure_reinstates_previous():
     good.stop()
 
 
-def test_boot_mode_start_failure_is_fatal():
+def test_boot_mode_start_failure_is_fatal(tmp_path):
     class Doomed(ParticlesMode):
         def start(self, host):
             raise RuntimeError("boom")
 
-    host = Host(Doomed(grid=GRID, n=N), source=SyntheticSource(),
-                res=RES, show=False, max_frames=1)
+    host = _host(tmp_path, mode=Doomed(grid=GRID, n=N), max_frames=1)
     with pytest.raises(RuntimeError):
         host.run()
 
@@ -152,13 +165,61 @@ def test_registry_lists_particles():
     assert mode_by_id("nope") is None
 
 
+# ---------- bank seeding + state autosave/resume (DESIGN.md §6.4/§7) ----------
+
+def test_unstored_bank_seeds_builtins_on_slots_1_to_9(tmp_path):
+    host = _host(tmp_path, max_frames=1)
+    host.run()
+    builtins = list(ParticlesMode.BUILTIN)
+    assert host.ui.bank == {str(i + 1): n for i, n in enumerate(builtins[:9])}
+    assert host.ui.setlist == []            # empty = all looks, load order
+
+
+def test_stored_bank_and_setlist_win_over_seeding(tmp_path):
+    p = _paths(tmp_path)
+    presets.set_bank({"7": "sigil"}, path=p["presets_path"])
+    presets.set_setlist(["embers", "abstract"], path=p["presets_path"])
+    host = _host(tmp_path, max_frames=1)
+    host.run()
+    assert host.ui.bank == {"7": "sigil"}
+    assert host.ui.setlist == ["embers", "abstract"]
+
+
+def test_explicitly_empty_bank_stays_empty(tmp_path):
+    p = _paths(tmp_path)
+    presets.set_bank({}, path=p["presets_path"])
+    host = _host(tmp_path, max_frames=1)
+    host.run()
+    assert host.ui.bank == {}
+
+
+def test_state_autosaved_on_boot_and_resumed_when_no_preset_given(tmp_path):
+    p = _paths(tmp_path)
+    host = _host(tmp_path, max_frames=1, preset="embers")
+    host.run()
+    st = presets.load_state(p["state_path"])
+    assert st["mode"] == "particles" and st["preset"] == "embers"
+    assert st["bank"]["particles"]["1"] == "abstract"
+
+    # crash restart: preset=None resumes the autosaved look
+    host2 = _host(tmp_path, max_frames=1, preset=None)
+    host2.run()
+    assert host2.ui.preset_name == "embers"
+    assert host2.ui.palette_name == "fire"      # embers actually applied
+
+
+def test_no_state_file_boots_the_safe_look(tmp_path):
+    host = _host(tmp_path, max_frames=1, preset=None)
+    host.run()
+    assert host.ui.preset_name == "abstract"
+
+
 # ---------- GL lifecycle soak (DESIGN.md §8 step 6 / §9) ----------
 
-def test_gl_soak_start_stop_25_cycles():
+def test_gl_soak_start_stop_25_cycles(tmp_path):
     """Start/stop the mode 30 times at a tiny res: no leak of usable state, no
     crash, and the engines still render after the churn."""
-    src = SyntheticSource()
-    host = Host(_mode(), source=src, res=RES, show=False)
+    host = _host(tmp_path)
     frame = np.full((36, 64, 3), 128, np.uint8)
     m = _mode()
     for _ in range(30):

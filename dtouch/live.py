@@ -23,14 +23,16 @@ from .shell import (Host, PerformState, _overlay_key,  # noqa: F401
 def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
               n=200000, mirror=True, seed=1, preset="abstract", audio=False,
               panel=True, show=True, max_frames=None, video_bg=False, video_mix=0.5,
-              flock=False, glitch=False, source=None):
+              flock=False, glitch=False, source=None,
+              presets_path="presets.json", state_path="state.json"):
     """The particle instrument — shell + ParticlesMode (DESIGN.md §8 step 6)."""
     mode = ParticlesMode(matte=matte, grid=grid, n=n, seed=seed,
                          video_bg=video_bg, video_mix=video_mix,
                          flock=flock, glitch=glitch)
     host = Host(mode, source=source, device=device, res=res, mirror=mirror,
                 seed=seed, preset=preset, audio=audio, panel=panel, show=show,
-                max_frames=max_frames)
+                max_frames=max_frames, presets_path=presets_path,
+                state_path=state_path)
     return host.run()
 
 

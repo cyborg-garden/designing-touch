@@ -39,6 +39,10 @@ class Rig:
             self.applied.append(name)
             self.ui.pending_preset = name   # same mailbox a panel click uses
         _wire_perform_keys(self.reg, self.ui, self.hud, self.ps, recall)
+        # the shell's default seeding for a mode with no stored bank:
+        # built-ins on slots 1..9 in order, setlist empty (= all looks)
+        self.ui.bank = {str(i + 1): n for i, n in enumerate(PRESETS)}
+        self.ui.setlist = []
 
     def press(self, ch):
         key = ch if isinstance(ch, int) else ord(ch)
@@ -134,9 +138,9 @@ def test_draw_help_darkens_the_frame():
     assert frame.mean() < 120               # 65% scrim took the frame down
 
 
-# ---------- digits + [ ] : preset recall ----------
+# ---------- digits + [ ] : bank recall + setlist (DESIGN.md §7, step 7) ----------
 
-def test_digit_recalls_by_flat_list_position_with_toast():
+def test_digit_recalls_from_the_active_modes_bank_with_toast():
     r = Rig()
     r.press("3")
     assert r.ui.preset_idx == 2
@@ -144,14 +148,35 @@ def test_digit_recalls_by_flat_list_position_with_toast():
     assert r.center_toast().text == "3 - textured"
 
 
-def test_digit_beyond_list_is_a_gentle_hint():
+def test_digit_recall_uses_slot_assignments_not_list_positions():
+    """Bank slots are explicit assignments (DESIGN.md §7) — a slot can point
+    anywhere, and slot numbers survive around it."""
     r = Rig()
-    r.press("9")
+    r.ui.bank = {"2": "sigil"}
+    r.press("2")
+    assert r.applied == ["sigil"]
+    assert r.center_toast().text == "2 - sigil"
+    r.press("1")                            # unassigned now
+    assert r.applied == ["sigil"]
+    assert "no preset 1" in r.hints()
+
+
+def test_empty_slot_is_a_gentle_hint():
+    r = Rig()
+    r.press("9")                            # 6 built-ins: slot 9 unassigned
     assert r.applied == []
     assert "no preset 9" in r.hints()
 
 
-def test_bracket_prev_next_wrap_in_list_order():
+def test_slot_pointing_at_a_deleted_look_hints():
+    r = Rig()
+    r.ui.bank = {"4": "gone_look"}
+    r.press("4")
+    assert r.applied == []
+    assert "no preset 4" in r.hints()
+
+
+def test_brackets_walk_all_looks_when_setlist_empty():
     r = Rig()
     r.press("]")
     assert (r.ui.preset_idx, r.applied[-1]) == (1, "portrait")
@@ -159,6 +184,25 @@ def test_bracket_prev_next_wrap_in_list_order():
     assert (r.ui.preset_idx, r.applied[-1]) == (0, "abstract")
     r.press("[")                            # wraps to the end
     assert (r.ui.preset_idx, r.applied[-1]) == (5, "sigil")
+
+
+def test_brackets_walk_the_explicit_setlist():
+    r = Rig()
+    r.ui.setlist = ["embers", "abstract"]
+    r.press("]")                            # abstract is current → next in setlist
+    assert r.applied[-1] == "embers"
+    assert r.center_toast().text == "4 - embers"    # slot badge in the toast
+    r.press("]")
+    assert r.applied[-1] == "abstract"
+    r.press("[")
+    assert r.applied[-1] == "embers"
+
+
+def test_setlist_skips_names_that_no_longer_exist():
+    r = Rig()
+    r.ui.setlist = ["gone", "embers"]
+    r.press("]")
+    assert r.applied == ["embers"]
 
 
 # ---------- layer / feature toggles ----------

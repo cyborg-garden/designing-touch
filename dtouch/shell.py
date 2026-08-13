@@ -76,11 +76,12 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None):
     """Register the perform layer (DESIGN.md §6.2) on `reg`.
 
     `recall(name)` must route a preset apply through the same path a panel click
-    takes (the shell's pending_preset mailbox). Commands read `ui.presets` at
-    press time, so saves/deletes are picked up live. The digit bank is the flat
-    preset list (built-ins + user, load order) — a temporary global bank until
-    presets go per-mode (DESIGN.md §8 step 7). The panel's own toggles remain
-    and stay in sync: both paths set the same ui attributes.
+    takes (the shell's pending_preset mailbox). Commands read `ui.presets`,
+    `ui.bank`, and `ui.setlist` at press time, so saves/deletes/assignments are
+    picked up live. Digits 1–9 recall from the ACTIVE mode's bank — explicit
+    slot assignments, not list positions (DESIGN.md §7); `[`/`]` walk the
+    mode's setlist (empty = all looks in load order). The panel's own toggles
+    remain and stay in sync: both paths set the same ui attributes.
 
     `mode_commands` is the active mode's `commands()` dict; when None the
     Particles-local toggles (F flock, V video bg) are registered directly —
@@ -88,11 +89,35 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None):
     """
     toasts = hud.toasts
 
-    def apply_idx(i):
-        name = ui.presets[i]
-        ui.preset_idx = i
+    def _slot_of(name):
+        return next((s for s, n in (ui.bank or {}).items() if n == name), None)
+
+    def _recall(name):
+        ui.preset_idx = ui.presets.index(name)
         recall(name)
-        toasts.flash(f"{i + 1} - {name}")
+
+    def apply_slot(i):
+        name = (ui.bank or {}).get(str(i))
+        if not name or name not in ui.presets:
+            toasts.hint(f"no preset {i}")
+            return
+        _recall(name)
+        toasts.flash(f"{i} - {name}")
+
+    def setlist_step(d):
+        order = [n for n in (ui.setlist or list(ui.presets)) if n in ui.presets]
+        if not order:
+            toasts.hint("setlist empty")
+            return
+        cur = ui.preset_name if ui.preset_idx < len(ui.presets) else None
+        if cur in order:
+            i = (order.index(cur) + d) % len(order)
+        else:
+            i = 0 if d > 0 else len(order) - 1
+        name = order[i]
+        _recall(name)
+        slot = _slot_of(name)
+        toasts.flash(f"{slot} - {name}" if slot else name)
 
     def blackout():
         ps.blackout = not ps.blackout
@@ -114,14 +139,11 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None):
 
     reg.add("output.blackout", "Blackout", " ", blackout)
     reg.add("preset.panic", "Panic reset", "0", panic)
-    for i in range(9):
-        reg.add(f"preset.recall.{i + 1}", f"Recall preset {i + 1}", str(i + 1),
-                lambda i=i: (apply_idx(i) if i < len(ui.presets)
-                             else toasts.hint(f"no preset {i + 1}")))
-    reg.add("preset.prev", "Previous preset", "[",
-            lambda: apply_idx((ui.preset_idx - 1) % len(ui.presets)))
-    reg.add("preset.next", "Next preset", "]",
-            lambda: apply_idx((ui.preset_idx + 1) % len(ui.presets)))
+    for i in range(1, 10):
+        reg.add(f"preset.recall.{i}", f"Recall bank slot {i}", str(i),
+                lambda i=i: apply_slot(i))
+    reg.add("preset.prev", "Previous in setlist", "[", lambda: setlist_step(-1))
+    reg.add("preset.next", "Next in setlist", "]", lambda: setlist_step(+1))
     if mode_commands is None:
         mode_commands = {
             "layer.flock": ui_toggle_command(ui, toasts, "layer.flock", "Flock",
@@ -202,7 +224,7 @@ class Host:
     def __init__(self, mode, source=None, device="builtin", res=(1920, 1080),
                  mirror=True, seed=1, preset="abstract", audio=False,
                  panel=True, show=True, max_frames=None,
-                 presets_path="presets.json"):
+                 presets_path="presets.json", state_path="state.json"):
         self.mode = None
         self._boot_mode = mode
         self._source = source
@@ -216,6 +238,7 @@ class Host:
         self.show = show
         self.max_frames = max_frames
         self.presets_path = presets_path
+        self.state_path = state_path
 
         self.ui = None
         self.hud = Hud()
@@ -249,6 +272,13 @@ class Host:
             self.mode = prev
             return False
         self.mode = mode
+        if self.ui is not None:
+            # live switch (step 8 wires the keys): recompose the panel and
+            # reload the new mode's looks/bank/setlist
+            self.ui.set_spec(self.compose_spec(mode))
+            self._reload_presets()
+            self._seed_bank_setlist()
+            self._autosave_state()
         return True
 
     def compose_spec(self, mode):
@@ -256,14 +286,52 @@ class Host:
         (DESIGN.md §2.4: the rack is a shell-owned section on every panel)."""
         return mode.panel_spec() + [build_signal_section()] + build_global_rows()
 
-    # ----- preset plumbing -----
+    # ----- preset plumbing (per-mode: looks, bank, setlist — DESIGN.md §7) -----
+    def _load_presets(self):
+        return _presets.load(self.presets_path, mode=self.mode.id,
+                             builtin=getattr(self.mode, "BUILTIN", {}))
+
     def _reload_presets(self):
-        self.all_presets = _presets.load(self.presets_path)
+        self.all_presets = self._load_presets()
         names = list(self.all_presets.keys())
         if self.ui is not None:
             self.ui.presets = names
-            self.ui.user_presets = _presets.user_names(self.presets_path)
+            self.ui.user_presets = _presets.user_names(self.presets_path,
+                                                       mode=self.mode.id)
+            # delete/rename keep the stored bank+setlist consistent; mirror that
+            stored = _presets.bank(self.presets_path, mode=self.mode.id)
+            if stored is not None:
+                self.ui.bank = stored
+            stored = _presets.setlist(self.presets_path, mode=self.mode.id)
+            if stored is not None:
+                self.ui.setlist = stored
         return names
+
+    def _seed_bank_setlist(self):
+        """Seed the UI's bank + setlist for the active mode. Stored assignments
+        win; a mode that never stored a bank gets its built-ins on slots 1..9
+        in order (the instrument is playable blind out of the box — DESIGN.md
+        principle 6; an explicitly emptied bank stays empty). An empty setlist
+        means 'all looks, load order' and tracks saves live."""
+        ui = self.ui
+        stored = _presets.bank(self.presets_path, mode=self.mode.id)
+        if stored is not None:
+            ui.bank = stored
+        else:
+            builtin = list(getattr(self.mode, "BUILTIN", {}))[:9]
+            ui.bank = {str(i + 1): n for i, n in enumerate(builtin)}
+        ui.setlist = _presets.setlist(self.presets_path, mode=self.mode.id) or []
+
+    def _autosave_state(self):
+        """Autosave: active mode + preset + bank → state.json (DESIGN.md §6.4;
+        crash restart resumes the same look). The bank's persistent authority
+        is presets.json — the copy here is a crash-recovery snapshot."""
+        ui = self.ui
+        current = (ui.preset_name
+                   if ui is not None and ui.preset_idx < len(ui.presets) else None)
+        _presets.save_state({"mode": self.mode.id, "preset": current,
+                             "bank": {self.mode.id: dict(ui.bank)} if ui else {}},
+                            path=self.state_path)
 
     def _capture_cfg(self):
         """Spec-derived capture (DESIGN.md §2.1/§7): walk the composed panel
@@ -279,6 +347,7 @@ class Host:
         name = ui.pending_preset
         if name in self.all_presets:
             apply_look(ui, ui.spec, self.all_presets[name], self.mode.DEFAULTS)
+            self._autosave_state()
         ui.pending_preset = None
 
     def _pump_preset_mailboxes(self):
@@ -288,7 +357,8 @@ class Host:
             self._apply_pending_preset()
         if ui.pending_save:
             name = "mine_%s" % time.strftime("%H%M%S")
-            _presets.save(name, self._capture_cfg(), path=self.presets_path)
+            _presets.save(name, self._capture_cfg(), path=self.presets_path,
+                          mode=self.mode.id)
             names = self._reload_presets()
             if name in names:
                 ui.preset_idx = names.index(name)
@@ -296,7 +366,8 @@ class Host:
             ui.pending_save = False
         if ui.pending_delete:
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
-            if _presets.delete(ui.pending_delete, path=self.presets_path):
+            if _presets.delete(ui.pending_delete, path=self.presets_path,
+                               mode=self.mode.id):
                 names = self._reload_presets()
                 ui.preset_idx = names.index(sel) if sel in names else 0
                 print("deleted preset", ui.pending_delete)
@@ -304,7 +375,9 @@ class Host:
         if ui.pending_rename:
             old, new = ui.pending_rename
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
-            if _presets.rename(old, new, path=self.presets_path):
+            if _presets.rename(old, new, path=self.presets_path,
+                               mode=self.mode.id,
+                               builtin=getattr(self.mode, "BUILTIN", {})):
                 names = self._reload_presets()
                 target = new if sel == old else sel
                 ui.preset_idx = names.index(target) if target in names else 0
@@ -345,8 +418,16 @@ class Host:
         if not self.set_mode(self._boot_mode):
             raise RuntimeError("boot mode failed to start")
         mode = self.mode
-        self.all_presets = _presets.load(self.presets_path)
+        self.all_presets = self._load_presets()
         preset = self._boot_preset
+        if preset is None:
+            # crash-restart resume (DESIGN.md §6.4): state.json is the single
+            # last-mode/last-preset authority (see dtouch.presets docstring)
+            st = _presets.load_state(self.state_path)
+            if st.get("mode") in (None, mode.id):
+                preset = st.get("preset")
+        if preset is None:
+            preset = mode.safe_look()
 
         # The shared UI-state object ALWAYS exists — it is the mode's parameter
         # surface (spec capture/apply target + step()'s per-frame sync source).
@@ -364,7 +445,9 @@ class Host:
             # the look loaded at startup, same as a live switch (spec-derived)
             apply_look(ui, ui.spec, self.all_presets[preset], mode.DEFAULTS)
         mode.configure_ui(ui)
-        ui.user_presets = _presets.user_names(self.presets_path)
+        ui.user_presets = _presets.user_names(self.presets_path, mode=mode.id)
+        self._seed_bank_setlist()
+        self._autosave_state()
 
         if self.show:
             # AUTOSIZE: the window is fixed at the render resolution so the OS

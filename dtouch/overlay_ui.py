@@ -195,6 +195,11 @@ class OverlayUI:
         self._tooltip = None
         self.pending_preset = None
         self.pending_save = False
+        # per-mode perform state (DESIGN.md §7): explicit slot assignments and
+        # setlist order for the ACTIVE mode, seeded by the shell. An empty
+        # setlist means "all looks, load order".
+        self.bank = {}               # {"1": name, ...} — digits 1-9 recall these
+        self.setlist = []            # [ / ] walk this order
         self.pending_commands = []   # Action commands with no dedicated mailbox
         self.user_presets = set()    # names that can be renamed/deleted (saved looks)
         self.pending_delete = None   # name confirmed for deletion (live loop applies)

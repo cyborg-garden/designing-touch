@@ -75,7 +75,7 @@ def main():
         mode = ParticlesMode(matte=args.matte, grid=parse_wh(args.grid),
                              n=args.particles, flock=args.flock, glitch=args.glitch)
         host = Host(mode, device=device, res=parse_wh(args.res),
-                    preset=args.preset or "abstract", audio=args.audio,
+                    preset=args.preset, audio=args.audio,
                     panel=(args.ui == "panel"), mirror=not args.no_mirror)
         host.run()
 
