@@ -24,6 +24,7 @@ from .glow import GlowRenderer
 from .audio import LiveMic
 from .overlay_ui import OverlayUI, DITHERS
 from .circuit_bent import CircuitBent
+from .commands import CommandRegistry
 from . import presets as _presets
 
 MATTES = ["auto", "motion", "saliency", "person", "edges", "luma"]
@@ -138,6 +139,13 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
             _apply_fx(ui, raw0)      # the look loaded at startup, same as a live switch
             ui.user_presets = _presets.user_names()
             cv2.setMouseCallback(win, ui.on_mouse)
+
+    # Key routing goes through the command registry (DESIGN.md principle 7).
+    # Today's behavior only: 'q' quits (case-folded, so 'Q' no longer silently
+    # demands releasing Shift). The perform-layer commands land in step 3.
+    reg = CommandRegistry()
+    _want_quit = [False]
+    reg.add("app.quit", "Quit", "q", lambda: _want_quit.__setitem__(0, True))
 
     mic = None
     if audio:
@@ -319,7 +327,9 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
                 key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse; ESC intentionally ignored
                 # a rename box consumes keystrokes first, so typing 'q' doesn't quit
                 consumed = ui.on_key(key) if (ui is not None and key != 255) else False
-                if (key == ord('q') and not consumed) or (ui is not None and ui.quit):
+                if not consumed and key != 255:
+                    reg.dispatch(key)
+                if _want_quit[0] or (ui is not None and ui.quit):
                     break
                 # quit only when the window is actually destroyed (red X) -> property is -1.
                 # A minimized window reports 0, so this does NOT quit on minimize.
