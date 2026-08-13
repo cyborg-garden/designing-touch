@@ -70,10 +70,10 @@ def _slider_spec(label, attr, tip, **kw):
     return Slider(label, attr, lo, hi, tip=tip, **kw)
 
 
-def build_particles_spec(presets, palettes, mattes):
-    """Today's Particles panel as data — the exact shipped section order,
-    names, labels, and vertical rhythm (goldens hold). This is what the future
-    Mode.panel_spec() will return pieces of (DESIGN.md §4.1)."""
+def build_particles_sections(palettes, mattes):
+    """The Particles mode's own panel sections (DESIGN.md §4.1) — what
+    ParticlesMode.panel_spec() returns. The shell appends the SIGNAL rack and
+    the global rows below these (DESIGN.md §2.4)."""
     look_sliders = [_slider_spec(label, attr, tip) for label, attr, tip in _SLIDERS]
     return [
         Section("TEMPLATES", [PresetList()]),
@@ -100,9 +100,15 @@ def build_particles_spec(presets, palettes, mattes):
             _slider_spec("Separate", "separate",
                          "Push apart when crowded. Stops the shoal collapsing to a dot."),
         ], open=False),
-        # SIGNAL — circuit-bent post-processing (dtouch.circuit_bent), applied to the rendered
-        # frame after the particles, before the panel is drawn (so the panel stays readable).
-        Section("SIGNAL", [
+    ]
+
+
+def build_signal_section():
+    """The shell's SIGNAL rack (DESIGN.md §2.4) — circuit-bent post-processing
+    (dtouch.circuit_bent) applied to every mode's output after render + video
+    composite, before recorder and panel (so the panel stays readable). Its
+    state serializes under "signal" inside each mode's looks."""
+    return Section("SIGNAL", [
             Toggle("Glitch", "glitch"),
             Cycle("dither", "dither_idx", list(DITHERS)),
             _slider_spec("Chroma", "chroma",
@@ -112,8 +118,12 @@ def build_particles_spec(presets, palettes, mattes):
             _slider_spec("Crush", "crush",
                          "Hard bit-depth reduction. 0 = off."),
             Toggle("Scanlines", "scanlines", on_text="on"),
-        ], open=False, gap=6),
-        # ----- the shell's global rows (below every mode's sections) -----
+        ], open=False, gap=6)
+
+
+def build_global_rows():
+    """The shell's global rows (below every mode's sections)."""
+    return [
         Toggle("Sound react", "audio"),
         _slider_spec("Sens", "sens", "How strongly sound drives the visuals.",
                      apply="keep", gap=4),
@@ -122,6 +132,16 @@ def build_particles_spec(presets, palettes, mattes):
         Toggle("Mirror", "mirror", on_text="on", save=False, gap=4),
         Action("Quit", "quit"),
     ]
+
+
+def build_particles_spec(presets, palettes, mattes):
+    """Today's Particles panel as data — the exact shipped section order,
+    names, labels, and vertical rhythm (goldens hold). Composed the same way
+    the shell composes any mode's panel: mode sections + SIGNAL rack + global
+    rows (DESIGN.md §2.4). `presets` is unused (PresetList reads the walker's
+    live list) but kept for signature stability."""
+    return (build_particles_sections(palettes, mattes)
+            + [build_signal_section()] + build_global_rows())
 
 
 class OverlayUI:

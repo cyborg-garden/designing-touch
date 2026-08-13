@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 
-from dtouch.live import live, live_flow
 from dtouch.camera import list_cameras
+from dtouch.live import live
+from dtouch.modes.particles import ParticlesMode
+from dtouch.shell import Host
 
 
 def parse_wh(s):
@@ -35,9 +37,8 @@ def parse_wh(s):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="flow", choices=["flow", "grid"])
-    ap.add_argument("--ui", default="panel", choices=["panel", "keys", "gui"],
-                    help="panel = render + slider window (default); keys = render only; "
-                         "gui = experimental Tk panel")
+    ap.add_argument("--ui", default="panel", choices=["panel", "keys"],
+                    help="panel = render + slider window (default); keys = render only")
     ap.add_argument("--audio", action="store_true", help="start with mic reactivity on")
     ap.add_argument("--device", default="builtin",
                     help="'builtin' (laptop cam), an index, or a name substring")
@@ -69,15 +70,14 @@ def main():
     device = int(args.device) if args.device.isdigit() else args.device
     if args.mode == "grid":
         live(device=device, res=parse_wh(args.res), mirror=not args.no_mirror)
-    elif args.ui == "gui":
-        from dtouch.gui import run_gui
-        run_gui(device=device, res=parse_wh(args.res), grid=parse_wh(args.grid),
-                n=args.particles, preset=args.preset or "abstract")
     else:
-        live_flow(device=device, matte=args.matte, res=parse_wh(args.res),
-                  grid=parse_wh(args.grid), n=args.particles, preset=args.preset or "abstract",
-                  audio=args.audio, panel=(args.ui == "panel"), mirror=not args.no_mirror,
-                  flock=args.flock, glitch=args.glitch)
+        # thin launcher: shell + mode (DESIGN.md §8 step 6)
+        mode = ParticlesMode(matte=args.matte, grid=parse_wh(args.grid),
+                             n=args.particles, flock=args.flock, glitch=args.glitch)
+        host = Host(mode, device=device, res=parse_wh(args.res),
+                    preset=args.preset or "abstract", audio=args.audio,
+                    panel=(args.ui == "panel"), mirror=not args.no_mirror)
+        host.run()
 
 
 if __name__ == "__main__":

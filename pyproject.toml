@@ -30,7 +30,7 @@ person = ["mediapipe>=0.10"]   # person matte (selfie segmentation); not needed 
 dev = ["pytest>=8.0"]
 
 [tool.setuptools]
-packages = ["dtouch"]
+packages = ["dtouch", "dtouch.modes"]
 
 [tool.setuptools.package-data]
 dtouch = ["assets/*.npy"]
