@@ -39,7 +39,8 @@ class Rig:
             self.applied.append(name)
             self.ui.pending_preset = name   # same mailbox a panel click uses
         _wire_perform_keys(self.reg, self.ui, self.hud, self.ps, recall,
-                           safe_look=lambda: "abstract")
+                           safe_look=lambda: "abstract",
+                           get_overlay=lambda: self.overlay)
         # the shell's default seeding for a mode with no stored bank:
         # built-ins on slots 1..9 in order, setlist empty (= all looks)
         self.ui.bank = {str(i + 1): n for i, n in enumerate(PRESETS)}
@@ -246,6 +247,20 @@ def test_panel_and_key_paths_share_state():
     assert r.ui.flock is True
     r.ui._activate("flock", None, 0)        # panel click on the same toggle
     assert r.ui.flock is False
+
+
+# ---------- s: save current look (PANEL-state only — edit action) ----------
+
+def test_s_saves_only_in_panel_state():
+    """Amended DESIGN.md §6.2: 's' = preset.save, PANEL state only — saving is
+    an edit action; elsewhere it hints instead of silently doing nothing."""
+    r = Rig()
+    r.press("s")                            # HUD: gated
+    assert r.ui.pending_save is False
+    assert r.hud.toasts.active(), "silence-on-input is a bug"
+    r.overlay = OverlayState.PANEL
+    r.press("s")
+    assert r.ui.pending_save is True
 
 
 # ---------- i: debug ----------

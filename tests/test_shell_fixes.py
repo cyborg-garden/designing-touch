@@ -319,6 +319,60 @@ def test_first_entry_applies_safe_look_reentry_preserves_settings(
     assert host.ui.pending_preset is None
 
 
+# ---------- save flow (amended DESIGN.md §3: naming is one flow) ----------
+
+def test_s_in_panel_saves_and_opens_rename_with_toast(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.overlay = OverlayState.PANEL
+    host.reg.dispatch(ord("s"))
+    assert host.ui.pending_save is True
+    host._pump_preset_mailboxes()
+    assert host.ui.user_presets                      # the look landed
+    name = next(iter(host.ui.user_presets))
+    assert host.ui.renaming == name                  # rename box opened
+    assert host.ui.rename_buf == name
+    assert host.ui.preset_name == name
+    assert any("saved" in t for t in _hints(host))   # toast, not just stdout
+
+
+def test_s_outside_panel_does_not_save_but_hints(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.overlay = OverlayState.HUD
+    host.reg.dispatch(ord("s"))
+    assert host.ui.pending_save is False
+    assert host.hud.toasts.active()                  # gated, with feedback
+
+
+def test_two_saves_in_the_same_second_get_distinct_names(tmp_path,
+                                                         monkeypatch):
+    host = _booted(tmp_path)
+    import dtouch.shell as shell_mod
+    monkeypatch.setattr(shell_mod.time, "strftime", lambda fmt: "120000")
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()
+    host.ui.renaming = None
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()
+    assert host.ui.user_presets == {"mine_120000", "mine_120000_2"}
+
+
+def test_rename_and_delete_confirm_with_toasts(tmp_path):
+    host = _booted(tmp_path)
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()
+    name = host.ui.renaming
+    host.ui.renaming = None
+    host.ui.pending_rename = (name, "neon")
+    host._pump_preset_mailboxes()
+    assert any("renamed" in t for t in _hints(host))
+    host.ui.pending_delete = "neon"
+    host._pump_preset_mailboxes()
+    assert any("deleted" in t for t in _hints(host))
+    assert "neon" not in host.ui.presets
+
+
 # ---------- rename mailbox pump ----------
 
 def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):

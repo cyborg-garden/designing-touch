@@ -77,7 +77,7 @@ def _register_quit(reg, ps, toasts):
 
 
 def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
-                       safe_look=None):
+                       safe_look=None, get_overlay=None):
     """Register the perform layer (DESIGN.md §6.2) on `reg`.
 
     `recall(name)` must route a preset apply through the same path a panel click
@@ -150,8 +150,19 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             toasts.flash("REC", RED)
         # the stop toast (filename) comes from the loop when the file closes
 
+    def save_preset():
+        # 's' = preset.save (amended DESIGN.md §3/§6.2): PANEL state only —
+        # saving is an edit action; elsewhere it hints instead of silence.
+        state = (get_overlay() if get_overlay is not None
+                 else OverlayState.PANEL)
+        if state is not OverlayState.PANEL:
+            toasts.hint("save is a panel action - TAB to open the panel")
+            return
+        ui.pending_save = True
+
     reg.add("output.blackout", "Blackout", " ", blackout)
     reg.add("preset.panic", "Panic reset", "0", panic)
+    reg.add("preset.save", "Save current look", "s", save_preset)
     for i in range(1, 10):
         reg.add(f"preset.recall.{i}", f"Recall bank slot {i}", str(i),
                 lambda i=i: apply_slot(i))
@@ -426,7 +437,8 @@ class Host:
         _wire_perform_keys(self.reg, self.ui, self.hud, self.ps,
                            lambda name: setattr(self.ui, "pending_preset", name),
                            mode_commands=self.mode.commands(),
-                           safe_look=lambda: self.mode.safe_look())
+                           safe_look=lambda: self.mode.safe_look(),
+                           get_overlay=lambda: self.overlay)
         self._register_shell_commands()
         self.help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
                                              ("Esc", "Step toward hidden")]
@@ -582,12 +594,22 @@ class Host:
             self._assign_slot(ui.pending_slot)
             ui.pending_slot = None
         if ui.pending_save:
-            name = "mine_%s" % time.strftime("%H%M%S")
+            # amended DESIGN.md §3: auto-name (suffix same-second collisions),
+            # save, then immediately open the rename box — naming is one flow
+            # — and confirm with a toast, never stdout alone.
+            base = "mine_%s" % time.strftime("%H%M%S")
+            existing = set(ui.presets) | set(ui.user_presets)
+            name, n = base, 2
+            while name in existing:
+                name, n = "%s_%d" % (base, n), n + 1
             _presets.save(name, self._capture_cfg(), path=self.presets_path,
                           mode=self.mode.id)
             names = self._reload_presets()
             if name in names:
                 ui.preset_idx = names.index(name)
+            ui.renaming = name
+            ui.rename_buf = name
+            self.hud.toasts.hint("saved - " + name)
             print("saved preset", name)
             ui.pending_save = False
         if ui.pending_delete:
@@ -596,6 +618,7 @@ class Host:
                                mode=self.mode.id):
                 names = self._reload_presets()
                 ui.preset_idx = names.index(sel) if sel in names else 0
+                self.hud.toasts.hint("deleted - " + ui.pending_delete)
                 print("deleted preset", ui.pending_delete)
             ui.pending_delete = None
         if getattr(ui, "pending_still_path", None):
@@ -618,8 +641,10 @@ class Host:
                 names = self._reload_presets()
                 target = new if sel == old else sel
                 ui.preset_idx = names.index(target) if target in names else 0
+                self.hud.toasts.hint("renamed - " + new)
                 print("renamed preset", old, "->", new)
             else:
+                self.hud.toasts.hint("rename refused - name taken or invalid")
                 print("rename refused (name taken or invalid):", old, "->", new)
             ui.pending_rename = None
 
