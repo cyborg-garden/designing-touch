@@ -217,6 +217,13 @@ class OverlayUI:
         self._drag = None
         self._flash = 0
         self._flash_rect = None
+        # per-mode accent (DESIGN.md §5): exactly one accent on screen, owned by
+        # the active mode. Default ACC green = the shipped Particles chrome, so
+        # a bare OverlayUI (goldens, tests) renders identical pixels.
+        self.accent = ACC
+        # still-image mailbox (DESIGN.md §2.1: the shell owns still sources) —
+        # a path posted here is loaded by the shell's mailbox pump.
+        self.pending_still_path = None
         self._gui = imgui.Gui()
         self.set_spec(build_particles_spec(presets, palettes, mattes))
 
@@ -312,7 +319,7 @@ class OverlayUI:
         # scale the whole panel by the output resolution, floored at the 1080p baseline so
         # 720p/1080p are unchanged and 4K renders at 2x (same fraction of the frame).
         self._s = max(1.0, h / BASE_H)
-        self._hot = g.begin(self._s, self.mouse)
+        self._hot = g.begin(self._s, self.mouse, self.accent)
         pw = g.S(self.panel_w)
         self._panel_px = pw
         if not self.open:
@@ -333,7 +340,7 @@ class OverlayUI:
         # a no-op when everything fits. content height comes from the previous draw.
         self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
         x, cw, y = px + g.S(16), pw - g.S(32), g.S(30) - self.scroll
-        g.text(frame, "dtouch", x, y, ACC, 0.62, 2)
+        g.text(frame, "dtouch", x, y, self.accent, 0.62, 2)
         y += g.S(16)
         self._blink += 1
 
@@ -420,7 +427,7 @@ class OverlayUI:
 
     def _draw_status(self, frame, info):
         g = self._gui
-        g.text(frame, info.get("status", ""), g.S(12), g.S(24), ACC, 0.5)
+        g.text(frame, info.get("status", ""), g.S(12), g.S(24), self.accent, 0.5)
         if info.get("black"):
             h, w = frame.shape[:2]
             g.text(frame, "CAMERA IS BLACK - disable iPhone Continuity Camera",

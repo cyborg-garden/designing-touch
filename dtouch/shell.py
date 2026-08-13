@@ -273,18 +273,42 @@ class Host:
             return False
         self.mode = mode
         if self.ui is not None:
-            # live switch (step 8 wires the keys): recompose the panel and
-            # reload the new mode's looks/bank/setlist
-            self.ui.set_spec(self.compose_spec(mode))
+            # live switch (step 8): rebind the option lists + accent, recompose
+            # the panel, seed the mode's own UI attrs, and reload the new
+            # mode's looks/bank/setlist
+            ui = self.ui
+            ui.palettes = list(getattr(mode, "palettes", ui.palettes))
+            ui.mattes = list(getattr(mode, "mattes", ui.mattes))
+            pal = getattr(getattr(mode, "pf", None), "palette", None)
+            ui.palette_idx = (ui.palettes.index(pal)
+                              if pal in ui.palettes else 0)
+            mk = getattr(mode, "matte_kind", None)
+            ui.matte_idx = ui.mattes.index(mk) if mk in ui.mattes else 0
+            ui.accent = mode.accent
+            ui.set_spec(self.compose_spec(mode))
+            mode.configure_ui(ui)
             self._reload_presets()
+            if ui.preset_idx >= len(ui.presets):
+                ui.preset_idx = 0
             self._seed_bank_setlist()
             self._autosave_state()
         return True
 
     def compose_spec(self, mode):
         """The mode's declared sections + the shell's SIGNAL rack + global rows
-        (DESIGN.md §2.4: the rack is a shell-owned section on every panel)."""
-        return mode.panel_spec() + [build_signal_section()] + build_global_rows()
+        (DESIGN.md §2.4: the rack is a shell-owned section on every panel).
+
+        Suppression rule (DESIGN.md §2.4, judge finding): the rack hides any
+        control the active mode claims — a mode declares `claims` (a set of
+        store keys, e.g. Dither Girl claims "dither" because it owns dithering
+        as the primary image; two visible dither subsystems in one panel is
+        the bolted-features incoherence the overhaul exists to kill)."""
+        rack = build_signal_section()
+        claims = frozenset(getattr(mode, "claims", ()))
+        if claims:
+            rack.widgets = [w for w in rack.widgets
+                            if getattr(w, "store_key", None) not in claims]
+        return mode.panel_spec() + [rack] + build_global_rows()
 
     # ----- preset plumbing (per-mode: looks, bank, setlist — DESIGN.md §7) -----
     def _load_presets(self):
@@ -457,15 +481,21 @@ class Host:
         # The shared UI-state object ALWAYS exists — it is the mode's parameter
         # surface (spec capture/apply target + step()'s per-frame sync source).
         # `show`/`panel` only govern whether it is drawn and clickable.
+        palettes = list(getattr(mode, "palettes", [])) or [""]
+        mattes = list(getattr(mode, "mattes", [])) or [""]
+        boot_palette = (getattr(getattr(mode, "pf", None), "palette", None)
+                        or palettes[0])
         ui = self.ui = OverlayUI(rw, rh, list(self.all_presets.keys()),
-                                 list(mode.palettes), list(mode.mattes),
-                                 preset=preset, matte=mode.matte_kind,
-                                 palette=mode.pf.palette)
+                                 palettes, mattes,
+                                 preset=preset,
+                                 matte=getattr(mode, "matte_kind", mattes[0]),
+                                 palette=boot_palette)
+        ui.accent = mode.accent
         ui.set_spec(self.compose_spec(mode))
         ui.mirror = self.mirror
         ui.audio = self._boot_audio
-        ui.video_bg = mode.boot_video_bg
-        ui.video_mix = mode.boot_video_mix
+        ui.video_bg = getattr(mode, "boot_video_bg", False)
+        ui.video_mix = getattr(mode, "boot_video_mix", ui.video_mix)
         if preset in self.all_presets:
             # the look loaded at startup, same as a live switch (spec-derived)
             apply_look(ui, ui.spec, self.all_presets[preset], mode.DEFAULTS)

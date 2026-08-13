@@ -72,11 +72,13 @@ class Gui:
         self.mouse = (-1, -1)
         self.hot = []           # (rect, kind, payload) — appended as widgets draw
         self.tooltip = None     # (text, x, y) — set on info-badge hover, drawn last
+        self.accent = ACC       # per-mode accent (DESIGN.md §5): selected/active chrome
 
-    def begin(self, s, mouse):
-        """Start a draw pass: set scale + mouse, reset hit list and tooltip."""
+    def begin(self, s, mouse, accent=ACC):
+        """Start a draw pass: set scale + mouse + accent, reset hit list and tooltip."""
         self.s = s
         self.mouse = mouse
+        self.accent = accent
         self.hot = []
         self.tooltip = None
         return self.hot
@@ -103,7 +105,7 @@ class Gui:
             h = self.S(24)
         rect = (x, y, x + w, y + h)
         hovered = in_rect(rect, self.mouse)
-        fill = ACC if active else (HOVER if hovered else BTN)
+        fill = self.accent if active else (HOVER if hovered else BTN)
         self.box(img, rect, fill)
         self.text(img, label, x + self.S(10), y + h - self.S(8), DARK if active else INK, 0.46)
         self.hot.append(((x, y, x + w, y + h), key, payload))
@@ -157,7 +159,7 @@ class Gui:
         self.box(img, rb, HOVER if in_rect(rb, self.mouse) else BTN)
         self.text(img, "<", x + self.S(9), ry + self.S(17), INK, 0.5, 2)
         self.text(img, ">", x + w - self.S(19), ry + self.S(17), INK, 0.5, 2)
-        self.text(img, str(value), x + self.S(40), ry + self.S(17), ACC, 0.5)
+        self.text(img, str(value), x + self.S(40), ry + self.S(17), self.accent, 0.5)
         self.hot.append((lb, "cycle", (key, -1)))
         self.hot.append((rb, "cycle", (key, +1)))
         return ry + self.S(32)
@@ -170,8 +172,9 @@ class Gui:
         the caller appends the hit with the row's name."""
         r = (x + cw - self.S(78), y + self.S(2), x + cw - self.S(56), y + self.S(22))
         if slot:
-            self.box(img, r, DARK, border=ACC)
-            self.text(img, str(slot), r[0] + self.S(7), r[3] - self.S(6), ACC, 0.42)
+            self.box(img, r, DARK, border=self.accent)
+            self.text(img, str(slot), r[0] + self.S(7), r[3] - self.S(6),
+                      self.accent, 0.42)
         else:
             self.box(img, r, HOVER if in_rect(r, self.mouse) else BTN)
         return r
@@ -195,11 +198,11 @@ class Gui:
         """The row being renamed becomes a text input (Enter saves, Esc cancels).
         `blink` is a frame counter driving the cursor; `px` is the panel's left edge."""
         rect = (x, y, x + cw, y + self.S(24))
-        self.box(img, rect, DARK, border=ACC)
+        self.box(img, rect, DARK, border=self.accent)
         cur = "_" if (blink // 12) % 2 == 0 else ""
-        self.text(img, buf + cur, x + self.S(10), y + self.S(16), ACC, 0.46)
+        self.text(img, buf + cur, x + self.S(10), y + self.S(16), self.accent, 0.46)
         self.text(img, "type name: enter=save esc=cancel", px - self.S(240), y + self.S(16),
-                  ACC, 0.42)
+                  self.accent, 0.42)
 
     # ----- deferred / chrome -----
     def draw_tooltip(self, img, clamp_h):
