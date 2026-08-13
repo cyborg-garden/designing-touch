@@ -142,11 +142,14 @@ class DitherGirlMode:
     # ----- ui plumbing -----
     def configure_ui(self, ui):
         """Seed this mode's attrs on the shared UI state (first entry only —
-        switching away and back preserves the operator's settings)."""
+        switching away and back preserves the operator's settings, including
+        the input cycle: --still applies on the first entry, then the
+        operator's choice sticks)."""
+        first = not hasattr(ui, "input_idx")
         for k, v in self._UI_DEFAULTS.items():
             if not hasattr(ui, k):
                 setattr(ui, k, v)
-        if self.boot_still:
+        if first and self.boot_still:
             ui.input_idx = 1
 
     def _ui(self, attr, default):

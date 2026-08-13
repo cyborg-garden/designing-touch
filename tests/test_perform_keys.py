@@ -38,7 +38,8 @@ class Rig:
         def recall(name):
             self.applied.append(name)
             self.ui.pending_preset = name   # same mailbox a panel click uses
-        _wire_perform_keys(self.reg, self.ui, self.hud, self.ps, recall)
+        _wire_perform_keys(self.reg, self.ui, self.hud, self.ps, recall,
+                           safe_look=lambda: "abstract")
         # the shell's default seeding for a mode with no stored bank:
         # built-ins on slots 1..9 in order, setlist empty (= all looks)
         self.ui.bank = {str(i + 1): n for i, n in enumerate(PRESETS)}
@@ -69,14 +70,19 @@ def test_space_toggles_blackout_with_amber_flash():
 
 # ---------- 0: panic ----------
 
-def test_panic_reapplies_current_preset_and_disarms_blackout():
+def test_panic_applies_safe_look_disarms_blackout_and_glitch():
+    """Amended DESIGN.md §6.2 '0': panic restores a known-good PICTURE — the
+    mode's safe_look, blackout disarmed, SIGNAL rack (glitch) off."""
     r = Rig()
     r.ui.preset_idx = 3                     # embers is current
+    r.ui.glitch = True                      # SIGNAL rack armed
     r.press(" ")                            # arm blackout
     r.press("0")
     assert r.ps.blackout is False
-    assert r.applied == ["embers"]
-    assert r.ui.pending_preset == "embers"  # today's apply_preset path
+    assert r.ui.glitch is False             # rack off, not just params reset
+    assert r.applied == ["abstract"]        # the safe look, not the current one
+    assert r.ui.preset_idx == 0
+    assert r.ui.pending_preset == "abstract"
     assert r.center_toast().text == "RESET" and r.center_toast().color == H.AMBER
 
 

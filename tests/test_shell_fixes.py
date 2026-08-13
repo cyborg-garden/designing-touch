@@ -199,6 +199,62 @@ def test_recordings_contain_no_panel_hud_or_toast_pixels(tmp_path,
         assert not f.any()
 
 
+# ---------- panic through the shell wiring ----------
+
+def test_panic_key_via_shell_wiring_lands_on_safe_look(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.ui.preset_idx = host.ui.presets.index("phosphor")
+    host.ui.glitch = True
+    host.ps.blackout = True
+    host.reg.dispatch(ord("0"))
+    assert host.ps.blackout is False and host.ui.glitch is False
+    assert host.ui.pending_preset == "classic"       # the mode's safe look
+
+
+# ---------- switch-away-and-back contract (amended DESIGN.md §6.2) ----------
+
+def test_first_entry_applies_safe_look_reentry_preserves_settings(
+        tmp_path, monkeypatch):
+    """FIRST entry to a mode applies safe_look(); RE-entry to an
+    already-visited mode preserves its current settings (rehearsal parity —
+    presets are an instrument, not a reset trap)."""
+    import dtouch.modes as modes
+    from dtouch.modes.dithergirl import ALGOS
+
+    class OtherMode(DitherGirlMode):
+        id = "other"
+        title = "Other"
+
+    monkeypatch.setattr(modes, "REGISTRY", modes.REGISTRY + [OtherMode])
+    host = _host(tmp_path, max_frames=10)
+    seen = {}
+
+    def on_read(n):
+        ui = host.ui
+        if n == 2:
+            host.request_mode("other")       # FIRST entry
+        if n == 4:
+            seen["after_first_entry"] = (ui.preset_name, ui.dg_algo_idx)
+            ui.dg_algo_idx = ALGOS.index("Bayer")    # operator reshapes look
+            ui.preset_idx = ui.presets.index("phosphor")
+        if n == 6:
+            host.request_mode("dithergirl")  # back to boot mode (re-entry)
+        if n == 8:
+            host.request_mode("other")       # re-entry to 'other'
+
+    host._source.on_read = on_read
+    host.run()
+    # first entry landed on the safe look
+    assert seen["after_first_entry"] == ("classic",
+                                         ALGOS.index("Floyd-Steinberg"))
+    # re-entry preserved the operator's settings — no safe_look re-post
+    assert host.mode.id == "other"
+    assert host.ui.dg_algo_idx == ALGOS.index("Bayer")
+    assert host.ui.preset_name == "phosphor"
+    assert host.ui.pending_preset is None
+
+
 # ---------- rename mailbox pump ----------
 
 def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):

@@ -75,7 +75,8 @@ def _register_quit(reg, ps, toasts):
     reg.add("app.quit", "Quit (press twice)", "q", run)
 
 
-def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None):
+def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
+                       safe_look=None):
     """Register the perform layer (DESIGN.md §6.2) on `reg`.
 
     `recall(name)` must route a preset apply through the same path a panel click
@@ -130,8 +131,16 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None):
             toasts.hint("blackout off")
 
     def panic():
-        ps.blackout = False           # panic disarms blackout (DESIGN.md §6.2 '0')
-        recall(ui.preset_name)        # re-apply the current preset's defaults
+        # Amended DESIGN.md §6.2 '0': panic restores a known-good PICTURE —
+        # the mode's safe_look, blackout disarmed, SIGNAL rack (glitch) off.
+        ps.blackout = False
+        ui.glitch = False
+        name = safe_look() if safe_look is not None else ui.preset_name
+        if isinstance(name, str):
+            if name in ui.presets:
+                _recall(name)
+            else:
+                recall(name)
         toasts.flash("RESET", AMBER)
 
     def record():
@@ -272,6 +281,7 @@ class Host:
         self.menu = Menu()                # home menu — a shell overlay state (§3)
         self.pending_mode = None          # mode id posted by a key/menu commit
         self._mode_instances = {}         # id -> constructed Mode (reused on switch)
+        self._mode_preset = {}            # id -> last selected look (re-entry)
         self.help_rows = []
         self.cb = None                    # SIGNAL rack post-FX, built on first use
         self.mic = None
@@ -358,6 +368,12 @@ class Host:
         if cls is None:
             self.hud.toasts.hint(f"unknown mode {mode_id}")
             return False
+        first_entry = mode_id not in self._mode_instances
+        # remember the outgoing mode's selected look so re-entry can restore
+        # the selection highlight without re-applying anything
+        if (self.mode is not None and self.ui is not None
+                and self.ui.preset_idx < len(self.ui.presets)):
+            self._mode_preset[self.mode.id] = self.ui.preset_name
         new = self._mode_instances.get(mode_id) or cls()
         if self.ps.blackout:
             # DESIGN.md §3: while blackout is armed the switch happens under
@@ -375,11 +391,19 @@ class Host:
         if not self.set_mode(new):
             return False                       # toasted + previous reinstated
         self._mode_instances[mode_id] = new
-        # land on the mode's known-good look (predictable from 2 m away)
-        safe = new.safe_look()
-        if isinstance(safe, str) and safe in self.ui.presets:
-            self.ui.preset_idx = self.ui.presets.index(safe)
-            self.ui.pending_preset = safe
+        if first_entry:
+            # FIRST entry lands on the mode's known-good look (predictable
+            # from 2 m away). RE-entry to an already-visited mode preserves
+            # its current settings (amended DESIGN.md §6.2 — presets are an
+            # instrument; switching away and back must not reset the look).
+            safe = new.safe_look()
+            if isinstance(safe, str) and safe in self.ui.presets:
+                self.ui.preset_idx = self.ui.presets.index(safe)
+                self.ui.pending_preset = safe
+        else:
+            prev = self._mode_preset.get(mode_id)
+            if prev in self.ui.presets:
+                self.ui.preset_idx = self.ui.presets.index(prev)
         if self.show:
             self._wire_keys()                  # mode-local commands changed
         self.hud.toasts.flash(new.title, new.accent)
@@ -400,7 +424,8 @@ class Host:
         self.reg = CommandRegistry()
         _wire_perform_keys(self.reg, self.ui, self.hud, self.ps,
                            lambda name: setattr(self.ui, "pending_preset", name),
-                           mode_commands=self.mode.commands())
+                           mode_commands=self.mode.commands(),
+                           safe_look=lambda: self.mode.safe_look())
         self._register_shell_commands()
         self.help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
                                              ("Esc", "Step toward hidden")]

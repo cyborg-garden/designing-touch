@@ -440,6 +440,19 @@ def test_still_flag_boots_into_still_input_and_feeds_the_still(tmp_path):
     assert np.array_equal(seen[0], cv2.flip(still, 1))   # shell-mirrored still
 
 
+def test_still_boot_flag_applies_on_first_entry_only():
+    """--still boots into still input, but switching away and back must
+    preserve the operator's input choice (amended DESIGN.md §6.2 re-entry)."""
+    from types import SimpleNamespace
+    ui = SimpleNamespace()
+    m = DitherGirlMode(still=True)
+    m.configure_ui(ui)
+    assert ui.input_idx == 1                 # first entry: still input
+    ui.input_idx = 0                         # operator switches to camera
+    m.configure_ui(ui)                       # mode away and back (re-entry)
+    assert ui.input_idx == 0                 # the choice sticks
+
+
 def test_still_cycle_without_a_still_snaps_back_with_hint(tmp_path):
     host = _host(tmp_path, mode=DitherGirlMode(still=True), max_frames=2)
     host.run()
