@@ -26,10 +26,120 @@ from .audio import LiveMic
 from .overlay_ui import OverlayUI, DITHERS
 from .circuit_bent import CircuitBent
 from .commands import CommandRegistry
-from .hud import Hud, OverlayState, cycle_overlay, esc_overlay
+from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay, draw_help,
+                  esc_overlay)
 from . import presets as _presets
 
 MATTES = ["auto", "motion", "saliency", "person", "edges", "luma"]
+
+
+class PerformState:
+    """Mutable perform-layer flags (DESIGN.md §6.2), owned by live_flow."""
+
+    def __init__(self, now=time.monotonic):
+        self._now = now
+        self.blackout = False     # output.blackout — hard black, recorded
+        self.help_open = False    # '?' overlay; any key closes it
+        self.quit = False
+        self._q_at = None         # first-press time of the quit confirm
+
+    def q_pressed(self):
+        """Quit confirm: 'q' twice within 2 s quits. True when this press quits."""
+        t = self._now()
+        if self._q_at is not None and t - self._q_at <= 2.0:
+            self.quit = True
+            return True
+        self._q_at = t
+        return False
+
+
+def _register_quit(reg, ps, toasts):
+    def run():
+        if not ps.q_pressed():
+            toasts.hint("q again to quit")
+    reg.add("app.quit", "Quit (press twice)", "q", run)
+
+
+def _wire_perform_keys(reg, ui, hud, ps, recall):
+    """Register the perform layer (DESIGN.md §6.2 — the step-3 subset) on `reg`.
+
+    `recall(name)` must route a preset apply through the same path a panel click
+    takes (live_flow's pending_preset mailbox). Commands read `ui.presets` at
+    press time, so saves/deletes are picked up live. The digit bank is the flat
+    preset list (built-ins + user, load order) — a temporary global bank until
+    presets go per-mode (DESIGN.md §8 step 7). The panel's own toggles remain
+    and stay in sync: both paths set the same ui attributes.
+    """
+    toasts = hud.toasts
+
+    def apply_idx(i):
+        name = ui.presets[i]
+        ui.preset_idx = i
+        recall(name)
+        toasts.flash(f"{i + 1} - {name}")
+
+    def blackout():
+        ps.blackout = not ps.blackout
+        if ps.blackout:
+            toasts.flash("BLACKOUT", AMBER)
+        else:
+            toasts.hint("blackout off")
+
+    def panic():
+        ps.blackout = False           # panic disarms blackout (DESIGN.md §6.2 '0')
+        recall(ui.preset_name)        # re-apply the current preset's defaults
+        toasts.flash("RESET", AMBER)
+
+    def toggle(attr, label):
+        def run():
+            v = not getattr(ui, attr)
+            setattr(ui, attr, v)
+            toasts.flash(f"{label} ON" if v else f"{label.lower()} off")
+        return run
+
+    def record():
+        ui.record = not ui.record
+        if ui.record:
+            toasts.flash("REC", RED)
+        # the stop toast (filename) comes from the loop when the file closes
+
+    reg.add("output.blackout", "Blackout", " ", blackout)
+    reg.add("preset.panic", "Panic reset", "0", panic)
+    for i in range(9):
+        reg.add(f"preset.recall.{i + 1}", f"Recall preset {i + 1}", str(i + 1),
+                lambda i=i: (apply_idx(i) if i < len(ui.presets)
+                             else toasts.hint(f"no preset {i + 1}")))
+    reg.add("preset.prev", "Previous preset", "[",
+            lambda: apply_idx((ui.preset_idx - 1) % len(ui.presets)))
+    reg.add("preset.next", "Next preset", "]",
+            lambda: apply_idx((ui.preset_idx + 1) % len(ui.presets)))
+    reg.add("layer.flock", "Flock", "f", toggle("flock", "FLOCK"))
+    reg.add("layer.glitch", "Glitch", "g", toggle("glitch", "GLITCH"))
+    reg.add("audio.toggle", "Sound react", "a", toggle("audio", "SOUND"))
+    reg.add("record.toggle", "Record", "r", record)
+    reg.add("video_bg.toggle", "Video background", "v", toggle("video_bg", "VIDEO BG"))
+    reg.add("debug.toggle", "Debug readout", "i",
+            lambda: setattr(hud, "debug", not hud.debug))   # feedback: the HUD line
+    reg.add("help.overlay", "Key map", "?",
+            lambda: setattr(ps, "help_open", True))
+    _register_quit(reg, ps, toasts)
+    reg.on_unknown = lambda code: toasts.hint("? for keys")
+
+
+def _perform_key(key, overlay, ps, reg, hud):
+    """One unconsumed keypress through the perform layer. Returns the overlay state.
+
+    Order matters: an open help overlay eats the key (any key closes it), then
+    TAB/Esc step the overlay state, then the command registry dispatches —
+    unknown printable keys fall through to the gentle '? for keys' toast.
+    """
+    if ps.help_open:
+        ps.help_open = False
+        return overlay
+    overlay, handled = _overlay_key(key, overlay, hud.toasts)
+    if not handled:
+        reg.dispatch(key)
+    return overlay
 
 
 def _overlay_key(key, state, toasts):
@@ -160,17 +270,21 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
             ui.user_presets = _presets.user_names()
             cv2.setMouseCallback(win, ui.on_mouse)
 
-    # Key routing goes through the command registry (DESIGN.md principle 7).
-    # Today's behavior only: 'q' quits (case-folded, so 'Q' no longer silently
-    # demands releasing Shift). The perform-layer commands land in step 3.
-    reg = CommandRegistry()
-    _want_quit = [False]
-    reg.add("app.quit", "Quit", "q", lambda: _want_quit.__setitem__(0, True))
-
     # Perform-surface renderer + overlay state machine. Boot state: HUD — the
     # instrument boots into perform, already playing (DESIGN.md §6.1).
     hud = Hud()
     overlay = OverlayState.HUD
+    ps = PerformState()
+
+    # Key routing goes through the command registry (DESIGN.md principle 7):
+    # every perform action is a named command with momentary feedback.
+    reg = CommandRegistry()
+    if ui is not None:
+        _wire_perform_keys(reg, ui, hud, ps,
+                           lambda name: setattr(ui, "pending_preset", name))
+    else:
+        _register_quit(reg, ps, hud.toasts)
+    help_rows = reg.table() + [("TAB", "Cycle overlay"), ("Esc", "Step toward hidden")]
 
     mic = None
     if audio:
@@ -181,14 +295,23 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
     cb = None            # circuit-bent post-FX, built on first use
     t0 = time.time(); fps = 0.0; count = 0
     black_streak = 0
+    last_frame = None    # last good camera frame, held across read failures
+    camera_lost = False
     out = None
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
-                if max_frames is None:
+                # Camera loss: hold the last good frame and say so on the HUD
+                # (DESIGN.md §6.4); recovery is automatic when reads resume.
+                if last_frame is not None:
+                    frame, camera_lost = last_frame, True
+                elif max_frames is None:
                     continue
-                break
+                else:
+                    break
+            else:
+                last_frame, camera_lost = frame, False
             black_streak = black_streak + 1 if float(frame.mean()) < 3.0 else 0
 
             if ui is not None:
@@ -279,7 +402,9 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
                     rec_path = os.path.join("out", "rec_%s.mp4" % time.strftime("%Y%m%d_%H%M%S"))
                     writer = imageio.get_writer(rec_path, fps=24, macro_block_size=8)
                 elif not ui.record and writer is not None:
-                    writer.close(); print("saved", rec_path); writer = None
+                    writer.close(); print("saved", rec_path)
+                    hud.toasts.hint("saved " + rec_path)   # filename toast on stop
+                    writer = None
 
             if mirror:
                 frame = cv2.flip(frame, 1)
@@ -333,6 +458,11 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
                 cb.scanlines = ui.scanlines
                 cb.dither_mode = None if ui.dither_name == "off" else ui.dither_name
                 out = cb.process(out)
+            if ps.blackout:
+                # Hard black AFTER mode render/composite/glitch, BEFORE the
+                # recorder — blackout is part of the show and IS recorded; the
+                # UI/HUD still draw on top per overlay state (DESIGN.md §6.2).
+                out[:] = 0
             if writer is not None:
                 writer.append_data(out)
             bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
@@ -347,21 +477,22 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
                 status = f"matte={matte_kind}  color={pf.palette}  cam={cam_name[:16]}"
                 dbg = f"{fps:4.1f}fps  {1000.0 / fps if fps > 0 else 0.0:5.1f}ms  {rw}x{rh}"
                 if ui is not None and overlay is OverlayState.PANEL:
-                    ui.draw(bgr, {"status": "", "black": black_streak > 15})
+                    ui.draw(bgr, {"status": ""})
                 elif ui is not None:
                     ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
                 hud.draw(bgr, overlay, status=status, debug_status=dbg,
-                         recording=(writer is not None))
+                         recording=(writer is not None), blackout=ps.blackout,
+                         camera_lost=(camera_lost or black_streak > 15))
+                if ps.help_open:
+                    draw_help(bgr, help_rows)   # works in every overlay state
                 cv2.imshow(win, bgr)
                 key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
                 # rename-typing consumes every key; Esc only cancels the rename —
                 # while renaming, no global keys fire (DESIGN.md §6.2)
                 consumed = ui.on_key(key) if (ui is not None and key != 255) else False
                 if not consumed and key != 255:
-                    overlay, handled = _overlay_key(key, overlay, hud.toasts)
-                    if not handled:
-                        reg.dispatch(key)
-                if _want_quit[0] or (ui is not None and ui.quit):
+                    overlay = _perform_key(key, overlay, ps, reg, hud)
+                if ps.quit or (ui is not None and ui.quit):
                     break
                 # quit only when the window is actually destroyed (red X) -> property is -1.
                 # A minimized window reports 0, so this does NOT quit on minimize.

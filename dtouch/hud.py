@@ -119,6 +119,29 @@ def draw_corner_tick(img, size_px, color=AMBER):
     cv2.fillConvexPoly(img, pts, color, cv2.LINE_AA)
 
 
+def draw_help(img, rows):
+    """The live key map over a 65% scrim (DESIGN.md §6.2 `?`). `rows` is
+    (key, label) pairs — the registry's table plus any caller extras (TAB/Esc).
+    Any key closes it; it works in every overlay state. Full-frame scrim is fine
+    here: help is a modal, not part of the steady-state overlay budget."""
+    h, w = img.shape[:2]
+    uu = u(h)
+    np.copyto(img, cv2.convertScaleAbs(img, alpha=0.35))   # 65% scrim
+    px = int(0.9 * uu)
+    row_h = int(1.5 * px)
+    title_px = int(1.4 * uu)
+    total = row_h * len(rows) + int(2.6 * title_px)
+    y = max(int(h * TITLE_SAFE) + title_px, (h - total) // 2 + title_px)
+    x = w // 2 - int(9 * uu)
+    put_outlined(img, "KEYS", (x, y), title_px, ACC)
+    y += int(1.6 * title_px)
+    for key, label in rows:
+        shown = {" ": "space"}.get(key, key)
+        put_outlined(img, shown, (x, y), px, ACC)
+        put_outlined(img, label, (x + int(4.5 * uu), y), px, INK)
+        y += row_h
+
+
 @dataclass
 class _Toast:
     text: str
