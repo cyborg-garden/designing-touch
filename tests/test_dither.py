@@ -380,6 +380,12 @@ class TestRiemersma:
         with pytest.raises(ValueError):
             riemersma_dither(_ramp(4, 4), history=1)
 
+    def test_ratio_one_rejected_with_clear_message(self):
+        """ratio=1.0 makes the per-step decay 1.0 and the weight-sum formula
+        divide by zero — the validator must reject it, not crash mid-frame."""
+        with pytest.raises(ValueError, match="ratio"):
+            riemersma_dither(_ramp(4, 4), ratio=1.0)
+
     def test_hilbert_order_visits_every_pixel_once(self):
         from dtouch.dither import _hilbert_order
         for h, w in ((4, 4), (5, 7), (16, 16), (3, 9)):

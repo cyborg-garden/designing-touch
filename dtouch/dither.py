@@ -408,7 +408,8 @@ def riemersma_dither(img: np.ndarray, bits: int = 2, ratio: float = 1.0 / 8.0,
     ----------
     img : float32 (H, W) or (H, W, C) in [0, 1]
     bits : output bit depth per channel (1–8)
-    ratio : weight of the oldest history entry relative to the newest (0, 1]
+    ratio : weight of the oldest history entry relative to the newest,
+        strictly inside (0, 1) — 1.0 would zero the decay denominator
     history : number of past errors carried along the curve (≥ 2)
     gamma : diffuse in linear light (default). False = historical behaviour.
 
@@ -418,8 +419,10 @@ def riemersma_dither(img: np.ndarray, bits: int = 2, ratio: float = 1.0 / 8.0,
     """
     if bits < 1 or bits > 8:
         raise ValueError(f"bits must be 1–8, got {bits}")
-    if not 0.0 < ratio <= 1.0:
-        raise ValueError(f"ratio must be in (0, 1], got {ratio}")
+    if not 0.0 < ratio < 1.0:
+        # ratio=1.0 would make the decay 1.0 and the weight sum divide by zero
+        raise ValueError(
+            f"ratio must be strictly between 0 and 1 (exclusive), got {ratio}")
     if history < 2:
         raise ValueError(f"history must be >= 2, got {history}")
 
