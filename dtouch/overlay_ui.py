@@ -27,8 +27,8 @@ import cv2
 from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
                     in_rect as _in)
-from .panelspec import (Slider, Toggle, Cycle, Action, Readout, PresetList,
-                        Section)
+from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
+                        PresetList, Section)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
@@ -65,8 +65,15 @@ _SLIDERS = [
 ]
 
 
+# UI attr -> serialized preset key, where they differ (the v1 names — so a
+# migrated look and a fresh capture are byte-compatible; DESIGN.md §7).
+_SAVE_KEYS = {"curl": "curl_amp", "dot": "base_size", "reseed": "reseed_frac",
+              "pull": "pull_falloff"}
+
+
 def _slider_spec(label, attr, tip, **kw):
     lo, hi = _RANGES[attr]
+    kw.setdefault("save_key", _SAVE_KEYS.get(attr))
     return Slider(label, attr, lo, hi, tip=tip, **kw)
 
 
@@ -78,7 +85,7 @@ def build_particles_sections(palettes, mattes):
     return [
         Section("TEMPLATES", [PresetList()]),
         Section("SOURCE", [
-            Cycle("matte", "matte_idx", list(mattes)),
+            Cycle("matte", "matte_idx", list(mattes), save_key="matte"),
             Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
                   key="res", save=False),
             Toggle("Video bg", "video_bg"),
@@ -87,8 +94,12 @@ def build_particles_sections(palettes, mattes):
                          apply="keep"),
         ]),
         Section("LOOK", [
-            Cycle("color", "palette_idx", list(palettes), gap=4),
-        ] + look_sliders),
+            Cycle("color", "palette_idx", list(palettes), gap=4,
+                  save_key="palette"),
+        ] + look_sliders + [
+            # captured-but-undrawn: saved since v1, no panel control yet
+            Param("attract_speed"),
+        ]),
         # MOTION — boids steering (dtouch.flock). The sliders stay visible while off so the
         # section reads as a thing you can turn on, not a thing that appears from nowhere.
         Section("MOTION", [
@@ -110,7 +121,7 @@ def build_signal_section():
     state serializes under "signal" inside each mode's looks."""
     return Section("SIGNAL", [
             Toggle("Glitch", "glitch"),
-            Cycle("dither", "dither_idx", list(DITHERS)),
+            Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
             _slider_spec("Chroma", "chroma",
                          "Colour bleed: red and blue drift apart, slowly."),
             _slider_spec("Drift", "drift",
@@ -118,7 +129,7 @@ def build_signal_section():
             _slider_spec("Crush", "crush",
                          "Hard bit-depth reduction. 0 = off."),
             Toggle("Scanlines", "scanlines", on_text="on"),
-        ], open=False, gap=6)
+        ], open=False, gap=6, store="signal")
 
 
 def build_global_rows():
@@ -167,9 +178,15 @@ class OverlayUI:
         self.chroma, self.drift, self.crush = 10.0, 8.0, 0.0
         self.dither_idx = 0
         self.scanlines = True
+        self.attract_speed = 4.5   # captured Param — no panel control yet
         self.res_options = list(RES_OPTIONS)
         self.res_idx = next((i for i, (_, rw, rh) in enumerate(self.res_options)
-                             if (rw, rh) == (w, h)), 1)
+                             if (rw, rh) == (w, h)), None)
+        if self.res_idx is None:
+            # non-standard boot res (tests, custom rigs): a real option, so the
+            # shell's res sync doesn't silently "correct" the output to 1080p
+            self.res_options.insert(0, (f"{w}x{h}", w, h))
+            self.res_idx = 0
         self.open = True
         self.quit = False
         self.scroll = 0          # panel scroll offset (px) — content taller than the window
@@ -212,6 +229,9 @@ class OverlayUI:
             if isinstance(wdg, Toggle):
                 self._toggles[wdg.attr] = wdg
             elif isinstance(wdg, Cycle):
+                if wdg.attr == "res_idx":
+                    # the instance may carry a custom boot resolution option
+                    wdg.options = [n for n, _, _ in self.res_options]
                 self._cycles[wdg.hit_key] = wdg
             elif isinstance(wdg, Slider):
                 self._sliders[wdg.attr] = wdg
@@ -245,6 +265,7 @@ class OverlayUI:
         self.fade, self.exposure = glow.fade, glow.exposure
         self.spark, self.curl, self.dot = pf.spark, pf.curl_amp, pf.base_size
         self.damp, self.pull, self.reseed = pf.damp, pf.pull_falloff, pf.reseed_frac
+        self.attract_speed = pf.attract_speed
         if matte in self.mattes: self.matte_idx = self.mattes.index(matte)
         if pf.palette in self.palettes: self.palette_idx = self.palettes.index(pf.palette)
 
@@ -366,6 +387,8 @@ class OverlayUI:
             return self._draw_preset_list(frame, x, y, cw, px)
         if isinstance(wdg, Readout):
             return wdg.render(frame, g, x, y, cw)
+        if isinstance(wdg, Param):
+            return y                # captured, never drawn (no row, no pixels)
         raise TypeError(f"unknown panel-spec widget {wdg!r}")
 
     def _draw_preset_list(self, frame, x, y, cw, px):

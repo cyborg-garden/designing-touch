@@ -30,6 +30,7 @@ from .commands import Command, CommandRegistry
 from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay, draw_help,
                   esc_overlay)
 from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
+from .panelspec import apply_look, capture_look
 from . import presets as _presets
 
 
@@ -178,27 +179,6 @@ def _overlay_key(key, state, toasts):
     return new, True
 
 
-def _apply_fx(ui, raw):
-    """Restore MOTION + SIGNAL state from a saved look, if it recorded any.
-
-    Every key is optional: the built-in presets predate these effects and saved looks
-    from before this change have none of them. A missing key must leave the live toggle
-    alone rather than resetting it — otherwise hopping between built-in templates would
-    silently switch your glitch off.
-    """
-    from .overlay_ui import DITHERS
-    if "flock" in raw: ui.flock = bool(raw["flock"])
-    if "cohere" in raw: ui.cohere = float(raw["cohere"])
-    if "align" in raw: ui.align = float(raw["align"])
-    if "separate" in raw: ui.separate = float(raw["separate"])
-    if "glitch" in raw: ui.glitch = bool(raw["glitch"])
-    if "chroma" in raw: ui.chroma = float(raw["chroma"])
-    if "drift" in raw: ui.drift = float(raw["drift"])
-    if "crush" in raw: ui.crush = float(raw["crush"])
-    if "scanlines" in raw: ui.scanlines = bool(raw["scanlines"])
-    if raw.get("dither") in DITHERS: ui.dither_idx = DITHERS.index(raw["dither"])
-
-
 class CameraSource:
     """The default frame source — wraps camera selection (dtouch.camera)."""
 
@@ -286,33 +266,19 @@ class Host:
         return names
 
     def _capture_cfg(self):
-        """Today's hand-written save dict (spec-derived capture lands at
-        DESIGN.md §8 step 7)."""
-        ui, mode = self.ui, self.mode
-        return dict(matte=mode.matte_kind, palette=mode.pf.palette,
-                    fade=mode.glow.fade, exposure=ui.exposure, spark=ui.spark,
-                    curl_amp=ui.curl, reseed_frac=ui.reseed, base_size=ui.dot,
-                    damp=ui.damp, pull_falloff=ui.pull,
-                    attract_speed=mode.pf.attract_speed,
-                    video_bg=ui.video_bg, video_mix=ui.video_mix,
-                    audio=ui.audio, sens=ui.sens,
-                    # MOTION + SIGNAL travel with the look; without these a
-                    # saved glitch preset would come back clean.
-                    flock=ui.flock, cohere=ui.cohere, align=ui.align,
-                    separate=ui.separate,
-                    glitch=ui.glitch, chroma=ui.chroma, drift=ui.drift,
-                    crush=ui.crush, dither=ui.dither_name,
-                    scanlines=ui.scanlines)
+        """Spec-derived capture (DESIGN.md §2.1/§7): walk the composed panel
+        spec's save=True widgets — the single schema authority. The SIGNAL
+        rack's block nests under "signal" (its Section declares store)."""
+        return capture_look(self.ui, self.ui.spec)
 
     def _apply_pending_preset(self):
+        """Spec-derived apply onto the shared UI state; engines pick the values
+        up in the mode's next step() sync. apply="keep" widgets are untouched
+        by look-switching; apply="reset" merges over the mode's defaults."""
         ui = self.ui
-        raw = self.mode.apply_look(ui.pending_preset, self.all_presets)
-        ui.sync_from(self.mode.pf, self.mode.glow, self.mode.matte_kind)
-        if "video_bg" in raw: ui.video_bg = bool(raw["video_bg"])
-        if "video_mix" in raw: ui.video_mix = float(raw["video_mix"])
-        if "audio" in raw: ui.audio = bool(raw["audio"])
-        if "sens" in raw: ui.sens = float(raw["sens"])
-        _apply_fx(ui, raw)
+        name = ui.pending_preset
+        if name in self.all_presets:
+            apply_look(ui, ui.spec, self.all_presets[name], self.mode.DEFAULTS)
         ui.pending_preset = None
 
     def _pump_preset_mailboxes(self):
@@ -381,13 +347,25 @@ class Host:
         mode = self.mode
         self.all_presets = _presets.load(self.presets_path)
         preset = self._boot_preset
-        raw0 = (mode.apply_look(preset, self.all_presets)
-                if preset in self.all_presets else {})
-        video_bg = bool(raw0.get("video_bg", mode.boot_video_bg))
-        video_mix = float(raw0.get("video_mix", mode.boot_video_mix))
-        audio = bool(raw0.get("audio", self._boot_audio))
 
-        ui = None
+        # The shared UI-state object ALWAYS exists — it is the mode's parameter
+        # surface (spec capture/apply target + step()'s per-frame sync source).
+        # `show`/`panel` only govern whether it is drawn and clickable.
+        ui = self.ui = OverlayUI(rw, rh, list(self.all_presets.keys()),
+                                 list(mode.palettes), list(mode.mattes),
+                                 preset=preset, matte=mode.matte_kind,
+                                 palette=mode.pf.palette)
+        ui.set_spec(self.compose_spec(mode))
+        ui.mirror = self.mirror
+        ui.audio = self._boot_audio
+        ui.video_bg = mode.boot_video_bg
+        ui.video_mix = mode.boot_video_mix
+        if preset in self.all_presets:
+            # the look loaded at startup, same as a live switch (spec-derived)
+            apply_look(ui, ui.spec, self.all_presets[preset], mode.DEFAULTS)
+        mode.configure_ui(ui)
+        ui.user_presets = _presets.user_names(self.presets_path)
+
         if self.show:
             # AUTOSIZE: the window is fixed at the render resolution so the OS
             # can't maximize/scale it — that scaling was tanking fps (display
@@ -395,25 +373,9 @@ class Host:
             # 'output' resolution; the window resizes to match natively.
             cv2.namedWindow(self.WIN, cv2.WINDOW_AUTOSIZE)
             if self.panel:
-                ui = self.ui = OverlayUI(rw, rh, list(self.all_presets.keys()),
-                                         list(mode.palettes), list(mode.mattes),
-                                         preset=preset, matte=mode.matte_kind,
-                                         palette=mode.pf.palette)
-                ui.set_spec(self.compose_spec(mode))
-                ui.sync_from(mode.pf, mode.glow, mode.matte_kind)
-                ui.mirror = self.mirror
-                ui.audio = audio
-                ui.video_bg = video_bg
-                ui.video_mix = video_mix
-                if "sens" in raw0:
-                    ui.sens = float(raw0["sens"])
-                _apply_fx(ui, raw0)   # the look loaded at startup, same as a live switch
-                mode.configure_ui(ui)
-                self.ui.user_presets = _presets.user_names(self.presets_path)
                 cv2.setMouseCallback(self.WIN, ui.on_mouse)
-
-        # Key routing goes through the command registry (DESIGN.md principle 7).
-        if ui is not None:
+            # Key routing goes through the command registry (DESIGN.md
+            # principle 7) — the full perform layer, panel shown or not.
             _wire_perform_keys(self.reg, ui, self.hud, self.ps,
                                lambda name: setattr(ui, "pending_preset", name),
                                mode_commands=mode.commands())
@@ -422,8 +384,6 @@ class Host:
         help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
                                         ("Esc", "Step toward hidden")]
 
-        if audio:
-            self.mic = LiveMic(); self.mic.start()
         os.makedirs("out", exist_ok=True)
 
         t0 = time.time(); fps = 0.0; count = 0
@@ -449,9 +409,8 @@ class Host:
                     last_frame, camera_lost = frame, False
                 black_streak = black_streak + 1 if float(frame.mean()) < 3.0 else 0
 
-                if ui is not None:
-                    self._pump_preset_mailboxes()
-                    self._sync_host_state()
+                self._pump_preset_mailboxes()
+                self._sync_host_state()
 
                 if self.mirror:
                     frame = cv2.flip(frame, 1)
@@ -470,7 +429,7 @@ class Host:
                 # which only swaps which channel drifts left vs right — the offsets
                 # are independent symmetric draws, so the look is identical.
                 # Constructed lazily so a session that never enables it pays nothing.
-                if ui is not None and ui.glitch:
+                if ui.glitch:
                     if self.cb is None:
                         self.cb = CircuitBent(seed=self.seed)
                     cb = self.cb
@@ -500,9 +459,9 @@ class Host:
                     rw, rh = self.res
                     status = mode.status_line(self.cam_name)
                     dbg = f"{fps:4.1f}fps  {1000.0 / fps if fps > 0 else 0.0:5.1f}ms  {rw}x{rh}"
-                    if ui is not None and self.overlay is OverlayState.PANEL:
+                    if self.panel and self.overlay is OverlayState.PANEL:
                         ui.draw(bgr, {"status": ""})
-                    elif ui is not None:
+                    else:
                         ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
                     self.hud.draw(bgr, self.overlay, status=status, debug_status=dbg,
                                   recording=(self.writer is not None),
@@ -514,11 +473,11 @@ class Host:
                     key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
                     # rename-typing consumes every key; Esc only cancels the rename —
                     # while renaming, no global keys fire (DESIGN.md §6.2)
-                    consumed = ui.on_key(key) if (ui is not None and key != 255) else False
+                    consumed = ui.on_key(key) if key != 255 else False
                     if not consumed and key != 255:
                         self.overlay = _perform_key(key, self.overlay, self.ps,
                                                     self.reg, self.hud)
-                    if self.ps.quit or (ui is not None and ui.quit):
+                    if self.ps.quit or ui.quit:
                         break
                     # quit only when the window is actually destroyed (red X) ->
                     # property is -1. A minimized window reports 0, so this does

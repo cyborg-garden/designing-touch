@@ -168,6 +168,7 @@ class ParticlesMode:
             pf.damp = ui.damp
             pf.pull_falloff = ui.pull
             pf.reseed_frac = ui.reseed
+            pf.attract_speed = ui.attract_speed
             # flocking: gains go to 0 when the toggle is off, which short-circuits
             # the solver entirely — the off state costs nothing.
             pf.flock_cohesion = ui.cohere if ui.flock else 0.0
@@ -213,20 +214,3 @@ class ParticlesMode:
             out = composite_video_bg(out, frame_bgr, video_mix)
         return out
 
-    # ----- looks -----
-    def apply_look(self, name, looks):
-        """Merge a look over DEFAULTS onto the engines. Returns the raw cfg
-        (shell mirrors it into the UI state). Missing keys keep live state."""
-        if name not in looks:
-            return {}
-        cfg = {**self.DEFAULTS, **looks[name]}
-        if cfg.get("matte") and cfg["matte"] != self.matte_kind:
-            self.matte_kind = cfg["matte"]
-            self.mat = make_matte(cfg["matte"])
-        pf, glow = self.pf, self.glow
-        pf.palette = cfg["palette"]; pf.spark = cfg["spark"]; pf.curl_amp = cfg["curl_amp"]
-        pf.reseed_frac = cfg["reseed_frac"]; pf.base_size = cfg["base_size"]
-        pf.damp = cfg["damp"]; pf.pull_falloff = cfg["pull_falloff"]
-        pf.attract_speed = cfg["attract_speed"]
-        glow.fade = cfg["fade"]; glow.exposure = cfg["exposure"]
-        return looks[name]

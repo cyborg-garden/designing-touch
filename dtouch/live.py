@@ -16,7 +16,7 @@ import cv2
 
 from .camera import open_camera
 from .modes.particles import MATTES, ParticlesMode, composite_video_bg  # noqa: F401
-from .shell import (Host, PerformState, _apply_fx, _overlay_key,  # noqa: F401
+from .shell import (Host, PerformState, _overlay_key,  # noqa: F401
                     _perform_key, _register_quit, _wire_perform_keys)
 
 

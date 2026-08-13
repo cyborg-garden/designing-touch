@@ -31,6 +31,11 @@ class Slider:
     save: bool = True
     apply: str = "reset"
     gap: int = 0
+    save_key: Optional[str] = None   # serialized name; defaults to attr
+
+    @property
+    def store_key(self):
+        return self.save_key if self.save_key is not None else self.attr
 
 
 @dataclass
@@ -44,6 +49,11 @@ class Toggle:
     off_text: str = "off"
     label_fn: Optional[Callable[[bool], str]] = None   # e.g. Record / Stop recording
     gap: int = 0
+    save_key: Optional[str] = None
+
+    @property
+    def store_key(self):
+        return self.save_key if self.save_key is not None else self.attr
 
 
 @dataclass
@@ -55,10 +65,30 @@ class Cycle:
     save: bool = True
     apply: str = "reset"
     gap: int = 2
+    save_key: Optional[str] = None   # serialized name (stores the VALUE, not the index)
 
     @property
     def hit_key(self):
         return self.key if self.key is not None else self.label
+
+    @property
+    def store_key(self):
+        return self.save_key if self.save_key is not None else self.attr
+
+
+@dataclass
+class Param:
+    """A captured-but-undrawn engine parameter (no row, no pixels). It exists
+    so the spec stays the single schema authority even for values without a
+    panel control yet (e.g. Particles' attract_speed, saved since v1)."""
+    attr: str
+    save_key: Optional[str] = None
+    save: bool = True
+    apply: str = "reset"
+
+    @property
+    def store_key(self):
+        return self.save_key if self.save_key is not None else self.attr
 
 
 @dataclass
@@ -87,3 +117,80 @@ class Section:
     open: bool = True
     key_hint: Optional[str] = None
     gap: int = 4                 # space after the section (open or closed)
+    store: Optional[str] = None  # nest this section's captured state under
+                                 # cfg[store] (the shell's SIGNAL rack → "signal",
+                                 # DESIGN.md §2.4/§7)
+
+
+# ----- spec-derived preset capture/apply (DESIGN.md §2.1/§7 — the single
+# ----- schema authority; kills the KEYS vs save-dict vs _apply_fx drift) -----
+
+_VALUE_WIDGETS = (Slider, Toggle, Cycle, Param)
+
+
+def walk_spec(spec):
+    """Yield (section_or_None, widget) over a panel spec, in spec order."""
+    for item in spec:
+        if isinstance(item, Section):
+            for w in item.widgets:
+                yield item, w
+        else:
+            yield None, item
+
+
+def capture_look(state, spec) -> dict:
+    """Read every save=True widget's value off `state` into a look dict.
+    Cycles store the option VALUE (not the index); sections with a `store`
+    key nest their block (the SIGNAL rack serializes under "signal")."""
+    cfg = {}
+    for section, w in walk_spec(spec):
+        if not isinstance(w, _VALUE_WIDGETS) or not w.save:
+            continue
+        target = cfg
+        if section is not None and section.store:
+            target = cfg.setdefault(section.store, {})
+        if isinstance(w, Cycle):
+            opts = list(w.options)
+            target[w.store_key] = opts[getattr(state, w.attr) % len(opts)]
+        elif isinstance(w, Toggle):
+            target[w.store_key] = bool(getattr(state, w.attr))
+        else:
+            target[w.store_key] = float(getattr(state, w.attr))
+    return cfg
+
+
+def apply_look(state, spec, cfg, defaults=None):
+    """Write a look onto `state` per the spec's apply flags (DESIGN.md §7):
+
+    - key present in the look → applied (both flags);
+    - key absent + apply="reset" → reset to the mode's default, when the mode
+      declares one — a reset-flagged widget with no declared default keeps its
+      live value (today's asymmetric semantics, encoded as data);
+    - key absent + apply="keep" → live value untouched (template-hopping never
+      resets your toggles).
+
+    Cycles map a stored VALUE back to its index; unknown values are ignored.
+    Engines pick the new state up on the next step() sync.
+    """
+    defaults = defaults or {}
+    for section, w in walk_spec(spec):
+        if not isinstance(w, _VALUE_WIDGETS) or not w.save:
+            continue
+        src = cfg
+        if section is not None and section.store:
+            src = cfg.get(section.store) or {}
+        key = w.store_key
+        if key in src:
+            val = src[key]
+        elif w.apply == "reset" and key in defaults:
+            val = defaults[key]
+        else:
+            continue
+        if isinstance(w, Cycle):
+            opts = list(w.options)
+            if val in opts:
+                setattr(state, w.attr, opts.index(val))
+        elif isinstance(w, Toggle):
+            setattr(state, w.attr, bool(val))
+        else:
+            setattr(state, w.attr, float(val))
