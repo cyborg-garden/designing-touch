@@ -306,37 +306,43 @@ def floyd_steinberg(img: np.ndarray, bits: int = 2,
 
     levels = float((1 << bits) - 1)
     squeezed = img.ndim == 2
-    buf = _linearize(img) if gamma else img.astype(np.float32)
+    src = _linearize(img) if gamma else img.astype(np.float32)
     if squeezed:
-        buf = buf[:, :, np.newaxis]
-    buf = buf.copy()
-    h, w, _ = buf.shape
+        src = src[:, :, np.newaxis]
+    h, w, channels = src.shape
 
-    for y in range(h):
-        for x in range(w):
-            # .copy() is essential: buf[y, x] is a view; writing new back to
-            # buf[y, x] would clobber old through the same view, zeroing err.
-            old = buf[y, x].copy()
-            new = np.round(old * levels) / levels
-            buf[y, x] = new
-            err = old - new
-            if x + 1 < w:
-                buf[y, x + 1]     += err * (7.0 / 16.0)
-            if y + 1 < h:
-                if x > 0:
-                    buf[y + 1, x - 1] += err * (3.0 / 16.0)
-                buf[y + 1, x]     += err * (5.0 / 16.0)
+    out = np.empty((h, w, channels), dtype=np.float32)
+    for c in range(channels):
+        # Per-channel raster loop on plain Python floats (rows via tolist):
+        # ~20× faster than per-pixel numpy scalar ops at live working sizes,
+        # same diffusion arithmetic. round() is banker's rounding, matching
+        # the previous np.round behaviour.
+        rows = src[:, :, c].astype(np.float64).tolist()
+        for y in range(h):
+            row = rows[y]
+            below = rows[y + 1] if y + 1 < h else None
+            for x in range(w):
+                old = row[x]
+                new = round(old * levels) / levels
+                row[x] = new
+                err = old - new
                 if x + 1 < w:
-                    buf[y + 1, x + 1] += err * (1.0 / 16.0)
-
-    buf = np.clip(buf, 0.0, 1.0)
-    if gamma:
-        # Every pixel holds a quantised level after the loop (clipping only
-        # snaps out-of-range values onto the end levels), so re-encoding via
-        # the small level LUT is exact.
-        idx = np.rint(buf * levels).astype(np.int32)
-        buf = _encode_levels(idx, int(levels), gamma=True)
-    return (buf[:, :, 0] if squeezed else buf).astype(np.float32)
+                    row[x + 1] += err * (7.0 / 16.0)
+                if below is not None:
+                    if x > 0:
+                        below[x - 1] += err * (3.0 / 16.0)
+                    below[x] += err * (5.0 / 16.0)
+                    if x + 1 < w:
+                        below[x + 1] += err * (1.0 / 16.0)
+        plane = np.clip(np.asarray(rows, dtype=np.float32), 0.0, 1.0)
+        if gamma:
+            # Every pixel holds a quantised level after the loop (clipping only
+            # snaps out-of-range values onto the end levels), so re-encoding via
+            # the small level LUT is exact.
+            idx = np.rint(plane * levels).astype(np.int32)
+            plane = _encode_levels(idx, int(levels), gamma=True)
+        out[:, :, c] = plane
+    return (out[:, :, 0] if squeezed else out).astype(np.float32)
 
 
 # Hilbert traversal order cache: (h, w) → (row_indices, col_indices).

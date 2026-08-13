@@ -23,9 +23,10 @@ sections, its mode-local commands, and its defaults + built-in looks. The shell
 Modes register in REGISTRY (graft from Contract): one import + one line adds a
 mode to the menu, key table, and preset store.
 """
+from .dithergirl import DitherGirlMode
 from .particles import ParticlesMode
 
-REGISTRY = [ParticlesMode]
+REGISTRY = [ParticlesMode, DitherGirlMode]
 
 
 def mode_by_id(mode_id):

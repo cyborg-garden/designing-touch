@@ -252,3 +252,156 @@ def test_gl_soak_start_stop_25_cycles(tmp_path):
     m.start(host)
     assert m.step(frame, None, 1 / 30).dtype == np.uint8
     m.stop()
+
+
+def test_gl_soak_alternating_particles_dithergirl_25_cycles(tmp_path):
+    """DESIGN.md §8 step 8: the GL context lifecycle survives alternating
+    particles <-> dithergirl swaps (26 cycles), and both still render after."""
+    from dtouch.modes.dithergirl import DitherGirlMode
+
+    host = _host(tmp_path)
+    frame = np.full((36, 64, 3), 128, np.uint8)
+    p, d = _mode(), DitherGirlMode()
+    for _ in range(26):
+        p.start(host)
+        assert p.step(frame, None, 1 / 30).shape == (RES[1], RES[0], 3)
+        p.stop()
+        d.start(host)
+        assert d.step(frame, None, 1 / 30).shape == (RES[1], RES[0], 3)
+        d.stop()
+    p.stop(); d.stop()                      # idempotent after the soak too
+    p.start(host)
+    assert p.step(frame, None, 1 / 30).dtype == np.uint8
+    p.stop()
+    d.start(host)
+    assert d.step(frame, None, 1 / 30).dtype == np.uint8
+    d.stop()
+
+
+# ---------- live mode switching (DESIGN.md §3 / §8 step 8) ----------
+
+class FakeWriter:
+    def __init__(self):
+        self.frames = []
+        self.closed = False
+
+    def append_data(self, f):
+        self.frames.append(np.asarray(f))
+
+    def close(self):
+        self.closed = True
+
+
+class DummyMic:
+    available = False
+
+    def stop(self):
+        pass
+
+
+def _patch_on_read(src, on_read):
+    """Fire a hook after every source read — drives mid-loop events."""
+    orig = src.read
+
+    def read():
+        r = orig()
+        on_read(src.reads)
+        return r
+    src.read = read
+
+
+def test_switch_to_dithergirl_mid_loop_preserves_perform_state(tmp_path):
+    """Switching draws a recorded boot card, lands on the new mode's safe
+    look, recolors the chrome, and preserves overlay state, blackout,
+    recording, and the audio toggle (DESIGN.md §3)."""
+    from dtouch.hud import OverlayState
+    from dtouch.modes.dithergirl import ACCENT, DitherGirlMode
+
+    host = _host(tmp_path, max_frames=8)
+    writer = FakeWriter()
+
+    def on_read(n):
+        if n == 2:
+            host.overlay = OverlayState.PANEL
+            host.ps.blackout = True
+            host.ui.audio = True
+            host.mic = DummyMic()           # keep _sync from opening a real mic
+            host.ui.record = True
+            host.writer, host.rec_path = writer, "fake"
+            host.ui.glitch = True
+        if n == 3:
+            host.request_mode("dithergirl")
+
+    _patch_on_read(host._source, on_read)
+    count, out = host.run()
+
+    assert host.mode.id == "dithergirl"
+    assert host.ui.accent == ACCENT
+    assert host.ui.preset_name == "classic"              # landed on the safe look
+    titles = [s.title for s in host.ui.spec
+              if hasattr(s, "title")]
+    assert "ALGORITHM" in titles and "LOOK" not in titles
+    # preserved across the switch:
+    assert host.overlay is OverlayState.PANEL
+    assert host.ps.blackout is True
+    assert host.ui.audio is True
+    assert host.ui.record is True and writer.closed      # closed by shutdown only
+    assert host.ui.glitch is True
+    # the recorder captured the boot card (accent pixels on black), not a gray
+    # flash, and kept recording mode frames after the switch
+    cards = [f for f in writer.frames
+             if ((f[:, :, 0].astype(int) > 160)
+                 & (f[:, :, 2].astype(int) > 160)
+                 & (f[:, :, 1].astype(int) < f[:, :, 0].astype(int) - 30)).any()]
+    assert len(cards) == 1
+    assert len(writer.frames) > 1                        # recording never stopped
+
+
+def test_switch_back_to_particles_restores_its_panel(tmp_path):
+    from dtouch.modes.dithergirl import DitherGirlMode
+
+    host = _host(tmp_path, mode=DitherGirlMode(), max_frames=6)
+
+    def on_read(n):
+        if n == 2:
+            host.request_mode("particles")
+    _patch_on_read(host._source, on_read)
+    host.run()
+    assert host.mode.id == "particles"
+    titles = [s.title for s in host.ui.spec if hasattr(s, "title")]
+    assert "LOOK" in titles and "ALGORITHM" not in titles
+    assert host.ui.accent == ParticlesMode.accent
+    assert host.ui.preset_name == "abstract"             # particles' safe look
+
+
+def test_switch_failure_reinstates_running_mode(tmp_path, monkeypatch):
+    """A mode whose start() raises mid-switch toasts and leaves the previous
+    mode running (DESIGN.md §6.4), even through the pending-mode path."""
+    import dtouch.modes as modes
+
+    class BrokenMode(ParticlesMode):
+        id = "broken"
+        title = "Broken"
+
+        def start(self, host):
+            raise RuntimeError("no engine for you")
+
+    monkeypatch.setattr(modes, "REGISTRY", modes.REGISTRY + [BrokenMode])
+    host = _host(tmp_path, max_frames=5)
+
+    def on_read(n):
+        if n == 2:
+            host.request_mode("broken")
+    _patch_on_read(host._source, on_read)
+    count, out = host.run()
+    assert count == 5                                    # the show went on
+    assert host.mode.id == "particles"
+    assert out.shape == (RES[1], RES[0], 3)
+
+
+def test_request_same_mode_is_a_hint_not_a_switch(tmp_path):
+    host = _host(tmp_path, max_frames=1)
+    host.run()
+    host.request_mode("particles")
+    assert host.pending_mode is None
+    assert host.hud.toasts.active()

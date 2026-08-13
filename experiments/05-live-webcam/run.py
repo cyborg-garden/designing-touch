@@ -14,6 +14,9 @@ Mode 'grid' is the older luminance-displaced grid.
     python run.py --flock               # start with the particle cloud flocking
     python run.py --glitch              # start with the circuit-bent signal chain on
 
+    python run.py --mode dithergirl     # boot into Dither Girl (live dithering)
+    python run.py --still photo.jpg     # load a still and imply dithergirl
+
 Controls (flow): q quit · n cycle matte · m mirror · [ ] trail length · -/= glow · space freeze
 
 The control panel groups everything into collapsible sections: TEMPLATES, SOURCE, LOOK,
@@ -25,6 +28,7 @@ import argparse
 
 from dtouch.camera import list_cameras
 from dtouch.live import live
+from dtouch.modes.dithergirl import DitherGirlMode
 from dtouch.modes.particles import ParticlesMode
 from dtouch.shell import Host
 
@@ -34,9 +38,20 @@ def parse_wh(s):
     return int(a), int(b)
 
 
+def boot_mode_name(mode_arg, still_arg):
+    """--still PATH implies dithergirl unless --mode is given (DESIGN.md §3:
+    CLI flags mean 'boot into')."""
+    if mode_arg:
+        return mode_arg
+    return "dithergirl" if still_arg else "flow"
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", default="flow", choices=["flow", "grid"])
+    ap.add_argument("--mode", default=None,
+                    choices=["flow", "grid", "dithergirl"])
+    ap.add_argument("--still", default=None, metavar="PATH",
+                    help="load a still image (implies --mode dithergirl)")
     ap.add_argument("--ui", default="panel", choices=["panel", "keys"],
                     help="panel = render + slider window (default); keys = render only")
     ap.add_argument("--audio", action="store_true", help="start with mic reactivity on")
@@ -68,16 +83,22 @@ def main():
         return
 
     device = int(args.device) if args.device.isdigit() else args.device
-    if args.mode == "grid":
+    boot = boot_mode_name(args.mode, args.still)
+    if boot == "grid":
         live(device=device, res=parse_wh(args.res), mirror=not args.no_mirror)
+        return
+    # thin launcher: shell + mode (DESIGN.md §8 step 6)
+    if boot == "dithergirl":
+        mode = DitherGirlMode(still=bool(args.still))
+        preset = args.preset
     else:
-        # thin launcher: shell + mode (DESIGN.md §8 step 6)
         mode = ParticlesMode(matte=args.matte, grid=parse_wh(args.grid),
                              n=args.particles, flock=args.flock, glitch=args.glitch)
-        host = Host(mode, device=device, res=parse_wh(args.res),
-                    preset=args.preset, audio=args.audio,
-                    panel=(args.ui == "panel"), mirror=not args.no_mirror)
-        host.run()
+        preset = args.preset
+    host = Host(mode, device=device, res=parse_wh(args.res),
+                preset=preset, audio=args.audio, still=args.still,
+                panel=(args.ui == "panel"), mirror=not args.no_mirror)
+    host.run()
 
 
 if __name__ == "__main__":
