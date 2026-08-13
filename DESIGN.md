@@ -206,6 +206,18 @@ teardown), then `old.stop()` → `new.start(host)`, then a 3u center toast. The
 recorder captures the card, not a gray flash. Mid-set switching never requires
 the menu: `P` and `D` switch directly from any overlay state.
 
+While blackout is armed, the boot card is NOT shown bright — the switch happens
+under black (tick stays); the card is only for un-blacked-out switches. Inside
+the menu, unknown keys get the `? for keys` hint (silence-on-input is a bug
+there too) and `q` closes the menu and arms the quit confirm. The menu's bottom
+hint line (`, . move - enter select - esc back`) is part of the layout, and the
+real mode cards render their titles in CAPS per the sketch.
+
+Saving a look (`+ Save current look` row, or the `s` key): creates an
+auto-named look and immediately opens its rename box — naming is one flow —
+and two saves in one second must not collide (suffix on collision). Save,
+rename, and delete all confirm with toasts, never stdout.
+
 ---
 
 ## 4. Per-mode panels
@@ -304,8 +316,9 @@ pinned regression target. Hit targets ≥ 2.75u whole-row.
   Cartridge doc's near-white accent failed its own legibility rule; pick by
   measured contrast, not vibes). Accent = selected/active/ON + mode identity
   readable from 2 m.
-- `RED` — record dot and destructive-armed only.
-- **Amber** (one addition) — armed/warning/transient: delete-armed, panic flash,
+- `RED` — record dot and destructive-armed only (delete-armed is RED: it is a
+  destructive arm, not a warning).
+- **Amber** (one addition) — armed/warning/transient: panic flash,
   perf warnings, camera-lost note, **and a persistent 2u corner tick while
   blackout is armed** (judge finding: a fading toast alone leaves an operator
   believing the app died; the tick is the one persistent element allowed on a
@@ -345,14 +358,14 @@ lowercase; an uppercase-only table would silently demand Shift).
 
 | Key | Command | Feedback |
 |---|---|---|
-| `1`–`9` | `preset.recall.N` (current mode's bank) | toast `3 · embers` |
+| `1`–`9` | `preset.recall.N` (current mode's bank) | toast `3 - embers` (ASCII hyphen: Hershey has no middle dot) |
 | `[` / `]` | `preset.prev` / `preset.next` (setlist) | same toast |
 | `p` / `d` | `mode.particles` / `mode.dithergirl` | boot card + center flash |
 | `m` | `menu.open` | menu |
 | `f` | `layer.flock` (Particles) | toast |
 | `g` | `layer.glitch` (rack) | toast |
 | `Space` | `output.blackout` toggle (recorded too; UI responsive) | toast + amber corner tick while armed |
-| `0` | `preset.panic` — mode's `safe_look()` in <1 s; disarms blackout | amber `RESET` |
+| `0` | `preset.panic` — mode's `safe_look()` in <1 s; disarms blackout AND the SIGNAL rack (glitch off) — panic must restore a known-good *picture*, not just known-good params | amber `RESET` |
 | `a` | `audio.toggle` | toast |
 | `r` | `record.toggle` | red dot; filename toast on stop |
 | `v` | `video_bg.toggle` (Particles) | toast |
@@ -394,10 +407,13 @@ critical action is mouse-only; the mouse cannot reach anything keys cannot.
 
 **Per-mode presets, one file, spec-derived schema.**
 
+Implementation note: `state.json` (not `presets.json` meta) is the single
+last-mode/last-preset authority — one file, one writer, crash-safe to lose.
+
 ```json
 {
   "version": 2,
-  "meta": { "last_mode": "particles" },
+  "meta": {},
   "modes": {
     "particles": {
       "looks":   { "embers": { "…": "spec-captured, incl. \"signal\": {…}" } },
