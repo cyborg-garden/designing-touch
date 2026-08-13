@@ -29,7 +29,8 @@ from .camera import open_camera
 from .circuit_bent import CircuitBent
 from .commands import Command, CommandRegistry
 from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
-                  draw_corner_tick, draw_help, esc_overlay, u as _u)
+                  draw_corner_tick, draw_help, esc_overlay, put_outlined,
+                  u as _u)
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
@@ -431,8 +432,14 @@ class Host:
                                              ("Esc", "Step toward hidden")]
 
     def _on_mouse(self, event, x, y, flags, param=None):
-        """Window mouse routing: the open menu eats clicks (a card commits a
-        switch); otherwise the panel gets the event."""
+        """Window mouse routing: an open help modal swallows every mouse event
+        (a click closes it — help already closes on any key); the open menu
+        eats clicks (a card commits a switch); otherwise the panel gets the
+        event."""
+        if self.ps.help_open:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.ps.help_open = False
+            return
         if self.menu.open:
             if event == cv2.EVENT_LBUTTONDOWN:
                 mode_id = self.menu.click((x, y))
@@ -441,6 +448,39 @@ class Host:
             return
         if self.ui is not None:
             self.ui.on_mouse(event, x, y, flags, param)
+
+    def _route_key(self, key):
+        """One waitKey code through the routing contract: the open menu
+        consumes every key (DESIGN.md §3 — unknown keys hint, q closes the
+        menu AND arms the quit confirm); then rename-typing consumes every
+        key (Esc only cancels the rename — §6.2); then the perform layer."""
+        if key == 255:
+            return
+        if self.menu.open:
+            action, mode_id = self.menu.key(key)
+            if action == "switch":
+                self.request_mode(mode_id)
+            elif action == "quit":
+                self.reg.dispatch(ord("q"))     # first press toasts (§6.2)
+            elif action == "unknown":
+                self.hud.toasts.hint("? for keys")
+            return
+        if self.ui is not None and self.ui.on_key(key):
+            return
+        self.overlay = _perform_key(key, self.overlay, self.ps,
+                                    self.reg, self.hud)
+
+    def _draw_waiting_note(self, img):
+        """No frame has ever arrived (DESIGN.md §6.4): a plain-language
+        on-canvas explanation — never a traceback, never a frozen gray box."""
+        h, w = img.shape[:2]
+        uu = _u(h)
+        ix = int(w * 0.035)                    # title-safe inset (§5)
+        put_outlined(img, "waiting for camera...",
+                     (ix, h // 2), max(int(1.0 * uu), 10), AMBER)
+        put_outlined(img, "check camera permissions in System Settings",
+                     (ix, h // 2 + int(1.4 * uu)), max(int(0.75 * uu), 8),
+                     AMBER)
 
     # ----- preset plumbing (per-mode: looks, bank, setlist — DESIGN.md §7) -----
     def _load_presets(self):
@@ -714,10 +754,27 @@ class Host:
                     # Modes never see None (DESIGN.md §2.2).
                     if last_frame is not None:
                         frame, camera_lost = last_frame, True
-                    elif self.max_frames is None:
-                        continue
                     else:
-                        break
+                        # No frame has EVER arrived (§6.4): never a frozen,
+                        # unquittable window — show an intentional black frame
+                        # with the human fix and keep pumping keys through the
+                        # normal path so q/quit works.
+                        if self.show:
+                            waiting = np.zeros((self.res[1], self.res[0], 3),
+                                               np.uint8)
+                            self._draw_waiting_note(waiting)
+                            self.hud.draw(waiting, self.overlay,
+                                          blackout=self.ps.blackout)
+                            cv2.imshow(self.WIN, waiting)
+                            self._route_key(cv2.waitKey(1) & 0xFF)
+                            if self.ps.quit or ui.quit:
+                                break
+                            if cv2.getWindowProperty(
+                                    self.WIN, cv2.WND_PROP_VISIBLE) < 0:
+                                break
+                        if self.max_frames is not None:
+                            break
+                        continue
                 else:
                     last_frame, camera_lost = frame, False
                 black_streak = (0 if use_still else
@@ -803,18 +860,8 @@ class Host:
                         draw_help(bgr, self.help_rows)   # works in every overlay state
                     cv2.imshow(self.WIN, bgr)
                     key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
-                    # the open menu consumes every key (DESIGN.md §3); then
-                    # rename-typing consumes every key; Esc only cancels the
-                    # rename — while renaming, no global keys fire (§6.2)
-                    if key != 255 and self.menu.open:
-                        action, mode_id = self.menu.key(key)
-                        if action == "switch":
-                            self.request_mode(mode_id)
-                    elif key != 255:
-                        consumed = ui.on_key(key)
-                        if not consumed:
-                            self.overlay = _perform_key(key, self.overlay, self.ps,
-                                                        self.reg, self.hud)
+                    # menu → rename box → perform layer (see _route_key)
+                    self._route_key(key)
                     if self.ps.quit or ui.quit:
                         break
                     # quit only when the window is actually destroyed (red X) ->

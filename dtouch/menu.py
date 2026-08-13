@@ -58,7 +58,10 @@ class Menu:
     """Menu state machine — open flag, selection, key/click routing.
 
     `key()` returns ("switch", mode_id) when a card is committed,
-    ("close", None) when the menu dismisses, (None, None) otherwise. Commit
+    ("close", None) when the menu dismisses, ("quit", None) when q closes the
+    menu and asks the shell to arm the quit confirm (DESIGN.md §3),
+    ("unknown", None) for keys the menu doesn't know (the shell hints —
+    silence-on-input is a bug there too), and (None, None) otherwise. Commit
     and dismiss both close the menu; the shell routes the switch."""
 
     def __init__(self, cards=None):
@@ -108,6 +111,10 @@ class Menu:
         if code == 27 or code in (ord("m"), ord("M")):   # Esc / m: back untouched
             self.close()
             return "close", None
+        if code in (ord("q"), ord("Q")):
+            # DESIGN.md §3: q closes the menu AND arms the quit confirm
+            self.close()
+            return "quit", None
         if code in (13, 10):                             # Enter commits
             if self._enabled(self.sel):
                 return self._commit(self.sel)
@@ -128,7 +135,7 @@ class Menu:
             for i, c in enumerate(self.cards):           # letter selects-and-enters
                 if c.enabled and c.key and ch == c.key.lower():
                     return self._commit(i)
-        return None, None
+        return "unknown", None      # §3: unknown keys hint, never vanish
 
     def click(self, pt):
         """A mouse click at pt: commit the enabled card under it, or None."""
@@ -192,6 +199,13 @@ def draw_menu(img, cam_bgr, cards, sel):
             put_outlined(img, hint, (x + (cw - hw) // 2, y0 + ch - int(0.8 * uu)),
                          bp, color if selected else DIM)
         rects.append((rect, c))
+
+    # bottom hint line (DESIGN.md §3): part of the layout — 0.75u, DIM,
+    # bottom-center, title-safe
+    hint = ", . move - enter select - esc back"
+    hp = int(0.75 * uu)
+    hw = text_size(hint, hp)[0]
+    put_outlined(img, hint, ((w - hw) // 2, h - iy), hp, DIM)
     return rects
 
 

@@ -199,6 +199,70 @@ def test_recordings_contain_no_panel_hud_or_toast_pixels(tmp_path,
         assert not f.any()
 
 
+# ---------- help modal swallows the mouse ----------
+
+def test_open_help_swallows_mouse_and_click_closes_it(tmp_path):
+    host = _booted(tmp_path)
+    host.ps.help_open = True
+    host.ui._hot = [((0, 0, 200, 200), "quit", None)]
+    host._on_mouse(cv2.EVENT_LBUTTONDOWN, 50, 50, 0)
+    assert host.ui.quit is False             # the click never reached the panel
+    assert host.ps.help_open is False        # ...and it closed the help
+    host._on_mouse(cv2.EVENT_LBUTTONDOWN, 50, 50, 0)
+    assert host.ui.quit is True              # normal routing resumed
+
+
+# ---------- menu key routing through the shell ----------
+
+def test_menu_q_closes_and_arms_quit_confirm(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    host._route_key(ord("q"))
+    assert host.menu.open is False
+    assert any("q again to quit" in t for t in _hints(host))
+    assert host.ps.quit is False
+    host._route_key(ord("q"))                # second press, menu closed
+    assert host.ps.quit is True
+
+
+def test_menu_unknown_key_hints(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    host._route_key(ord("z"))
+    assert host.menu.open is True
+    assert any("? for keys" in t for t in _hints(host))
+
+
+# ---------- camera that never yields: responsive, quittable ----------
+
+def test_camera_that_never_yields_keeps_keys_alive_and_quits(tmp_path,
+                                                             monkeypatch):
+    """DESIGN.md §6.4: no keyboard-reachable state requires a restart — a
+    camera that never yields shows an intentional black frame with the human
+    fix and keeps pumping keys, so q/quit works."""
+    shown = []
+    _patch_gui(monkeypatch, keys=[255, ord("q"), ord("q")], shown=shown)
+    host = _host(tmp_path, src=SyntheticSource(fail_after=0), show=True)
+    count, out = host.run()
+    assert count == 0
+    assert host.ps.quit is True              # q reached the quit confirm
+    assert any("q again to quit" in t for t in _hints(host))
+    assert shown                             # an intentional image was shown
+    f = shown[0]
+    assert f.shape == (RES[1], RES[0], 3)
+    assert float(f.mean()) < 20 and f.max() > 0   # black + on-canvas note
+
+
+def test_camera_that_never_yields_bounded_run_exits(tmp_path, monkeypatch):
+    _patch_gui(monkeypatch)
+    host = _host(tmp_path, src=SyntheticSource(fail_after=0), show=True,
+                 max_frames=3)
+    count, out = host.run()
+    assert count == 0 and out is None
+
+
 # ---------- panic through the shell wiring ----------
 
 def test_panic_key_via_shell_wiring_lands_on_safe_look(tmp_path):

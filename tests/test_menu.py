@@ -105,10 +105,21 @@ def test_disabled_card_cannot_be_committed():
     assert m.key(ord("9")) == (None, None)               # out-of-range digit
 
 
-def test_unknown_keys_are_ignored():
+def test_unknown_keys_report_unknown_for_the_hint_toast():
+    """Amended DESIGN.md §3: silence-on-input is a bug inside the menu too —
+    unknown keys surface as ("unknown", None) so the shell can hint."""
     m = _menu()
-    assert m.key(ord("z")) == (None, None)
+    assert m.key(ord("z")) == ("unknown", None)
     assert m.open is True and m.sel == 0
+
+
+def test_q_closes_menu_and_reports_quit():
+    """Amended DESIGN.md §3: q closes the menu AND arms the quit confirm."""
+    m = _menu()
+    assert m.key(ord("q")) == ("quit", None)
+    assert m.open is False
+    m.show()
+    assert m.key(ord("Q")) == ("quit", None)             # case-folded
 
 
 # ---------- mouse ----------
@@ -145,6 +156,15 @@ def test_draw_menu_dithers_and_dims_the_camera_under_a_scrim():
     assert len(rects) == 3
     assert frame.mean() < 90                             # 65% scrim took it down
     assert frame.max() <= 255 and frame.max() > 0
+
+
+def test_bottom_hint_line_renders():
+    """Amended DESIGN.md §3: the menu's bottom hint line
+    ', . move - enter select - esc back' is part of the layout."""
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    draw_menu(frame, None, _cards(), 0)
+    band = frame[660:, 300:980]                          # bottom-center strip
+    assert band.max() > 0, "the hint line must render bottom-center"
 
 
 def test_draw_menu_survives_no_camera_frame():
