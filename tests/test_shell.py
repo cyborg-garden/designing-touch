@@ -347,13 +347,12 @@ def test_switch_to_dithergirl_mid_loop_preserves_perform_state(tmp_path):
     assert host.ui.audio is True
     assert host.ui.record is True and writer.closed      # closed by shutdown only
     assert host.ui.glitch is True
-    # the recorder captured the boot card (accent pixels on black), not a gray
-    # flash, and kept recording mode frames after the switch
-    cards = [f for f in writer.frames
-             if ((f[:, :, 0].astype(int) > 160)
-                 & (f[:, :, 2].astype(int) > 160)
-                 & (f[:, :, 1].astype(int) < f[:, :, 0].astype(int) - 30)).any()]
-    assert len(cards) == 1
+    # blackout was armed during the switch (amended DESIGN.md §3): the
+    # recorder captured a black frame with the amber tick — never the bright
+    # boot card — and kept recording mode frames after the switch
+    for f in writer.frames:
+        assert float(f.mean()) < 1.0                     # switch stayed under black
+    assert any(f[:8, -8:].max() > 0 for f in writer.frames)   # the tick frame
     assert len(writer.frames) > 1                        # recording never stopped
 
 

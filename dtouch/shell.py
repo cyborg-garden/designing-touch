@@ -22,13 +22,14 @@ import time
 
 import cv2
 import imageio.v2 as imageio
+import numpy as np
 
 from .audio import LiveMic
 from .camera import open_camera
 from .circuit_bent import CircuitBent
 from .commands import Command, CommandRegistry
-from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay, draw_help,
-                  esc_overlay)
+from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
+                  draw_corner_tick, draw_help, esc_overlay, u as _u)
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
@@ -358,7 +359,14 @@ class Host:
             self.hud.toasts.hint(f"unknown mode {mode_id}")
             return False
         new = self._mode_instances.get(mode_id) or cls()
-        card = render_boot_card(self.res, new.title, new.accent)
+        if self.ps.blackout:
+            # DESIGN.md §3: while blackout is armed the switch happens under
+            # black — never flash the bright card to screen or recorder; only
+            # the amber corner tick stays.
+            card = np.zeros((self.res[1], self.res[0], 3), np.uint8)
+            draw_corner_tick(card, 2.0 * _u(self.res[1]))
+        else:
+            card = render_boot_card(self.res, new.title, new.accent)
         if self.writer is not None:
             self.writer.append_data(cv2.cvtColor(card, cv2.COLOR_BGR2RGB))
         if self.show:
@@ -556,6 +564,16 @@ class Host:
         self.mirror = ui.mirror
         nw, nh = ui.res_wh
         if (nw, nh) != self.res:
+            if self.writer is not None:
+                # imageio's ffmpeg writer needs a constant frame size — stop
+                # the recording cleanly first (same path as 'r' off), then
+                # apply the res change.
+                self.writer.close()
+                self.writer = None
+                ui.record = False
+                self.hud.toasts.hint("recording stopped - resolution changed")
+                print("saved", self.rec_path)
+                self.hud.toasts.hint("saved " + str(self.rec_path))
             self.res = (nw, nh)
             self.mode.on_resize(nw, nh)
             ui.w, ui.h = nw, nh   # AUTOSIZE window refits on next imshow

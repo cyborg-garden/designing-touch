@@ -93,6 +93,134 @@ def _patch_gui(monkeypatch, keys=(), shown=None):
     monkeypatch.setattr(cv2, "destroyAllWindows", lambda: None)
 
 
+# ---------- res change while recording: stop cleanly, never crash ----------
+
+def test_res_change_stops_recording_before_resize(tmp_path):
+    """imageio's ffmpeg writer needs a constant frame size — a res cycle while
+    recording must close the writer first (same path as 'r' off), toast why,
+    then resize."""
+    resized = []
+
+    class Spy(DitherGirlMode):
+        def on_resize(self, w, h):
+            resized.append((w, h, self.host.writer is None))
+
+    writer = FakeWriter()
+    host = _host(tmp_path, mode=Spy(), max_frames=6)
+
+    def on_read(n):
+        if n == 2:
+            host.ui.record = True
+            host.writer, host.rec_path = writer, "fake.mp4"
+        if n == 4:
+            host.ui.res_idx = 1              # cycle output res mid-recording
+
+    host._source.on_read = on_read
+    host.run()
+    assert resized and resized[0][2] is True     # writer closed BEFORE resize
+    assert host.ui.record is False               # recording stopped cleanly
+    hints = _hints(host)
+    assert any("recording stopped - resolution changed" in t for t in hints)
+    assert any(t.startswith("saved") for t in hints)
+
+
+# ---------- blackout defeats the bright boot card ----------
+
+def test_blackout_switch_records_black_not_the_bright_card(tmp_path,
+                                                           monkeypatch):
+    """DESIGN.md §3: while blackout is armed the switch happens under black —
+    a black frame with the amber tick is shown/recorded, never the bright
+    card."""
+    import dtouch.modes as modes
+
+    class OtherMode(DitherGirlMode):
+        id = "other"
+        title = "Other"
+
+    monkeypatch.setattr(modes, "REGISTRY", modes.REGISTRY + [OtherMode])
+    writer = FakeWriter()
+    host = _host(tmp_path, max_frames=6)
+
+    def on_read(n):
+        if n == 2:
+            host.ps.blackout = True
+            host.ui.record = True
+            host.writer, host.rec_path = writer, "fake.mp4"
+        if n == 3:
+            host.request_mode("other")
+
+    host._source.on_read = on_read
+    host.run()
+    assert host.mode.id == "other"
+    assert writer.frames
+    for f in writer.frames:
+        assert float(f.mean()) < 1.0     # no bright frame ever hit the recorder
+    # the switch frame still carries the amber corner tick on black (§3/§5)
+    assert any(f[:8, -8:].max() > 0 for f in writer.frames)
+
+
+# ---------- recorder content: never panel/HUD/toast pixels ----------
+
+def _record_run(tmp_path, decorate, monkeypatch):
+    writer = FakeWriter()
+    src = SyntheticSource()
+    host = _host(tmp_path, src=src, max_frames=8, show=decorate, panel=True)
+
+    def on_read(n):
+        if n == 1:
+            host.ui.record = True
+            host.writer, host.rec_path = writer, "fake.mp4"
+        if n >= 6:
+            host.ps.blackout = True
+        if decorate:                         # panel open + toasts firing
+            host.overlay = OverlayState.PANEL
+            host.hud.toasts.flash("TESTING")
+            host.hud.toasts.hint("hint hint")
+
+    src.on_read = on_read
+    host.run()
+    return writer.frames
+
+
+def test_recordings_contain_no_panel_hud_or_toast_pixels(tmp_path,
+                                                         monkeypatch):
+    """Recording captures what the audience sees, minus panel/HUD (DESIGN.md
+    principle 2): a run with the panel open and toasts firing records frames
+    identical to a UI-free run of the same source; blackout frames record
+    black."""
+    _patch_gui(monkeypatch)
+    clean = _record_run(tmp_path, decorate=False, monkeypatch=monkeypatch)
+    ui_run = _record_run(tmp_path, decorate=True, monkeypatch=monkeypatch)
+    assert len(clean) == len(ui_run) == 8
+    for a, b in zip(clean, ui_run):
+        assert np.array_equal(a, b), "UI pixels leaked into the recording"
+    assert any(float(f.mean()) > 1.0 for f in ui_run[:5])    # really rendered
+    for f in ui_run[5:]:                                     # blackout frames
+        assert not f.any()
+
+
+# ---------- rename mailbox pump ----------
+
+def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.pending_save = True
+    host._pump_preset_mailboxes()
+    name = next(iter(ui.user_presets))
+    ui.renaming = None                       # close any auto-opened rename box
+    ui.preset_idx = ui.presets.index(name)
+    ui.pending_slot = name                   # assign a bank slot
+    host._pump_preset_mailboxes()
+    slot = next(s for s, n in ui.bank.items() if n == name)
+    ui.pending_rename = (name, "neon dancer")
+    host._pump_preset_mailboxes()
+    assert "neon dancer" in ui.presets and name not in ui.presets
+    assert ui.preset_name == "neon dancer"           # selection followed
+    assert ui.bank[slot] == "neon dancer"            # bank followed
+    assert presets.bank(host.presets_path,
+                        mode="dithergirl")[slot] == "neon dancer"
+
+
 # ---------- corrupt presets file: the note reaches the toasts ----------
 
 def test_corrupt_presets_note_reaches_the_toasts(tmp_path):
