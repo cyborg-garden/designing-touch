@@ -3,7 +3,8 @@
 The cv2 window paints reliably on macOS (unlike Tk launched headless). The control panel is an
 in-frame collapsible sidebar (dtouch.overlay_ui) drawn onto the render with mouse hit-testing,
 so it's one window, mouse-driven, and self-verifiable. Quitting is via the window's close (red
-X) button — ESC is intentionally ignored (it's muscle-memory for leaving a maximized window).
+X) button or double-tapped 'q'. ESC steps the overlay toward HIDDEN and never quits — safe by
+design, not ignored (DESIGN.md §6.1: Esc always walks one step toward a clean output).
 
 Detects all-black camera frames (the symptom of iPhone Continuity stealing the built-in camera)
 and says so on screen instead of showing a silent blank.
@@ -25,9 +26,28 @@ from .audio import LiveMic
 from .overlay_ui import OverlayUI, DITHERS
 from .circuit_bent import CircuitBent
 from .commands import CommandRegistry
+from .hud import Hud, OverlayState, cycle_overlay, esc_overlay
 from . import presets as _presets
 
 MATTES = ["auto", "motion", "saliency", "person", "edges", "luma"]
+
+
+def _overlay_key(key, state, toasts):
+    """TAB/Esc overlay-state stepping (DESIGN.md §6.1). Returns (state, handled).
+
+    TAB cycles HIDDEN -> HUD -> PANEL -> HIDDEN; Esc steps one toward HIDDEN and
+    in HIDDEN does nothing — Esc never quits. Entering HIDDEN emits one final
+    toast, then the output is provably clean once it fades.
+    """
+    if key == 9:       # TAB
+        new = cycle_overlay(state)
+    elif key == 27:    # Esc
+        new = esc_overlay(state)
+    else:
+        return state, False
+    if new is OverlayState.HIDDEN and state is not OverlayState.HIDDEN:
+        toasts.hint("overlay hidden - TAB to show")
+    return new, True
 
 
 def composite_video_bg(particles_rgb, frame_bgr, mix):
@@ -146,6 +166,11 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
     reg = CommandRegistry()
     _want_quit = [False]
     reg.add("app.quit", "Quit", "q", lambda: _want_quit.__setitem__(0, True))
+
+    # Perform-surface renderer + overlay state machine. Boot state: HUD — the
+    # instrument boots into perform, already playing (DESIGN.md §6.1).
+    hud = Hud()
+    overlay = OverlayState.HUD
 
     mic = None
     if audio:
@@ -317,18 +342,25 @@ def live_flow(device="builtin", matte="auto", res=(1920, 1080), grid=(416, 234),
                 now = time.time(); fps = 10.0 / (now - t0); t0 = now
 
             if show:
-                status = f"{fps:4.1f}fps  matte={matte_kind}  color={pf.palette}  cam={cam_name[:16]}"
-                if ui is not None:
-                    ui.draw(bgr, {"status": status, "black": black_streak > 15})
-                else:
-                    cv2.putText(bgr, status, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                (90, 220, 120), 1, cv2.LINE_AA)
+                # HUD/panel draw AFTER the recorder write above — recordings never
+                # contain HUD or panel (the existing ordering invariant, kept).
+                status = f"matte={matte_kind}  color={pf.palette}  cam={cam_name[:16]}"
+                dbg = f"{fps:4.1f}fps  {1000.0 / fps if fps > 0 else 0.0:5.1f}ms  {rw}x{rh}"
+                if ui is not None and overlay is OverlayState.PANEL:
+                    ui.draw(bgr, {"status": "", "black": black_streak > 15})
+                elif ui is not None:
+                    ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
+                hud.draw(bgr, overlay, status=status, debug_status=dbg,
+                         recording=(writer is not None))
                 cv2.imshow(win, bgr)
-                key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse; ESC intentionally ignored
-                # a rename box consumes keystrokes first, so typing 'q' doesn't quit
+                key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
+                # rename-typing consumes every key; Esc only cancels the rename —
+                # while renaming, no global keys fire (DESIGN.md §6.2)
                 consumed = ui.on_key(key) if (ui is not None and key != 255) else False
                 if not consumed and key != 255:
-                    reg.dispatch(key)
+                    overlay, handled = _overlay_key(key, overlay, hud.toasts)
+                    if not handled:
+                        reg.dispatch(key)
                 if _want_quit[0] or (ui is not None and ui.quit):
                     break
                 # quit only when the window is actually destroyed (red X) -> property is -1.

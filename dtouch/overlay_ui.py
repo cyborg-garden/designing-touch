@@ -224,7 +224,12 @@ class OverlayUI:
     # ----- keyboard (rename typing) -----
     def on_key(self, key):
         """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
-        so the caller knows not to treat 'q' as quit while the user is typing."""
+        so the caller knows not to treat 'q' as quit while the user is typing.
+
+        Contract (DESIGN.md §6.2): rename-typing consumes EVERY key — while
+        renaming, no global keys fire. Esc is consumed too, and cancels the
+        rename only (it must not also step the overlay state or anything else);
+        `Esc` then `0` is the two-press panic escape hatch."""
         if self.renaming is None:
             return False
         if key in (13, 10):              # enter — commit
