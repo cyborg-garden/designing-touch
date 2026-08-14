@@ -143,6 +143,71 @@ def draw_corner_tick(img, size_px, color=AMBER):
     cv2.fillConvexPoly(img, pts, color, cv2.LINE_AA)
 
 
+HELP_COLS_MAX = 3      # past three columns the map stops being scannable
+HELP_MIN_PX = 8        # ...and below this the type stops being readable
+
+
+def help_key_text(key):
+    """What a key is CALLED on the map (space has no glyph)."""
+    return {" ": "space"}.get(key, key)
+
+
+def help_layout(w, h, rows):
+    """Where every row of the key map goes, for a `w`x`h` frame.
+
+    Split out and made fit-aware because the map ran off the bottom of the
+    frame: one fixed column of 1.5-px leading, so a 33-row registry put the
+    last two rows — `TAB Cycle overlay` and `Esc Step toward hidden` — below
+    the frame at 720p (baseline 754) and 1080p (1114), and three rows off at
+    4K. The two keys that walk you back OUT of an overlay state were the two
+    the map could not show, and it had neither a fit nor a scroll.
+
+    Columns first (the map stays full size and scannable), then, only if even
+    HELP_COLS_MAX columns will not fit, the type shrinks. Everything returned
+    sits inside the title-safe box (DESIGN.md §5).
+
+    Returns (title_org, title_px, px, placed) where `placed` is a list of
+    (key_text, label, key_x, label_x, baseline_y)."""
+    uu = u(h)
+    inset_x, inset_y = int(w * TITLE_SAFE), int(h * TITLE_SAFE)
+    safe_w, safe_h = max(1, w - 2 * inset_x), max(1, h - 2 * inset_y)
+    title_px = max(HELP_MIN_PX, int(1.4 * uu))
+    head = int(2.6 * title_px)
+    keys = [help_key_text(k) for k, _ in rows]
+    labels = [l for _, l in rows]
+    n = max(1, len(rows))
+
+    px = max(HELP_MIN_PX, int(0.9 * uu))
+    while True:
+        row_h = max(1, int(1.5 * px))
+        gap = int(1.4 * px)                                   # key -> label
+        gutter = int(2.0 * px)                                # column -> column
+        key_w = max([text_size(k, px)[0] for k in keys], default=0)
+        lab_w = max([text_size(l, px)[0] for l in labels], default=0)
+        col_w = key_w + gap + lab_w + gutter
+        for cols in range(1, HELP_COLS_MAX + 1):
+            per = -(-n // cols)                               # ceil
+            if cols * col_w <= safe_w and head + per * row_h <= safe_h:
+                break
+        else:
+            if px > HELP_MIN_PX:
+                px -= 1
+                continue                                      # try smaller type
+            cols, per = HELP_COLS_MAX, -(-n // HELP_COLS_MAX)  # best effort
+        break
+
+    block_w = cols * col_w - gutter
+    block_h = head + per * row_h
+    x0 = max(inset_x, (w - block_w) // 2)
+    top = inset_y + max(0, (safe_h - block_h) // 2)      # centered when it fits
+    placed = []
+    for i, (key, label) in enumerate(zip(keys, labels)):
+        x = x0 + (i // per) * col_w
+        placed.append((key, label, x, x + key_w + gap,
+                       top + head + (i % per) * row_h))
+    return (x0, top + title_px), title_px, px, placed
+
+
 def draw_help(img, rows, accent=ACC):
     """The live key map over a 65% scrim (DESIGN.md §6.2 `?`). `rows` is
     (key, label) pairs — the registry's table plus any caller extras (TAB/Esc).
@@ -151,21 +216,12 @@ def draw_help(img, rows, accent=ACC):
     `accent` is the active mode's (DESIGN.md §5: exactly one accent on
     screen, owned by the active mode)."""
     h, w = img.shape[:2]
-    uu = u(h)
     np.copyto(img, cv2.convertScaleAbs(img, alpha=0.35))   # 65% scrim
-    px = int(0.9 * uu)
-    row_h = int(1.5 * px)
-    title_px = int(1.4 * uu)
-    total = row_h * len(rows) + int(2.6 * title_px)
-    y = max(int(h * TITLE_SAFE) + title_px, (h - total) // 2 + title_px)
-    x = w // 2 - int(9 * uu)
-    put_outlined(img, "KEYS", (x, y), title_px, accent)
-    y += int(1.6 * title_px)
-    for key, label in rows:
-        shown = {" ": "space"}.get(key, key)
-        put_outlined(img, shown, (x, y), px, accent)
-        put_outlined(img, label, (x + int(4.5 * uu), y), px, INK)
-        y += row_h
+    title_org, title_px, px, placed = help_layout(w, h, rows)
+    put_outlined(img, "KEYS", title_org, title_px, accent)
+    for key, label, kx, lx, y in placed:
+        put_outlined(img, key, (kx, y), px, accent)
+        put_outlined(img, label, (lx, y), px, INK)
 
 
 @dataclass

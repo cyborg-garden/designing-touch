@@ -530,6 +530,30 @@ def test_unknown_state_mode_resolves_to_particles(tmp_path):
     assert isinstance(host._resolve_boot_mode(), ParticlesMode)
 
 
+def test_the_shipped_key_map_fits_every_shipped_resolution(tmp_path):
+    """The real registry, not a synthetic row list: Particles wires the most
+    keys (33 rows with TAB/Esc appended), and the fixed-column map put the
+    last two of them — the two that walk you back OUT of an overlay state —
+    below the bottom of the frame at 720p and 1080p, three rows off at 4K."""
+    from dtouch.modes.particles import ParticlesMode
+    from dtouch.hud import help_layout, text_size, TITLE_SAFE
+
+    host = _host(tmp_path, mode=ParticlesMode(), max_frames=1)
+    host.run()
+    host._wire_keys()
+    rows = host.help_rows
+    assert ("TAB", "Cycle overlay") in rows and rows[-1][0] == "Esc"
+
+    for w, h in ((1280, 720), (1920, 1080), (3840, 2160)):
+        (_, ty), _, px, placed = help_layout(w, h, rows)
+        iy = int(h * TITLE_SAFE)
+        assert len(placed) == len(rows)
+        assert ty >= iy
+        for key, label, kx, lx, y in placed:
+            assert y <= h - iy, f"{key} at {w}x{h} is off the bottom ({y})"
+            assert lx + text_size(label, px)[0] <= w - int(w * TITLE_SAFE)
+
+
 # ---------- corrupt presets file: the note reaches the toasts ----------
 
 def test_corrupt_presets_note_reaches_the_toasts(tmp_path):

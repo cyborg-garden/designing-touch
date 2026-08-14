@@ -145,6 +145,46 @@ def test_draw_help_darkens_the_frame():
     assert frame.mean() < 120               # 65% scrim took the frame down
 
 
+SHIPPED_RES = [(1280, 720), (1920, 1080), (3840, 2160)]
+
+
+@pytest.mark.parametrize("w,h", SHIPPED_RES)
+@pytest.mark.parametrize("n", [2, 33, 60])
+def test_the_key_map_never_runs_off_the_frame(w, h, n):
+    """The map had one fixed column and no fit at all: at 33 rows the last two
+    — `TAB Cycle overlay` and `Esc Step toward hidden` — had baselines BELOW
+    the frame at 720p (754) and 1080p (1114), and three rows fell off at 4K.
+    The two keys that walk you back out of an overlay state were the two the
+    map could not show."""
+    rows = [("%d" % i, "Row number %d" % i) for i in range(n - 2)]
+    rows += [("TAB", "Cycle overlay"), ("Esc", "Step toward hidden")]
+    _, title_px, px, placed = H.help_layout(w, h, rows)
+
+    assert len(placed) == n, "every row is placed, none dropped"
+    ix, iy = int(w * H.TITLE_SAFE), int(h * H.TITLE_SAFE)
+    for key, label, kx, lx, y in placed:
+        assert iy <= y <= h - iy, f"{key} baseline {y} outside the frame"
+        assert kx >= ix
+        assert lx + H.text_size(label, px)[0] <= w - ix
+
+    # ...and what actually gets drawn stays inside the frame too
+    img = np.zeros((h, w, 3), np.uint8)
+    draw_help(img, rows)
+    ink = np.any(img > 6, axis=2)
+    ys, xs = np.where(ink)
+    assert len(ys) and ys.max() < h and xs.max() < w
+
+
+def test_the_key_map_holds_full_size_type_at_the_shipped_row_count():
+    """Fitting must not mean shrinking to unreadable: at the shipped 33 rows
+    the answer is a second column, not smaller type."""
+    rows = [("%d" % i, "Row number %d" % i) for i in range(33)]
+    for w, h in SHIPPED_RES:
+        _, _, px, placed = H.help_layout(w, h, rows)
+        assert px == int(0.9 * H.u(h)), "type shrank before columns were used"
+        assert len({p[2] for p in placed}) == 2
+
+
 def test_draw_help_takes_the_mode_accent():
     """DESIGN.md §5 one-accent rule: help renders in the ACTIVE mode's accent,
     not a hard-coded green."""
