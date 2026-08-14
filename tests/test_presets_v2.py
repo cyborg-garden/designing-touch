@@ -13,6 +13,27 @@ import pytest
 
 from dtouch import presets
 
+
+@pytest.fixture(autouse=True)
+def _clean_store_globals():
+    """`_no_overwrite` and `_notes` are process globals — never let one test's
+    poisoned path or queued note leak into the next."""
+    yield
+    presets._no_overwrite.clear()
+    presets.take_notes()
+
+
+def _make_unreadable(path):
+    """A file that EXISTS but cannot be read (the permissions case, distinct
+    from unparseable bytes). Returns a restore callable."""
+    mode = os.stat(path).st_mode
+    os.chmod(path, 0)
+    return lambda: os.chmod(path, mode)
+
+
+unreadable_supported = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root reads through a chmod 0 file")
+
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "presets_v1.json")
 CFG = dict(matte="auto", palette="fire", fade=0.91, exposure=1.7, spark=0.4,
            curl_amp=0.5, reseed_frac=0.06, base_size=0.012)
@@ -217,6 +238,167 @@ def test_write_is_atomic_old_content_survives_replace_failure(tmp_path,
     with open(path) as f:
         assert f.read() == old                  # old content intact, never truncated
     assert not list(tmp_path.glob("*.tmp"))     # temp file cleaned up
+
+
+# ---------- write_file's boolean is the whole contract ----------
+
+def test_write_file_returns_true_on_a_real_write(tmp_path):
+    """It used to fall off the end returning None while its docstring promised
+    True, so every caller reported success for a write that never happened."""
+    path = str(tmp_path / "p.json")
+    assert presets.write_file(presets._empty_v2(), path) is True
+    assert os.path.exists(path)
+
+
+def test_every_store_write_propagates_the_refusal(tmp_path, monkeypatch):
+    """save/delete/rename/set_bank/set_setlist all hand back write_file's
+    verdict — a poisoned file must not be reported as a successful edit."""
+    path = str(tmp_path / "presets.json")
+    presets.save("mine", CFG, path=path)
+    presets.set_bank({"1": "mine"}, path=path)
+    presets.take_notes()
+
+    with open(path, "a") as f:
+        f.write("<<<truncated")                   # now unparseable...
+
+    def no_space(src, dst):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(presets.shutil, "copy2", no_space)   # ...and unbackupable
+
+    assert presets.save("other", CFG, path=path) is False
+    assert presets.set_bank({"2": "x"}, path=path) is False
+    assert presets.set_setlist(["x"], path=path) is False
+    # delete/rename read the (unusable) file first, so they refuse earlier —
+    # what matters is that neither claims to have changed anything
+    assert presets.delete("mine", path=path) is False
+    assert presets.rename("mine", "neon", path=path) is False
+
+
+# ---------- unreadable (not just unparseable) is the same data-loss event ----------
+
+@unreadable_supported
+def test_unreadable_file_is_poisoned_and_never_overwritten(tmp_path):
+    """A presets.json that EXISTS but cannot be read used to slip past the
+    corrupt-file recovery entirely (`_corrupt_backup` early-returned on the
+    OSError before poisoning), so the next save silently destroyed every saved
+    look with no backup and no warning."""
+    path = str(tmp_path / "presets.json")
+    presets.save("mine", CFG, path=path)
+    presets.take_notes()
+    original = open(path, "rb").read()
+    restore = _make_unreadable(path)
+    try:
+        presets.load(path)                          # the read that discovers it
+        notes = presets.take_notes()
+        assert any("NOT saving over it" in n for n in notes), notes
+        assert presets._is_poisoned(path)
+
+        assert presets.save("other", CFG, path=path) is False
+        assert any("not saved" in n for n in presets.take_notes())
+    finally:
+        restore()
+    assert open(path, "rb").read() == original      # the only copy survives
+    assert presets.load(path)["mine"] == CFG
+
+
+# ---------- the poison clears when the file recovers (or goes away) ----------
+
+@unreadable_supported
+def test_repairing_the_file_clears_the_poison(tmp_path):
+    """Both natural recoveries used to leave every later save a silent no-op
+    for the rest of the process: `_no_overwrite` was only discarded inside
+    `_corrupt_backup`, which only ran when json.load raised."""
+    path = str(tmp_path / "presets.json")
+    presets.save("mine", CFG, path=path)
+    restore = _make_unreadable(path)
+    presets.load(path)
+    assert presets._is_poisoned(path)
+    restore()                                       # the user fixes permissions
+
+    assert presets.save("other", CFG, path=path) is True
+    assert not presets._is_poisoned(path)
+    assert set(presets.user_names(path)) == {"mine", "other"}
+
+
+@unreadable_supported
+def test_deleting_the_file_clears_the_poison(tmp_path):
+    path = str(tmp_path / "presets.json")
+    presets.save("mine", CFG, path=path)
+    restore = _make_unreadable(path)
+    presets.load(path)
+    assert presets._is_poisoned(path)
+    restore()
+    os.remove(path)                                 # the user throws it away
+
+    assert presets.save("fresh", CFG, path=path) is True
+    assert not presets._is_poisoned(path)
+    assert presets.user_names(path) == {"fresh"}
+
+
+# ---------- hand-edited JSON: wrong shapes never reach a traceback ----------
+
+@pytest.mark.parametrize("body", ["null", "[1, 2]", '"x"', "42", "true"])
+def test_wrong_top_level_shape_routes_to_corrupt_recovery(tmp_path, body):
+    """DESIGN.md §7 invites hand-editing these files. Valid JSON of the wrong
+    shape used to reach callers untouched and raise AttributeError/TypeError
+    several frames later — at boot, before any window existed."""
+    path = str(tmp_path / "presets.json")
+    with open(path, "w") as f:
+        f.write(body)
+    assert "abstract" in presets.load(path)         # built-ins still served
+    assert presets.user_names(path) == set()
+    assert presets.bank(path) is None
+    assert presets.setlist(path) is None
+    baks = list(tmp_path.glob("presets.corrupt.*.bak.json"))
+    assert len(baks) == 1 and baks[0].read_text() == body
+    assert any("backup" in n for n in presets.take_notes())
+
+
+@pytest.mark.parametrize("body", ["null", "[1, 2]", '"x"', "42", "true"])
+def test_wrong_top_level_shape_in_state_json_is_not_a_crash(tmp_path, body):
+    path = str(tmp_path / "state.json")
+    with open(path, "w") as f:
+        f.write(body)
+    assert presets.load_state(path) == {}
+    assert list(tmp_path.glob("state.corrupt.*.bak.json"))
+    presets.take_notes()
+
+
+@pytest.mark.parametrize("body,checks", [
+    ('{"version": 2, "modes": null}', "modes"),
+    ('{"version": 2, "modes": {"particles": null}}', "entry"),
+    ('{"version": 2, "modes": {"particles": {"looks": null}}}', "looks"),
+    ('{"version": 2, "modes": {"particles": {"bank": null}}}', "bank"),
+    ('{"version": 2, "modes": {"particles": {"setlist": null}}}', "setlist"),
+    ('{"version": 2, "meta": null, "modes": {}}', "meta"),
+])
+def test_null_sub_objects_read_as_absent_instead_of_raising(tmp_path, body,
+                                                            checks):
+    """A null sub-object is shape-tolerated, not treated as corruption: the
+    file is still recognisably a v2 store, it just has a hole in it."""
+    path = str(tmp_path / "presets.json")
+    with open(path, "w") as f:
+        f.write(body)
+    assert "abstract" in presets.load(path)
+    assert presets.user_names(path) == set()
+    # "never stored" (None) — a scrambled type is not an explicit emptying,
+    # so the shell still seeds its defaults instead of booting an empty bank
+    assert presets.bank(path) is None
+    assert presets.setlist(path) is None
+    assert not list(tmp_path.glob("presets.corrupt.*.bak.json"))
+    # ...and the store is still writable through the hole
+    assert presets.save("mine", CFG, path=path) is True
+    assert presets.load(path)["mine"] == CFG
+
+
+def test_non_dict_look_entries_are_dropped_not_crashed(tmp_path):
+    path = str(tmp_path / "presets.json")
+    with open(path, "w") as f:
+        f.write('{"version": 2, "modes": {"particles": {"looks": '
+                '{"bad": null, "good": {"fade": 0.5}}}}}')
+    loaded = presets.load(path)
+    assert loaded["good"] == {"fade": 0.5}
+    assert "bad" not in loaded
 
 
 # ---------- bank + setlist ----------

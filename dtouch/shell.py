@@ -669,14 +669,25 @@ class Host:
         """Run a preset-store write that touches the disk. A full disk raises
         OSError out of json.dump — from the mailbox pump that would exit run()
         mid-performance. The show never dies for a failed save (DESIGN.md
-        §6.4): toast it and carry on. Returns (ok, result)."""
+        §6.4): toast it and carry on.
+
+        Returns (ok, result): `ok` is "no exception", `result` is the store
+        function's own verdict — a REFUSED write (poisoned file) raises
+        nothing and returns False, so callers must check both before telling
+        the operator their look was saved. Any note the store queued (the
+        refusal reason) is drained onto the toasts here, because silence on a
+        data-loss event is a bug (DESIGN.md §9)."""
+        ok, result = True, None
         try:
-            return True, fn(*a, **kw)
+            result = fn(*a, **kw)
         except OSError as e:                         # noqa: BLE001 — §6.4
             self.hud.toasts.flash("save failed - disk?", AMBER)
             self.hud.toasts.hint(str(e)[:80])
             print("preset store write failed:", e)
-            return False, None
+            ok = False
+        for note in _presets.take_notes():
+            self.hud.toasts.hint(note, AMBER)
+        return ok, result
 
     def _apply_pending_preset(self):
         """Spec-derived apply onto the shared UI state; engines pick the values
@@ -708,8 +719,13 @@ class Host:
                 return
             ui.bank[free] = name
             toasts.flash(f"{free} - {name}")
-        self._store_write(_presets.set_bank, ui.bank, path=self.presets_path,
-                          mode=self.mode.id)
+        ok, stored = self._store_write(_presets.set_bank, ui.bank,
+                                       path=self.presets_path,
+                                       mode=self.mode.id)
+        if ok and not stored:
+            # the slot works for this session but presets.json is the bank's
+            # authority — say it will not survive a restart, don't imply it will
+            toasts.hint("bank not saved - it resets on restart", AMBER)
         self._autosave_state()
 
     def _pump_preset_mailboxes(self):
@@ -729,9 +745,11 @@ class Host:
             name, n = base, 2
             while name in existing:
                 name, n = "%s_%d" % (base, n), n + 1
-            ok, _ = self._store_write(_presets.save, name, self._capture_cfg(),
-                                      path=self.presets_path, mode=self.mode.id)
-            if ok:
+            ok, wrote = self._store_write(_presets.save, name,
+                                          self._capture_cfg(),
+                                          path=self.presets_path,
+                                          mode=self.mode.id)
+            if ok and wrote:
                 names = self._reload_presets()
                 if name in names:
                     ui.preset_idx = names.index(name)
@@ -739,6 +757,13 @@ class Host:
                 ui.rename_buf = name
                 self.hud.toasts.hint("saved - " + name)
                 print("saved preset", name)
+            elif ok:
+                # the store refused (poisoned file). Saying "saved" here and
+                # opening the rename box put the operator in a text field on a
+                # preset that does not exist — which then eats every keypress,
+                # q and panic included, with nothing on screen to explain it.
+                self.hud.toasts.flash("save refused", AMBER)
+                print("preset save refused:", name)
             ui.pending_save = False
         if ui.pending_delete:
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
@@ -750,6 +775,9 @@ class Host:
                 ui.preset_idx = names.index(sel) if sel in names else 0
                 self.hud.toasts.hint("deleted - " + ui.pending_delete)
                 print("deleted preset", ui.pending_delete)
+            elif ok:
+                self.hud.toasts.flash("delete refused", AMBER)
+                print("preset delete refused:", ui.pending_delete)
             ui.pending_delete = None
         if getattr(ui, "pending_still_path", None):
             # still-image mailbox (v1: filled by the CLI --still flag or a

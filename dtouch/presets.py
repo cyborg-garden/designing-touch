@@ -118,7 +118,7 @@ def _backup_name(base: str, ext: str) -> str:
 
 
 def _corrupt_backup(path: str):
-    """An unreadable file is copied to {base}.corrupt.<ts>.bak.json before the
+    """An unusable file is copied to {base}.corrupt.<ts>.bak.json before the
     store proceeds empty — the next write would otherwise overwrite the user's
     looks with no recovery path. Backed up once per distinct corruption (a
     re-read of the same bad bytes never stacks duplicates); a *partial* earlier
@@ -126,25 +126,33 @@ def _corrupt_backup(path: str):
     is made under a new name. Returns the warning note, or None when this
     corruption is already backed up.
 
+    "Unusable" covers all three failures identically (they are the same event
+    to the user — their looks are at risk): unparseable bytes, valid JSON of
+    the wrong shape, and a file that cannot be READ AT ALL (permissions). The
+    unreadable case used to early-return here, which left the path unpoisoned
+    and let the next save destroy the only copy.
+
     A failed copy poisons the path: nothing may overwrite the original until a
     later attempt succeeds."""
     try:
         with open(path, "rb") as f:
             bad = f.read()
     except OSError:
-        return None
+        bad = None              # unreadable: no bytes to dedup against, but a
+                                # backup is still attempted before poisoning
     base, ext = os.path.splitext(path)
     ext = ext or ".json"
-    for bak in glob.glob(f"{glob.escape(base)}.corrupt.*.bak{ext}"):
-        try:
-            if os.path.getsize(bak) != len(bad):
-                continue            # partial/other backup — not this corruption
-            with open(bak, "rb") as f:
-                if f.read() == bad:
-                    _no_overwrite.discard(os.path.abspath(path))
-                    return None
-        except OSError:
-            pass
+    if bad is not None:
+        for bak in glob.glob(f"{glob.escape(base)}.corrupt.*.bak{ext}"):
+            try:
+                if os.path.getsize(bak) != len(bad):
+                    continue        # partial/other backup — not this corruption
+                with open(bak, "rb") as f:
+                    if f.read() == bad:
+                        _no_overwrite.discard(os.path.abspath(path))
+                        return None
+            except OSError:
+                pass
     bak = _backup_name(base, ext)
     try:
         shutil.copy2(path, bak)
@@ -157,16 +165,66 @@ def _corrupt_backup(path: str):
             f"backup saved to {os.path.basename(bak)}")
 
 
+_UNUSABLE = object()      # sentinel: the bytes could not be parsed at all
+
+
 def _read(path: str) -> dict:
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            note = _corrupt_backup(path)
-            if note:
-                _note(note)
-    return {}
+    """The file as a dict, or {} — never anything else, and never a traceback.
+
+    The design invites hand-editing these files (DESIGN.md §7), so every way a
+    hand-edit can go wrong routes to the SAME corrupt-file recovery (backup +
+    note + refuse to overwrite when the backup failed): missing file, bytes
+    that will not parse, bytes that cannot be read, and valid JSON that is not
+    an object (`null`, `[1,2]`, `"x"`, `42` all used to reach callers and
+    raise AttributeError/TypeError several frames later).
+
+    A path that becomes readable-and-valid again — or that is deleted — clears
+    its poison here, so repairing or removing the file un-sticks saving for the
+    rest of the process (the flag used to be cleared only from inside
+    `_corrupt_backup`, which only ran when json.load raised)."""
+    key = os.path.abspath(path)
+    if not os.path.exists(path):
+        _no_overwrite.discard(key)     # nothing left to protect
+        return {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except Exception:
+        raw = _UNUSABLE
+    if not isinstance(raw, dict):
+        note = _corrupt_backup(path)
+        if note:
+            _note(note)
+        return {}
+    _no_overwrite.discard(key)         # readable + valid again
+    return raw
+
+
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce(raw: dict) -> dict:
+    """Shape-tolerate a hand-edited v2 file in memory: a null / wrong-typed
+    sub-object reads as absent instead of raising deeper in the store.
+
+    `looks` and `meta` become empty dicts; `bank` and `setlist` are DROPPED
+    rather than emptied, because "never stored" and "explicitly emptied" are
+    different answers to the caller (see `bank()`), and a hand-edit that
+    scrambled the type is not an explicit emptying. Everything else in the
+    file is preserved untouched."""
+    raw["meta"] = _as_dict(raw.get("meta"))
+    raw["modes"] = modes = _as_dict(raw.get("modes"))
+    for mode_id, entry in list(modes.items()):
+        entry = modes[mode_id] = _as_dict(entry)
+        entry["looks"] = {name: cfg for name, cfg
+                          in _as_dict(entry.get("looks")).items()
+                          if isinstance(cfg, dict)}
+        if "bank" in entry and not isinstance(entry["bank"], dict):
+            del entry["bank"]
+        if "setlist" in entry and not isinstance(entry["setlist"], list):
+            del entry["setlist"]
+    return raw
 
 
 def _write(data: dict, path: str):
@@ -220,7 +278,7 @@ def load_file(path: str = "presets.json") -> dict:
         return _empty_v2()
     if is_v1(raw):
         return migrate_v1(raw)
-    return raw
+    return _coerce(raw)
 
 
 def write_file(data: dict, path: str = "presets.json") -> bool:
@@ -228,9 +286,14 @@ def write_file(data: dict, path: str = "presets.json") -> bool:
     presets.v1.bak.json first (once) — the mandatory migration backup.
 
     Refuses (no-op + note, never an exception — the show must not die) while
-    the path is poisoned: unreadable with no backup, so a write would be an
+    the path is poisoned: unusable with no backup, so a write would be an
     unrecoverable overwrite. `_read` retries the backup on every call, so the
-    next save after the disk frees up goes through. Returns True when written."""
+    next save after the disk frees up goes through.
+
+    Returns True when the bytes landed and False when the write was refused —
+    the whole point of the boolean. It used to fall off the end returning None
+    against a docstring promising True, so every caller reported success for a
+    write that never happened."""
     raw = _read(path)          # also retries a failed corrupt-backup
     if _is_poisoned(path):
         _note(f"{os.path.basename(path)} not saved - unreadable and could not "
@@ -241,6 +304,7 @@ def write_file(data: dict, path: str = "presets.json") -> bool:
         if not os.path.exists(bak):
             shutil.copy2(path, bak)
     _write(data, path)
+    return True
 
 
 def _mode_entry(data: dict, mode: str) -> dict:
@@ -266,18 +330,20 @@ def user_names(path: str = "presets.json", mode: str = DEFAULT_MODE) -> set:
 
 
 def save(name: str, cfg: dict, path: str = "presets.json",
-         mode: str = DEFAULT_MODE) -> str:
-    """Write/replace a user look, preserving everything else in the file."""
+         mode: str = DEFAULT_MODE) -> bool:
+    """Write/replace a user look, preserving everything else in the file.
+    Returns whether it reached the disk — a refused write must not be reported
+    to the operator as 'saved' (DESIGN.md §9)."""
     data = load_file(path)
     _mode_entry(data, mode).setdefault("looks", {})[name] = dict(cfg)
-    write_file(data, path)
-    return path
+    return write_file(data, path)
 
 
 def delete(name: str, path: str = "presets.json", mode: str = DEFAULT_MODE) -> bool:
     """Remove a user look (built-ins live in code, so they can't be deleted).
     Bank slots pointing at it are cleared (other slots keep their numbers —
-    slot stability, DESIGN.md §7) and it leaves the setlist."""
+    slot stability, DESIGN.md §7) and it leaves the setlist. False = nothing
+    was removed OR the write was refused; either way the look still exists."""
     data = load_file(path)
     entry = data.get("modes", {}).get(mode, {})
     looks = entry.get("looks", {})
@@ -288,14 +354,14 @@ def delete(name: str, path: str = "presets.json", mode: str = DEFAULT_MODE) -> b
         entry["bank"] = {s: n for s, n in entry["bank"].items() if n != name}
     if "setlist" in entry:
         entry["setlist"] = [n for n in entry["setlist"] if n != name]
-    write_file(data, path)
-    return True
+    return write_file(data, path)
 
 
 def rename(old: str, new: str, path: str = "presets.json",
            mode: str = DEFAULT_MODE, builtin: Optional[dict] = None) -> bool:
     """Rename a user look. Refuses built-ins, name clashes, and empty names.
-    Bank slots and setlist entries follow the rename."""
+    Bank slots and setlist entries follow the rename. False = refused OR the
+    write did not land; the old name is still the live one."""
     builtin = BUILTIN if builtin is None else builtin
     new = new.strip()
     data = load_file(path)
@@ -311,8 +377,7 @@ def rename(old: str, new: str, path: str = "presets.json",
                          for s, n in entry["bank"].items()}
     if "setlist" in entry:
         entry["setlist"] = [new if n == old else n for n in entry["setlist"]]
-    write_file(data, path)
-    return True
+    return write_file(data, path)
 
 
 # ----- bank + setlist (DESIGN.md §7: explicit slot assignments, not positions) -----
@@ -325,10 +390,11 @@ def bank(path: str = "presets.json", mode: str = DEFAULT_MODE) -> Optional[dict]
 
 
 def set_bank(bank_dict: dict, path: str = "presets.json",
-             mode: str = DEFAULT_MODE):
+             mode: str = DEFAULT_MODE) -> bool:
+    """Persist the slot→name map. Returns whether it reached the disk."""
     data = load_file(path)
     _mode_entry(data, mode)["bank"] = {str(k): v for k, v in bank_dict.items()}
-    write_file(data, path)
+    return write_file(data, path)
 
 
 def setlist(path: str = "presets.json", mode: str = DEFAULT_MODE) -> Optional[list]:
@@ -338,10 +404,11 @@ def setlist(path: str = "presets.json", mode: str = DEFAULT_MODE) -> Optional[li
 
 
 def set_setlist(names: list, path: str = "presets.json",
-                mode: str = DEFAULT_MODE):
+                mode: str = DEFAULT_MODE) -> bool:
+    """Persist the setlist order. Returns whether it reached the disk."""
     data = load_file(path)
     _mode_entry(data, mode)["setlist"] = list(names)
-    write_file(data, path)
+    return write_file(data, path)
 
 
 # ----- autosave state (DESIGN.md §6.4: crash restart resumes the same look) -----

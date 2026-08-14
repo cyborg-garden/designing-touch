@@ -576,3 +576,41 @@ def test_every_store_mailbox_survives_a_full_disk(tmp_path, monkeypatch,
     setattr(host.ui, mailbox, value(name))
     host._pump_preset_mailboxes()                    # must not raise
     assert host.hud.toasts._center.text == "save failed - disk?"
+
+
+# ---------- a REFUSED write is not a successful one (DESIGN.md §9) ----------
+
+def test_refused_save_never_says_saved_and_never_opens_the_rename_box(
+        tmp_path, monkeypatch):
+    """The store refuses to overwrite a file it could not back up. That
+    refusal raises nothing, so the shell used to report 'saved - <name>',
+    print 'saved preset', and drop the operator into a rename box on a preset
+    that does not exist — a text field that then eats every keypress (q, m,
+    panic included) with nothing on screen to explain it."""
+    host = _booted(tmp_path)
+    monkeypatch.setattr(presets, "write_file", lambda data, path=None: False)
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()
+
+    assert host.ui.renaming is None                  # no text field on a ghost
+    assert not host.ui.user_presets                  # nothing pretends to exist
+    assert not any("saved -" in t for t in _hints(host))
+    assert host.hud.toasts._center.text == "save refused"
+
+
+def test_refused_store_write_toasts_the_stores_own_reason(tmp_path,
+                                                          monkeypatch):
+    """`_store_write` drains the store's queued notes onto the toasts, so the
+    operator gets the REASON, not just 'refused' (silence on a data-loss event
+    is a bug — DESIGN.md §9)."""
+    host = _booted(tmp_path)
+
+    def refuse(data, path=None):
+        presets._note("presets.json not saved - unreadable and could not be "
+                      "backed up")
+        return False
+    monkeypatch.setattr(presets, "write_file", refuse)
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()
+    assert any("not saved" in t for t in _hints(host))
+    presets.take_notes()
