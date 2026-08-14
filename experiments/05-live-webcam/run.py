@@ -38,12 +38,29 @@ def parse_wh(s):
     return int(a), int(b)
 
 
+# Engine flags that only Particles/flow can honour. A value different from the
+# default is an explicit request, so it means "boot into flow" (DESIGN.md §3:
+# CLI flags mean "boot into") — otherwise the flag would be silently dropped by
+# the state.json resume path, which constructs the mode with DEFAULT args.
+ENGINE_DEFAULTS = dict(matte="auto", grid="416x234", particles=200000,
+                       flock=False, glitch=False)
+
+
+def engine_flags_given(args):
+    """The particles-implying flags the user actually set, as CLI spellings."""
+    return ["--" + name for name, default in ENGINE_DEFAULTS.items()
+            if getattr(args, name) != default]
+
+
 def boot_mode_name(mode_arg, still_arg, particles_flags=False):
-    """--still PATH implies dithergirl unless --mode is given (DESIGN.md §3:
-    CLI flags mean 'boot into'). With no mode-implying flag at all, returns
-    None — the shell resumes the last-used mode from state.json (§3: launch
-    goes straight into the last-used mode; first run: Particles). Particles-
-    specific flags (--flock/--glitch) still mean 'boot into' flow."""
+    """Boot precedence: --mode > --still > engine flags > state.json.
+
+    --still PATH implies dithergirl unless --mode is given (DESIGN.md §3: CLI
+    flags mean 'boot into'). Any particles-implying engine flag set to a
+    non-default value (--matte/--grid/--particles/--flock/--glitch) boots flow
+    WITH those args. With no mode-implying flag at all, returns None — the
+    shell resumes the last-used mode from state.json (§3: launch goes straight
+    into the last-used mode; first run: Particles)."""
     if mode_arg:
         return mode_arg
     if still_arg:
@@ -88,8 +105,11 @@ def main():
         return
 
     device = int(args.device) if args.device.isdigit() else args.device
-    boot = boot_mode_name(args.mode, args.still,
-                          particles_flags=(args.flock or args.glitch))
+    given = engine_flags_given(args)
+    boot = boot_mode_name(args.mode, args.still, particles_flags=bool(given))
+    if given and boot != "flow":
+        # a higher-precedence flag won; say so instead of dropping the flag
+        print("note: %s ignored - booting %s" % (", ".join(given), boot))
     if boot == "grid":
         live(device=device, res=parse_wh(args.res), mirror=not args.no_mirror)
         return
