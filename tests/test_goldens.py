@@ -2,12 +2,14 @@
 
 Renders today's OverlayUI panel (empty status) over two fixture frames
 (bright: 230-gray with a white gradient; dark: flat 20-gray) at 720p, 1080p,
-and 4K, and compares against stored PNGs in tests/goldens/. Two panel states
+and 4K, and compares against stored PNGs in tests/goldens/. Three panel states
 are pinned, and between them every widget in the spec is drawn into some
 golden:
 
 - **closed** (`panel_{h}p_{fixture}.png`) — the boot panel, MOTION and SIGNAL
   collapsed, at all three resolutions. This is the top of the control column.
+- **closed, scrolled to the bottom** (`panel_720p_{fixture}_bottom.png`) —
+  720p only, and the reason is below.
 - **open, scrolled to the bottom** (`panel_{h}p_{fixture}_open_bottom.png`) —
   MOTION and SIGNAL expanded, at 1080p and 4K. Nothing else pins the MOTION
   rows, SIGNAL's Bits/Gamma/Bias, or the circuit-bent rows: measured against
@@ -15,9 +17,24 @@ golden:
   0.0000 — a collapsed section simply does not draw. Open, the column is
   1434 px at 1080p, so it must be scrolled for its lower half to be on screen
   at all (unscrolled, everything below `bias` is clipped and still measures
-  0.0000). 720p is omitted: the panel is authored at the 1080p baseline, so at
-  720p even the closed column overflows — the open one would show the same
+  0.0000). 720p is omitted there: the open column at 720p would show the same
   rows this pair already pins, for two more binaries.
+
+**Why 720p needs a second, scrolled pin.** The panel is authored at the 1080p
+baseline, and the closed column measures 1012 px — which fits 1080p and 4K
+with room over, and leaves **292 px below the fold at 720p**. Everything in
+that last 292 px is clipped, so the unscrolled 720p pair is close to blind
+over the bottom third of its own subject: measured, dropping the `(F)`/`(G)`
+section key hints moves **0.0000** there (it is caught only by 1080p/4K), and
+deleting the entire `Menu (M)` row moves 0.0026 bright — 1.3x tolerance, i.e.
+one rounding away from passing. A resolution whose pin cannot see a deleted
+row is not pinning that resolution; it is pinning 1080p twice. Scrolled to the
+bottom, the same two mutations measure 0.0482/0.0673 and 15.26/19.66 — the
+second is that large because removing a row shortens the column, and a
+bottom-anchored view shifts every remaining row up. That sensitivity is the
+point of the pin and it cuts both ways: an intentional row add or remove will
+move these two goldens far more than the closed ones, and they are meant to be
+regenerated with the rest.
 
 Comparison is two-tier:
 
@@ -67,6 +84,10 @@ ROI_TOLERANCE = 0.002   # panel ROI (primary — see module docstring)
 PANEL_W = 290           # OverlayUI.panel_w, scaled like the panel itself
 RESOLUTIONS = [(1280, 720), (1920, 1080), (3840, 2160)]
 OPEN_RESOLUTIONS = [(1920, 1080), (3840, 2160)]
+# Resolutions whose CLOSED column overflows the frame, so the unscrolled pin
+# cannot see its own lower rows (see the module docstring). Only 720p does:
+# the closed column is 1012 px against 1080 and 2160.
+BOTTOM_RESOLUTIONS = [(1280, 720)]
 
 # The cv2 major the goldens were captured on. cv2 5 rasterises Hershey glyphs
 # differently (measured: up to 5.2 ROI diff on these same fixtures) — that is a
@@ -100,20 +121,28 @@ FIXTURES = {"bright": _bright, "dark": _dark}
 OPEN_SECTIONS = ("MOTION", "SIGNAL")
 
 
-def _render_panel(w, h, frame, sections_open=False):
+def _render_panel(w, h, frame, sections_open=False, scrolled=False):
     ui = OverlayUI(w, h, PRESETS, list(PALETTES), MATTES)
     img = frame.copy()
     if sections_open:
         for title in OPEN_SECTIONS:
             assert title in ui.sections, f"{title} section vanished from the spec"
             ui.sections[title] = True
-        # The open column is taller than the frame. Scroll is clamped inside
-        # draw() against the LAST measured column height, so draw once on a
-        # scratch frame to measure, then scroll past the end (clamped to the
-        # bottom) and draw for real. Deterministic: same scroll, byte-identical
-        # renders, verified twice in a row.
+    if sections_open or scrolled:
+        # The column is taller than the frame (always when open; at 720p even
+        # closed). Scroll is clamped inside draw() against the LAST measured
+        # column height, so draw once on a scratch frame to measure, then
+        # scroll past the end (clamped to the bottom) and draw for real.
+        # Deterministic: same scroll, byte-identical renders, verified twice
+        # in a row.
         ui.draw(np.zeros_like(img), {"status": ""})
         ui.scroll = 10 ** 6
+        ui.draw(img, {"status": ""})
+        assert ui.scroll > 0, (
+            f"{h}p panel did not scroll (column {ui._content_h}px fits the "
+            f"frame) — this golden would duplicate the unscrolled one"
+        )
+        return img
     ui.draw(img, {"status": ""})
     return img
 
@@ -129,8 +158,9 @@ def _panel_roi(img, h):
     return img[:, img.shape[1] - pw:]
 
 
-def _compare_to_golden(w, h, fixture, suffix="", sections_open=False):
-    img = _render_panel(w, h, FIXTURES[fixture](w, h), sections_open)
+def _compare_to_golden(w, h, fixture, suffix="", sections_open=False,
+                       scrolled=False):
+    img = _render_panel(w, h, FIXTURES[fixture](w, h), sections_open, scrolled)
     path = os.path.join(GOLDEN_DIR, f"panel_{h}p_{fixture}{suffix}.png")
     if os.environ.get("GOLDEN_REGEN") == "1":
         os.makedirs(GOLDEN_DIR, exist_ok=True)
@@ -161,6 +191,18 @@ def _compare_to_golden(w, h, fixture, suffix="", sections_open=False):
 def test_panel_matches_golden(w, h, fixture):
     """The boot panel: MOTION and SIGNAL collapsed, as it opens."""
     _compare_to_golden(w, h, fixture)
+
+
+@needs_golden_cv2
+@pytest.mark.parametrize("w,h", BOTTOM_RESOLUTIONS)
+@pytest.mark.parametrize("fixture", sorted(FIXTURES))
+def test_panel_closed_bottom_matches_golden(w, h, fixture):
+    """The boot panel at 720p, scrolled to the bottom of its column — the only
+    pin on the 292 px that hang below a 720p fold. Without it, dropping the
+    `(F)`/`(G)` key hints moves 0.0000 at this resolution and deleting the
+    whole `Menu (M)` row moves 0.0026, so 720p was carried by the 1080p/4K
+    pins rather than pinning itself (see the module docstring)."""
+    _compare_to_golden(w, h, fixture, suffix="_bottom", scrolled=True)
 
 
 @needs_golden_cv2
