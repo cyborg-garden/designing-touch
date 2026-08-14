@@ -6,6 +6,7 @@ swatch caching, preset capture/apply round-trips (incl. the nested "signal"
 block and the suppressed dither row), bank seeding, still input, and the
 shell-command wiring for menu + direct mode keys.
 """
+import cv2
 import numpy as np
 import pytest
 
@@ -402,6 +403,56 @@ def test_perf_note_wraps_inside_the_panel_column_at_720p(tmp_path):
     assert xs.max() <= x + cw, "the note must stay inside the panel column"
     assert xs.min() >= x
     assert len(np.unique(ys // 16)) >= 2 or y2 - 100 > 20   # actually wrapped
+
+
+# ---------- contrast-reorder canary (perf rewrite, DESIGN.md §4.2) ----------
+
+def _contrast_orders(gray_u8, ww, wh, contrast):
+    """(pre-rewrite, shipped) tone planes for the same frame.
+
+    pre-rewrite: float at FULL res -> contrast+clip -> INTER_AREA down.
+    shipped:     INTER_AREA down (uint8) -> float -> contrast+clip.
+    Mirrors DitherGirlMode.step's ordering."""
+    full = gray_u8.astype(np.float32) / 255.0
+    old = cv2.resize(np.clip((full - 0.5) * contrast + 0.5, 0.0, 1.0),
+                     (ww, wh), interpolation=cv2.INTER_AREA)
+    small = (cv2.resize(gray_u8, (ww, wh), interpolation=cv2.INTER_AREA)
+             .astype(np.float32) / 255.0)
+    new = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
+    return old, new
+
+
+def _detailed_frame(h=720, w=1280, seed=7):
+    """High-frequency texture — the worst case for an area-average reorder."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    g = 0.5 + 0.5 * np.sin(xx / 3.0) * np.cos(yy / 5.0)
+    return ((0.6 * g + 0.4 * rng.random((h, w), dtype=np.float32)) * 255
+            ).astype(np.uint8)
+
+
+def test_contrast_reorder_canary_bounds_the_accepted_difference():
+    """Moving contrast after the resize is NOT identity — clip does not commute
+    with INTER_AREA. The reorder is kept for the ~90x cost reduction, so this
+    pins how far it may drift: measured ~1.95/255 mean-abs at Contrast 1.6 and
+    the default working height (72), bounded here at 4/255. A regression that
+    pushes it past that is a visible tone change, not a rounding artifact."""
+    gray = _detailed_frame()
+    wh = 72                                              # SCALE_DEFAULT
+    ww = max(8, int(round(wh * 1280 / 720.0)))
+    old, new = _contrast_orders(gray, ww, wh, 1.6)
+    diff = np.abs(old - new).mean() * 255.0
+    assert diff < 4.0, f"contrast reorder drifted to {diff:.2f}/255"
+    # …and it is genuinely non-zero: the comment must not claim identity again
+    assert diff > 0.5
+
+
+def test_contrast_reorder_is_identity_only_when_nothing_is_resized():
+    """The planes agree exactly when the working res IS the frame res — proof
+    the divergence comes from the resize, not from the contrast math."""
+    gray = _detailed_frame(h=72, w=128)
+    old, new = _contrast_orders(gray, 128, 72, 3.0)
+    assert np.allclose(old, new, atol=1e-6)
 
 
 # ---------- audio modulation (minimal — DESIGN.md §4.2) ----------

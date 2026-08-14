@@ -347,10 +347,18 @@ class DitherGirlMode:
             contrast *= 1.0 + 0.35 * sens * float(audio_levels["bass"])
 
         # perf: all float work happens at WORKING res — grayscale stays uint8
-        # through the resize, contrast runs on the small plane (identical
-        # result up to uint8 rounding), and the palette maps BEFORE the
-        # nearest-neighbour upscale (bitwise identical: NEAREST replicates
-        # pixels and the palette map is per-pixel).
+        # through the resize, contrast runs on the small plane, and the palette
+        # maps BEFORE the nearest-neighbour upscale (that last move IS bitwise
+        # identical: NEAREST replicates pixels and the palette map is
+        # per-pixel).
+        #
+        # Behavior change, accepted for the ~90x cost reduction: contrast now
+        # applies at working res. clip does NOT commute with INTER_AREA, so
+        # near the clip boundaries at high contrast this differs from the
+        # pre-rewrite pipeline (full-res contrast, then resize) — a few
+        # 1/255 at Contrast 1.6, tens of 1/255 at 3.0 on detailed frames.
+        # test_contrast_reorder_canary in tests/test_dithergirl.py bounds it;
+        # post-dither the visual difference is small.
         gray_u8 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         wh = int(np.clip(round(scale), SCALE_LO, SCALE_HI))
         ww = max(8, int(round(wh * rw / float(rh))))
