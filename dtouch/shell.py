@@ -840,6 +840,22 @@ class Host:
             toasts.hint("bank not saved - it resets on restart", AMBER)
         self._autosave_state()
 
+    def _drain_store_notes(self):
+        """Surface any store warning no targeted drain took.
+
+        The store queues its warnings on a module-global list, and the shell
+        drains that list in exactly two places: after loading looks, and after
+        a store WRITE — where the drained note is reported to the operator as
+        the reason THAT write refused. Everything else that touches the store
+        queues onto the same list and drains nothing: the boot state.json
+        read, the autosave, the bank/setlist reads after a reload. So a note
+        could sit in the queue until the next write and then be shown as that
+        write's reason — a data-loss message about the wrong file, which §9
+        treats as the same bug as silence about the right one. Draining once
+        per frame keeps every note attached to the frame it happened on."""
+        for note in _presets.take_notes():
+            self.hud.toasts.hint(note, AMBER)
+
     def _pump_preset_mailboxes(self):
         """The pending_* mailboxes a panel click posts to (shipped semantics)."""
         ui = self.ui
@@ -930,6 +946,9 @@ class Host:
                 self.hud.toasts.hint("rename refused - name taken or invalid")
                 print("rename refused (name taken or invalid):", old, "->", new)
             ui.pending_rename = None
+        # anything the targeted drains above did not take belongs to this
+        # frame, not to whichever write happens to run next
+        self._drain_store_notes()
 
     # ----- host-owned per-frame sync (mirror / res / mic / recorder) -----
     def _sync_host_state(self):

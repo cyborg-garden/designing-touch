@@ -1485,6 +1485,23 @@ def test_a_resumed_look_with_an_unusable_value_still_boots(tmp_path):
     assert any("unusable values" in t for t in _hints(host))
 
 
+def test_a_store_note_reaches_the_operator_on_its_own_frame(tmp_path):
+    """The store queues warnings on a module-global list that only two places
+    drain, both of them after an operation they then blame the note on. Every
+    other store call — the boot state.json read, the autosave, the bank and
+    setlist reads after a reload — queued and drained nothing, so a note could
+    wait there and surface later as the reason an unrelated save refused: a
+    data-loss message about the wrong file, which is the same bug as silence
+    about the right one (DESIGN.md §9)."""
+    host = _booted(tmp_path)                         # boot notes already drained
+    presets._note("state.json unreadable - backup saved to state.corrupt.json")
+
+    host._pump_preset_mailboxes()                    # one frame of the loop
+
+    assert any("state.json unreadable" in t for t in _hints(host))
+    assert presets.take_notes() == []                # nothing left to misattribute
+
+
 def test_a_look_that_raises_cannot_re_raise_every_frame(tmp_path, monkeypatch):
     """The mailbox was cleared AFTER the apply, so a look that raised left it
     armed: the next frame applied the same bad look and raised again, forever,
