@@ -29,6 +29,10 @@ On macOS you can also just **double-click `start.command`** (it sets up the envi
 run, then opens the window). Grant your terminal **Camera** (and **Microphone**, for sound) access
 in System Settings → Privacy & Security.
 
+The `[person]` extra needs mediapipe, which ships an arm64 macOS wheel only — on an Intel Mac (or
+anywhere mediapipe won't resolve) the install continues without it and the two templates that use
+the person matte, `portrait` and `sigil`, fall back to another matte.
+
 ## The live instrument
 
 One window, and it opens already playing — the mode you used last, its look moving, and a
