@@ -665,6 +665,19 @@ class Host:
         rack's block nests under "signal" (its Section declares store)."""
         return capture_look(self.ui, self.ui.spec)
 
+    def _store_write(self, fn, *a, **kw):
+        """Run a preset-store write that touches the disk. A full disk raises
+        OSError out of json.dump — from the mailbox pump that would exit run()
+        mid-performance. The show never dies for a failed save (DESIGN.md
+        §6.4): toast it and carry on. Returns (ok, result)."""
+        try:
+            return True, fn(*a, **kw)
+        except OSError as e:                         # noqa: BLE001 — §6.4
+            self.hud.toasts.flash("save failed - disk?", AMBER)
+            self.hud.toasts.hint(str(e)[:80])
+            print("preset store write failed:", e)
+            return False, None
+
     def _apply_pending_preset(self):
         """Spec-derived apply onto the shared UI state; engines pick the values
         up in the mode's next step() sync. apply="keep" widgets are untouched
@@ -695,7 +708,8 @@ class Host:
                 return
             ui.bank[free] = name
             toasts.flash(f"{free} - {name}")
-        _presets.set_bank(ui.bank, path=self.presets_path, mode=self.mode.id)
+        self._store_write(_presets.set_bank, ui.bank, path=self.presets_path,
+                          mode=self.mode.id)
         self._autosave_state()
 
     def _pump_preset_mailboxes(self):
@@ -715,20 +729,23 @@ class Host:
             name, n = base, 2
             while name in existing:
                 name, n = "%s_%d" % (base, n), n + 1
-            _presets.save(name, self._capture_cfg(), path=self.presets_path,
-                          mode=self.mode.id)
-            names = self._reload_presets()
-            if name in names:
-                ui.preset_idx = names.index(name)
-            ui.renaming = name
-            ui.rename_buf = name
-            self.hud.toasts.hint("saved - " + name)
-            print("saved preset", name)
+            ok, _ = self._store_write(_presets.save, name, self._capture_cfg(),
+                                      path=self.presets_path, mode=self.mode.id)
+            if ok:
+                names = self._reload_presets()
+                if name in names:
+                    ui.preset_idx = names.index(name)
+                ui.renaming = name
+                ui.rename_buf = name
+                self.hud.toasts.hint("saved - " + name)
+                print("saved preset", name)
             ui.pending_save = False
         if ui.pending_delete:
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
-            if _presets.delete(ui.pending_delete, path=self.presets_path,
-                               mode=self.mode.id):
+            ok, gone = self._store_write(_presets.delete, ui.pending_delete,
+                                         path=self.presets_path,
+                                         mode=self.mode.id)
+            if ok and gone:
                 names = self._reload_presets()
                 ui.preset_idx = names.index(sel) if sel in names else 0
                 self.hud.toasts.hint("deleted - " + ui.pending_delete)
@@ -759,15 +776,17 @@ class Host:
         if ui.pending_rename:
             old, new = ui.pending_rename
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
-            if _presets.rename(old, new, path=self.presets_path,
-                               mode=self.mode.id,
-                               builtin=getattr(self.mode, "BUILTIN", {})):
+            ok, done = self._store_write(
+                _presets.rename, old, new, path=self.presets_path,
+                mode=self.mode.id,
+                builtin=getattr(self.mode, "BUILTIN", {}))
+            if ok and done:
                 names = self._reload_presets()
                 target = new if sel == old else sel
                 ui.preset_idx = names.index(target) if target in names else 0
                 self.hud.toasts.hint("renamed - " + new)
                 print("renamed preset", old, "->", new)
-            else:
+            elif ok:
                 self.hud.toasts.hint("rename refused - name taken or invalid")
                 print("rename refused (name taken or invalid):", old, "->", new)
             ui.pending_rename = None

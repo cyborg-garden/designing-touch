@@ -533,3 +533,46 @@ def test_corrupt_presets_note_reaches_the_toasts(tmp_path):
     host = _booted(tmp_path)
     assert any("backup" in t for t in _hints(host))
     assert list(tmp_path.glob("presets.corrupt.*.bak.json"))
+
+
+# ---------- a failed store write never takes the show down (§6.4) ----------
+
+def _full_disk(monkeypatch, *names):
+    def boom(*a, **kw):
+        raise OSError(28, "No space left on device")
+    for name in names:
+        monkeypatch.setattr(presets, name, boom)
+
+
+def test_save_click_on_a_full_disk_toasts_and_keeps_running(tmp_path,
+                                                            monkeypatch):
+    """json.dump's OSError used to propagate out of the mailbox pump and exit
+    run() mid-performance — a save click could kill the show."""
+    host = _host(tmp_path, max_frames=4,
+                 src=SyntheticSource(
+                     on_read=lambda n: setattr(host.ui, "pending_save", True)
+                     if n == 2 and host.ui else None))
+    _full_disk(monkeypatch, "save")
+    count, out = host.run()
+    assert count == 4                                # the loop survived
+    assert host.hud.toasts._center.text == "save failed - disk?"
+    assert not host.ui.user_presets                  # nothing pretends to exist
+    assert host.ui.renaming is None                  # no rename box for a ghost
+
+
+@pytest.mark.parametrize("mailbox,call,value", [
+    ("pending_delete", "delete", lambda name: name),
+    ("pending_rename", "rename", lambda name: (name, "neon")),
+    ("pending_slot", "set_bank", lambda name: name),
+])
+def test_every_store_mailbox_survives_a_full_disk(tmp_path, monkeypatch,
+                                                  mailbox, call, value):
+    host = _booted(tmp_path)
+    host.ui.pending_save = True
+    host._pump_preset_mailboxes()                    # a real look to act on
+    host.ui.renaming = None
+    name = next(iter(host.ui.user_presets))
+    _full_disk(monkeypatch, call)
+    setattr(host.ui, mailbox, value(name))
+    host._pump_preset_mailboxes()                    # must not raise
+    assert host.hud.toasts._center.text == "save failed - disk?"
