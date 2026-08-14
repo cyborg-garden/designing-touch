@@ -4,6 +4,7 @@ Everything here drives the real Host loop headless with DitherGirlMode (pure
 numpy/cv2 — no GL, so these run everywhere test_dithergirl.py does). GUI-path
 tests monkeypatch cv2's window calls so `show=True` code paths run headless.
 """
+import json
 import os
 
 import numpy as np
@@ -16,7 +17,7 @@ from dtouch import presets
 from dtouch import shell as shell_mod
 from dtouch.hud import OverlayState
 from dtouch.modes.dithergirl import MATTES_DG, DitherGirlMode
-from dtouch.shell import CameraSource, Host
+from dtouch.shell import PANEL_OPEN, CameraSource, Host
 
 RES = (192, 108)
 
@@ -690,6 +691,46 @@ def test_a_different_frame_error_toasts_immediately(tmp_path):
     assert host._err_key == ("TypeError", "second")
 
 
+def test_two_alternating_errors_cannot_defeat_the_rate_limit(tmp_path):
+    """The limit remembered exactly ONE (type, message), so A→B→A→B passed
+    its equality check every single time and sprayed toasts and stdout twice
+    per frame forever — on the most reachable repeating failure there is (a
+    mode that raises one error while the overlay raises another). The window
+    now remembers every key inside it."""
+    host = _host(tmp_path, max_frames=1)
+    flashes, prints = [], []
+    host.hud.toasts.flash = lambda text, color=None: flashes.append(text)
+    for i in range(120):                             # two seconds at 60 fps
+        host._frame_error(ValueError("a") if i % 2 else TypeError("b"))
+    assert len(flashes) == 2                         # one per DISTINCT error
+    assert len(_hints(host)) <= 3                    # the stack never refills
+
+
+def test_errors_that_vary_their_text_are_a_flood_too(tmp_path):
+    """A message that carries a frame number or a coordinate is a different
+    key every frame — per-key limiting alone would still spray."""
+    host = _host(tmp_path, max_frames=1)
+    flashes = []
+    host.hud.toasts.flash = lambda text, color=None: flashes.append(text)
+    for i in range(120):
+        host._frame_error(ValueError("bad pixel at %d" % i))
+    assert len(flashes) <= shell_mod.ERR_TOAST_MAX
+    assert any("more errors" in t for t in _hints(host))
+
+
+def test_an_error_from_our_own_reporting_never_hides_the_real_cause(tmp_path):
+    """The present half is OUR code. When it fails while reporting a produce
+    failure, the operator was left reading our bug ('UnboundLocalError: frame')
+    with the real cause — the camera — permanently unreachable."""
+    host = _host(tmp_path, max_frames=1)
+    host._frame_ok = False                           # produce failed this frame
+    host._frame_error(OSError(5, "Input/output error"))
+    host._frame_error(UnboundLocalError("frame"), internal=True)
+    assert host._err_key[0] == "OSError"             # the cause still stands
+    assert any("OSError" in t for t in _hints(host))
+    assert not any("UnboundLocalError" in t for t in _hints(host))
+
+
 def test_keys_still_work_while_every_single_frame_fails(tmp_path, monkeypatch):
     """The contract that matters (DESIGN.md §6.4: no keyboard-reachable state
     requires a restart) — the produce half is contained, so the present half
@@ -975,6 +1016,47 @@ def test_clicking_the_hud_chevron_opens_the_panel(tmp_path, monkeypatch):
     assert host.ui.pending_commands == ["panel.open"]
     host._pump_preset_mailboxes()
     assert host.overlay is OverlayState.PANEL
+    # the overlay state alone is NOT the panel being open — see the pixel test
+    assert host.ui.open is True
+
+
+def test_the_chevron_opens_a_sidebar_the_operator_collapsed(tmp_path,
+                                                            monkeypatch):
+    """The state assertion above passed while the operator saw NOTHING.
+
+    `overlay is PANEL` is not the sidebar being on screen: the sidebar keeps
+    its own collapsed flag, and a collapsed sidebar draws its expand button at
+    exactly the coordinates the chevron uses. Collapse the panel (one click,
+    the shipped '>' button), step back to HUD, and the chevron click then
+    swapped one small box for a near-identical small box in the same place —
+    click 1 nothing, click 2 sidebar. That IS the 'my click did nothing'
+    symptom the chevron was added to kill, so this asserts PIXELS."""
+    shown = []
+    _patch_gui(monkeypatch, shown=shown)
+    host = _host(tmp_path, show=True, panel=True, max_frames=5)
+
+    def click(rect):
+        (x0, y0, x1, y1) = rect
+        host._on_mouse(cv2.EVENT_LBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2, 0)
+
+    def on_read(n):
+        if n == 1:
+            host.overlay = OverlayState.PANEL        # TAB to the panel…
+        elif n == 2:                                 # …collapse it, as shipped
+            click(next(r for r, k, _ in host.ui._hot if k == "collapse"))
+            host.overlay = OverlayState.HUD          # …and Esc back to HUD
+        elif n == 3:
+            assert host.ui.open is False             # the state we are fixing
+            click(next(r for r, k, _ in host.ui._hot if k == PANEL_OPEN))
+
+    host._source.on_read = on_read
+    _, out = host.run()
+
+    assert host.overlay is OverlayState.PANEL
+    picture = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    covered = np.any(shown[-1] != picture, axis=2).mean()
+    assert covered > 0.5, ("the click drew another small box, not a sidebar "
+                           f"(only {covered:.0%} of the frame changed)")
 
 
 def test_the_chevron_never_draws_in_hidden(tmp_path, monkeypatch):
@@ -1232,3 +1314,66 @@ def test_a_full_bank_says_so_instead_of_dropping_the_click(tmp_path):
     host._assign_slot("phosphor")
     assert "phosphor" not in host.ui.bank.values()
     assert any("bank full" in t for t in _hints(host))
+
+
+# ---------- a look's VALUES are not validated by the store either ----------
+# The earlier hardening covered the preset file's SHAPE. Its values still went
+# straight into `float()`, and the boot application sat outside every guard —
+# so a hand-edited (or half-merged) presets.json ended the launch with a
+# traceback and no window, the one failure a performer cannot work around.
+
+
+def _write_look(tmp_path, name="broken", **over):
+    """A well-SHAPED v2 file whose look carries a bad value."""
+    cfg = dict(DitherGirlMode.BUILTIN["classic"])
+    cfg.update(over)
+    with open(str(tmp_path / "presets.json"), "w") as f:
+        json.dump({"version": 2, "meta": {},
+                   "modes": {"dithergirl": {"looks": {name: cfg}}}}, f)
+    return name
+
+
+def test_a_look_with_an_unusable_value_still_boots(tmp_path):
+    """`"contrast": "high"` — well-shaped, unusable, and fatal at boot."""
+    name = _write_look(tmp_path, contrast="high")
+    host = _host(tmp_path, max_frames=1, preset=name)
+    count, out = host.run()
+
+    assert count == 1 and out is not None            # the show started
+    assert host.ui.dg_contrast == 1.0                # bad key skipped…
+    assert host.ui.dg_scale == 72.0                  # …the rest of it loaded
+    assert any("unusable values" in t and "contrast" in t for t in _hints(host))
+
+
+def test_a_resumed_look_with_an_unusable_value_still_boots(tmp_path):
+    """The same file reached without naming it: state.json resume (§6.4) is
+    the path a crashed session comes back through, so it must not be the path
+    that keeps it dead."""
+    name = _write_look(tmp_path, scale="wide")
+    presets.save_state({"mode": "dithergirl", "preset": name, "bank": {}},
+                       path=str(tmp_path / "state.json"))
+    host = _host(tmp_path, max_frames=1, preset=None)
+    count, _ = host.run()
+    assert count == 1
+    assert any("unusable values" in t for t in _hints(host))
+
+
+def test_a_look_that_raises_cannot_re_raise_every_frame(tmp_path, monkeypatch):
+    """The mailbox was cleared AFTER the apply, so a look that raised left it
+    armed: the next frame applied the same bad look and raised again, forever,
+    at frame rate, with no way to select a different one."""
+    host = _booted(tmp_path)
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(a)
+        raise ValueError("could not convert string to float: 'high'")
+
+    monkeypatch.setattr(shell_mod, "apply_look", boom)
+    host.ui.pending_preset = "classic"
+    for _ in range(5):                               # five frames of pumping
+        host._pump_preset_mailboxes()
+
+    assert len(calls) == 1                           # applied once, not forever
+    assert host.ui.pending_preset is None            # mailbox disarmed
+    assert host.hud.toasts._center.text == "look not loaded - classic"

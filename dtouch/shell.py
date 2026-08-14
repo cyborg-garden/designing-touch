@@ -41,7 +41,26 @@ from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
 ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
+ERR_TOAST_MAX = 3      # ...and at most this many DISTINCT errors per window
 PANEL_OPEN = "panel.open"   # the HUD chevron and TAB reach the same named command
+
+# A produce half that fails every frame must idle, not spin. Containment
+# removed the exception that used to end the run, so a permanent failure became
+# a busy loop: measured 983 iterations/sec against a frozen picture, pegging a
+# core for as long as the show lasts. One frame-time of sleep on the failure
+# path costs a healthy loop nothing and holds a broken one at ~30 Hz — the rate
+# it would run at anyway.
+FRAME_FAIL_SLEEP_S = 1.0 / 30.0
+# ...and headless there is no window to explain itself and no `q` to stop it,
+# so a permanent failure ends the run with the real cause instead of spinning
+# forever behind no output at all. ~4 s at the throttled rate.
+FRAME_FAIL_LIMIT = 120
+# The largest dt a mode is ever handed (DESIGN.md §2.2). A stall accumulates
+# wall-clock between two step() calls; a mode that integrates it moves a
+# multi-second jump in one frame (particles teleport, fades blow out). A
+# quarter second = 4 fps: below that the show is already visibly broken, and
+# capping is the honest lie.
+DT_MAX = 0.25
 
 
 class PerformState:
@@ -402,6 +421,9 @@ class Host:
         self.fps = 0.0
         self._err_key = None      # (type, message) of the last frame error…
         self._err_at = 0.0        # …and when it was last toasted (rate limit)
+        self._err_seen = {}       # every (type, message) seen inside the window
+        self._err_flood = False   # ...more distinct errors than fit in a window
+        self._frame_ok = True     # did THIS frame's produce half succeed?
 
     # ----- mode lifecycle (DESIGN.md §2.1) -----
     def _resolve_boot_mode(self):
@@ -553,11 +575,25 @@ class Host:
         # unbound (TAB already reaches PANEL and is listed in the help table) —
         # this is the named command the HUD chevron posts, so the mouse path
         # and the key path are one implementation (DESIGN.md principle 7)
-        self.reg.add(PANEL_OPEN, "Open the panel", None,
-                     lambda: setattr(self, "overlay", OverlayState.PANEL))
+        self.reg.add(PANEL_OPEN, "Open the panel", None, self._open_panel)
         for cls in REGISTRY:
             self.reg.add(f"mode.{cls.id}", f"Switch to {cls.title}", cls.id[:1],
                          lambda mid=cls.id: self.request_mode(mid))
+
+    def _open_panel(self):
+        """Show the sidebar — the whole content of the `panel.open` command.
+
+        Setting the overlay state alone was not enough, and the way it failed
+        was invisible: `ui.open` is the sidebar's OWN collapsed/expanded flag,
+        and a collapsed sidebar draws its expand button as a small box in
+        exactly the top-right spot the HUD chevron occupies. So the first
+        click swapped one near-identical box for another in the same place and
+        no panel appeared — the exact 'my click did nothing' symptom the
+        chevron was added to kill. Opening means both: the shell's overlay
+        state AND the panel's own."""
+        self.overlay = OverlayState.PANEL
+        if self.ui is not None:
+            self.ui.open = True
 
     def _wire_keys(self):
         """(Re)build the command registry for the active mode — called at boot
@@ -735,16 +771,46 @@ class Host:
             self.hud.toasts.hint(note, AMBER)
         return ok, result
 
+    def _apply_look(self, name, cfg):
+        """Apply one stored look onto the shared UI state, contained.
+
+        The file's SHAPE is validated by the store; its VALUES are not, and
+        they reach `float()` here. A hand-edited (or half-merged) presets.json
+        with `"contrast": "high"` is well-shaped and raises ValueError out of
+        apply_look — at boot that killed the run before any window existed,
+        and live it raised again every frame. apply_look now skips unusable
+        values instead of raising, and this says which ones went (silence on a
+        look that half-loaded is a bug — DESIGN.md §9); the guard stays for
+        anything it cannot foresee. Returns True when the look was applied."""
+        try:
+            skipped = apply_look(self.ui, self.ui.spec, cfg,
+                                 self.mode.DEFAULTS)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:                       # noqa: BLE001 — §6.4
+            self.hud.toasts.flash("look not loaded - " + str(name), AMBER)
+            self.hud.toasts.hint(f"{type(e).__name__}: {str(e)[:70]}", AMBER)
+            print("preset apply failed:", name, e)
+            return False
+        if skipped:
+            self.hud.toasts.hint("unusable values ignored - "
+                                 + ", ".join(skipped[:3]), AMBER)
+            print("preset", name, "has unusable values:", skipped)
+        return True
+
     def _apply_pending_preset(self):
         """Spec-derived apply onto the shared UI state; engines pick the values
         up in the mode's next step() sync. apply="keep" widgets are untouched
         by look-switching; apply="reset" merges over the mode's defaults."""
         ui = self.ui
-        name = ui.pending_preset
+        name, ui.pending_preset = ui.pending_preset, None
+        # the mailbox is cleared BEFORE the apply on purpose: clearing it after
+        # meant a look that raised left the mailbox armed, so the next frame
+        # applied the same bad look and raised again — forever, at frame rate,
+        # with no way to select a different one
         if name in self.all_presets:
-            apply_look(ui, ui.spec, self.all_presets[name], self.mode.DEFAULTS)
+            self._apply_look(name, self.all_presets[name])
             self._autosave_state()
-        ui.pending_preset = None
 
     def _assign_slot(self, name):
         """Slot-badge click (DESIGN.md §6.3): an unbanked look takes the next
@@ -948,23 +1014,78 @@ class Host:
         self.hud.toasts.hint(str(e)[:80], AMBER)
         print("recorder failed:", e)
 
-    def _frame_error(self, e):
+    def _frame_error(self, e, internal=False):
         """One caught per-frame exception (DESIGN.md §6.4, §8 step 10: any
         traceback is a release blocker). Toast a human summary in amber and
         keep going.
 
-        Rate-limited by (type, message): a failure that repeats every frame
-        would otherwise refill the toast stack 60 times a second and bury the
-        status line under its own error — and spray stdout hard enough to
-        matter. A DIFFERENT error always toasts immediately."""
+        Rate-limited over a TIME WINDOW, not against the single last key.
+        Remembering one (type, message) was defeated by any two alternating
+        errors — A→B→A→B passes an equality check every single time, so the
+        most reachable repeating failure (a mode that raises one error and a
+        recorder or overlay that raises another) sprayed toasts and stdout
+        twice per frame indefinitely, which is the exact burial the limit
+        exists to prevent. Now every key seen inside the window is remembered:
+        an identical error still re-toasts at most once per ERR_TOAST_S, a
+        DIFFERENT error still toasts immediately, and past ERR_TOAST_MAX
+        distinct errors in one window the stack stops growing and says where
+        the rest went. Errors that vary their text every frame (a coordinate,
+        a timestamp) are floods too — the cap catches those as well.
+
+        `internal=True` marks an error raised by our OWN present half. When
+        the produce half already failed this frame, that error is a symptom of
+        the failure being reported and must never REPLACE it: the operator was
+        reading `UnboundLocalError: frame` — our bug — instead of the camera
+        error that caused it, forever, with no way to reach the real one."""
         key = (type(e).__name__, str(e)[:80])
         now = time.monotonic()
-        if key == self._err_key and now - self._err_at < ERR_TOAST_S:
+        # drop keys that aged out, so the window slides instead of latching
+        self._err_seen = {k: t for k, t in self._err_seen.items()
+                          if now - t < ERR_TOAST_S}
+        seen = key in self._err_seen
+        # record even when suppressed below: an error that keeps arriving must
+        # not re-print every frame either
+        self._err_seen[key] = now
+        if seen:
             return
+        if internal and not self._frame_ok:
+            print("frame error (while reporting one):", type(e).__name__, e)
+            return
+        if len(self._err_seen) > ERR_TOAST_MAX:
+            if not self._err_flood:
+                self._err_flood = True
+                self.hud.toasts.hint("more errors - see the terminal", AMBER)
+            print("frame error:", type(e).__name__, e)
+            return
+        self._err_flood = False
         self._err_key, self._err_at = key, now
         self.hud.toasts.flash("something went wrong - show continues", AMBER)
         self.hud.toasts.hint(f"{type(e).__name__}: {str(e)[:70]}", AMBER)
         print("frame error:", type(e).__name__, e)
+
+    def _frame_failed(self, streak, err=None):
+        """The produce half of one frame failed (raised, or never produced a
+        frame at all). Throttle the loop, and headless give up eventually.
+
+        Containment (073df99) turned a fatal produce error into a caught one —
+        which is right — but a caught error that repeats every frame with
+        nothing to wait on is a busy loop. Shown, that pegged a core at 983
+        iterations/sec behind a frozen picture. Headless with no frame budget
+        it was worse: no window, no key pump, no output, and only Ctrl-C to
+        end it — a state the pre-containment code could not reach, so the fix
+        created it.
+
+        Returns the exception to end the run with (raised after the normal
+        teardown), or None to keep going."""
+        if not self.show and self.max_frames is None \
+                and streak >= FRAME_FAIL_LIMIT:
+            why = (f"{type(err).__name__}: {err}" if err is not None
+                   else "no frame ever arrived")
+            return RuntimeError(
+                f"frame loop failed {streak} times in a row with no window to "
+                f"show it and no frame limit to end it ({why})")
+        time.sleep(FRAME_FAIL_SLEEP_S)
+        return None
 
     def _draw_panel_chevron(self, img):
         """The one always-clickable affordance in HUD state (DESIGN.md §6.3:
@@ -1003,6 +1124,11 @@ class Host:
         one deliberate recorded UI frame, DESIGN.md §3). The BGR conversion
         happens only here, so a hidden window pays nothing.
 
+        `frame` is the CAMERA frame behind the menu, and it is None until one
+        has ever arrived — including when the very first read RAISED. The menu
+        renders without a backdrop in that case; nothing here may assume a
+        frame exists.
+
         The overlay draw is contained: chrome that fails is still only chrome,
         and the picture underneath is the show (DESIGN.md §6.4)."""
         ui, mode = self.ui, self.mode
@@ -1036,7 +1162,7 @@ class Host:
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:                       # noqa: BLE001 — §6.4
-            self._frame_error(e)
+            self._frame_error(e, internal=True)
         return bgr
 
     # ----- the loop -----
@@ -1096,7 +1222,10 @@ class Host:
         ui.video_mix = getattr(mode, "boot_video_mix", ui.video_mix)
         if preset in self.all_presets:
             # the look loaded at startup, same as a live switch (spec-derived)
-            apply_look(ui, ui.spec, self.all_presets[preset], mode.DEFAULTS)
+            # — and contained the same way: a stored look with an unusable
+            # value used to end the boot with a traceback and no window, which
+            # is the one failure a performer cannot work around (§6.4)
+            self._apply_look(preset, self.all_presets[preset])
         mode.configure_ui(ui)
         ui.user_presets = _presets.user_names(self.presets_path, mode=mode.id)
         self._seed_bank_setlist()

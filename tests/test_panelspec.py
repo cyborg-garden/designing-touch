@@ -10,7 +10,8 @@ import numpy as np
 
 from dtouch.imgui import Gui
 from dtouch.overlay_ui import OverlayUI, build_particles_spec, _RANGES, _SLIDERS
-from dtouch.panelspec import (Slider, Toggle, Cycle, Action, PresetList, Section)
+from dtouch.panelspec import (Slider, Toggle, Cycle, Action, PresetList,
+                              Section, apply_look)
 from dtouch.particles import PALETTES
 from dtouch.live import MATTES
 
@@ -141,6 +142,40 @@ def test_particles_spec_flags_match_todays_capture():
         assert widgets[attr].save is True and widgets[attr].apply == "reset"
         lo, hi = _RANGES[attr]
         assert (widgets[attr].lo, widgets[attr].hi) == (lo, hi)
+
+
+# ---------- unusable VALUES are skipped, never raised ----------
+# The store validates a preset file's shape, never its values, and they land
+# in float() here — at boot, before any window exists. A well-shaped look
+# carrying "contrast": "high" used to end the launch with a traceback.
+
+
+def test_apply_look_skips_unusable_numbers_and_names_them():
+    ui = _ui()
+    ui.fade = 0.5
+    spec = [Slider("Fade", "fade", 0.0, 1.0), Slider("Spark", "spark", 0.0, 1.0)]
+    skipped = apply_look(ui, spec, {"fade": "high", "spark": 0.25})
+    assert skipped == ["fade"]
+    assert ui.fade == 0.5                    # untouched, not half-written
+    assert ui.spark == 0.25                  # the rest of the look still loads
+
+
+def test_apply_look_rejects_nan_and_infinity():
+    """They do not raise — they propagate silently through the render and
+    fail somewhere with no connection to the look that introduced them."""
+    ui = _ui()
+    ui.fade = 0.5
+    spec = [Slider("Fade", "fade", 0.0, 1.0)]
+    for bad in (float("nan"), float("inf"), None, [1.0]):
+        assert apply_look(ui, spec, {"fade": bad}) == ["fade"]
+        assert ui.fade == 0.5
+
+
+def test_apply_look_returns_empty_for_a_clean_look():
+    ui = _ui()
+    spec = [Slider("Fade", "fade", 0.0, 1.0)]
+    assert apply_look(ui, spec, {"fade": 0.75}) == []
+    assert ui.fade == 0.75
 
 
 def test_particles_spec_reproduces_shipped_structure():

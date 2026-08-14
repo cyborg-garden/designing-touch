@@ -16,6 +16,7 @@ advance in one rounding (`S(28 + gap)`) — matching the shipped literals.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
@@ -177,8 +178,20 @@ def apply_look(state, spec, cfg, defaults=None):
 
     Cycles map a stored VALUE back to its index; unknown values are ignored.
     Engines pick the new state up on the next step() sync.
+
+    Values are coerced DEFENSIVELY and unusable ones are skipped, not raised:
+    the store validates a preset file's shape, never its values, so a
+    hand-edited (or half-merged) `presets.json` carrying `"contrast": "high"`
+    is well-shaped and used to raise ValueError straight out of `float()` —
+    at boot, before any window existed. A look that is 90% loadable loads,
+    and the caller is told which keys went (returned) so it can say so. NaN
+    and infinity are unusable too: they propagate silently through the render
+    instead of failing where they were introduced.
+
+    Returns the list of skipped store keys (empty when the look applied whole).
     """
     defaults = defaults or {}
+    skipped = []
     for section, w in walk_spec(spec):
         if not isinstance(w, _VALUE_WIDGETS) or not w.save:
             continue
@@ -199,4 +212,13 @@ def apply_look(state, spec, cfg, defaults=None):
         elif isinstance(w, Toggle):
             setattr(state, w.attr, bool(val))
         else:
-            setattr(state, w.attr, float(val))
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                skipped.append(key)
+                continue
+            if not math.isfinite(num):
+                skipped.append(key)
+                continue
+            setattr(state, w.attr, num)
+    return skipped
