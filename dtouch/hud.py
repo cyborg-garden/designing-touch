@@ -36,9 +36,15 @@ _CAP_PX = 22.0                 # Hershey simplex cap height at fontScale 1.0
 
 TITLE_SAFE = 0.035             # 3.5% title-safe inset (DESIGN.md §5)
 
-# Camera-loss note — the existing human message, kept verbatim (DESIGN.md §6.4).
+# Camera notes (DESIGN.md §6.4). Two different faults, two different fixes:
+# frames ARRIVING but black is the Continuity Camera symptom the original
+# message names, and its wording is kept verbatim. Frames not arriving at all
+# is an unplugged camera or one another app has taken — telling that operator
+# to turn Continuity Camera off sends them somewhere there is nothing to find.
 CAMERA_NOTE = "CAMERA IS BLACK - disable iPhone Continuity Camera"
 CAMERA_FIX = "iPhone: Settings > General > AirPlay & Handoff > Continuity Camera > Off"
+CAMERA_LOST_NOTE = "CAMERA STOPPED SENDING FRAMES - holding the last one"
+CAMERA_LOST_FIX = "check it is still connected, and not in use by another app"
 
 CENTER_TOAST_S = 1.2           # mode/center flash fade (DESIGN.md §5 type table)
 HINT_TOAST_S = 1.5
@@ -341,7 +347,7 @@ class Hud:
         self.debug = False     # 'i' — status line variant: fps / frame-time / res
 
     def draw(self, img, state, status="", debug_status="", recording=False,
-             blackout=False, camera_lost=False):
+             blackout=False, camera_lost=False, camera_black=False):
         h, w = img.shape[:2]
         uu = u(h)
         if blackout:
@@ -363,14 +369,23 @@ class Hud:
             tw = text_size(line, px)[0] if line else 0
             cv2.circle(img, (ix + tw + int(0.9 * uu), iy + px // 2 + 2),
                        max(2, int(0.3 * uu)), RED, -1, cv2.LINE_AA)
-        if camera_lost:
+        if camera_lost or camera_black:
             # persistent note sits top-left UNDER the status line, title-safe
             # (DESIGN.md §5: frame center is reserved for transient toasts;
             # only the pre-show 'waiting for camera' message may sit centered)
+            #
+            # A failed READ takes precedence over a black streak: when nothing
+            # is arriving, the held frame's own darkness is a consequence, not
+            # the fault. Every failed read used to print the Continuity
+            # Camera note, so an unplugged camera — or one Zoom had taken —
+            # sent the operator into iPhone settings after a phone that was
+            # never involved.
+            note, fix = ((CAMERA_LOST_NOTE, CAMERA_LOST_FIX) if camera_lost
+                         else (CAMERA_NOTE, CAMERA_FIX))
             npx = int(1.0 * uu)
             ny = iy + px + int(1.6 * npx)
-            put_outlined(img, CAMERA_NOTE, (ix, ny), npx, AMBER)
-            put_outlined(img, CAMERA_FIX, (ix, ny + int(1.4 * npx)),
+            put_outlined(img, note, (ix, ny), npx, AMBER)
+            put_outlined(img, fix, (ix, ny + int(1.4 * npx)),
                          int(0.75 * uu), AMBER)
         self.toasts.draw(img)
         self.osd.draw(img)

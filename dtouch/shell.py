@@ -1168,7 +1168,8 @@ class Host:
         ui._hot.append((r, PANEL_OPEN, None))
 
     # ----- the present half of a frame -----
-    def _compose_frame(self, out, frame, camera_lost=False):
+    def _compose_frame(self, out, frame, camera_lost=False,
+                       camera_black=False):
         """The window image for one frame: the mode's RGB output converted to
         BGR, then menu / panel / HUD / help on top.
 
@@ -1208,7 +1209,8 @@ class Host:
                               debug_status=self.debug_line(),
                               recording=(self.writer is not None),
                               blackout=self.ps.blackout,
-                              camera_lost=camera_lost)
+                              camera_lost=camera_lost,
+                              camera_black=camera_black)
             if self.ps.help_open:
                 # help carries the active mode's accent (§5 one-accent)
                 draw_help(bgr, self.help_rows, accent=mode.accent)
@@ -1540,8 +1542,8 @@ class Host:
                                           blackout=self.ps.blackout)
                         else:
                             bgr = self._compose_frame(
-                                out, frame,
-                                camera_lost=(camera_lost or black_streak > 15))
+                                out, frame, camera_lost=camera_lost,
+                                camera_black=(black_streak > 15))
                     except (KeyboardInterrupt, SystemExit):
                         raise
                     except Exception as e:           # noqa: BLE001 — §6.4

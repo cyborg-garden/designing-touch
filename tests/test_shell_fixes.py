@@ -84,6 +84,18 @@ def _hints(host):
     return [t.text for t in host.hud.toasts._hints]
 
 
+def _hud_strings(hud, monkeypatch, **kw):
+    """Every string one HUD draw actually puts on the frame."""
+    from dtouch import hud as hud_mod
+    seen = []
+    real = hud_mod.put_outlined
+    monkeypatch.setattr(hud_mod, "put_outlined",
+                        lambda img, text, *a, **k:
+                        seen.append(text) or real(img, text, *a, **k))
+    hud.draw(np.zeros((360, 640, 3), np.uint8), OverlayState.HUD, **kw)
+    return seen
+
+
 def _patch_gui(monkeypatch, keys=(), shown=None):
     """Run show=True paths headless: no-op the cv2 window calls; waitKey pops
     from `keys` (then 255); imshow appends to `shown` when given."""
@@ -1512,24 +1524,58 @@ def test_camera_loss_reaches_the_hud(tmp_path, monkeypatch):
     assert all(seen[2:]), "camera loss never reached the HUD"
 
 
+class BlackSource(SyntheticSource):
+    """Frames keep arriving, and every one of them is black."""
+
+    def read(self):
+        self.reads += 1
+        return True, np.zeros((self.h, self.w, 3), np.uint8)
+
+
 def test_a_long_black_streak_reaches_the_hud(tmp_path, monkeypatch):
     """The other half of the same note: frames arrive, but they are black
     (the iPhone Continuity Camera case the message names)."""
     _patch_gui(monkeypatch)
-
-    class BlackSource(SyntheticSource):
-        def read(self):
-            self.reads += 1
-            return True, np.zeros((self.h, self.w, 3), np.uint8)
-
     host = _host(tmp_path, src=BlackSource(), show=True, max_frames=20)
     seen = []
     real = host.hud.draw
     host.hud.draw = (lambda img, state, **kw:
-                     seen.append(kw.get("camera_lost")) or real(img, state, **kw))
+                     seen.append(kw.get("camera_black")) or real(img, state, **kw))
     host.run()
     assert seen[:15] == [False] * 15                # the streak has to build
     assert seen[-1] is True
+
+
+def test_a_read_failure_is_not_told_to_turn_off_continuity_camera(
+        tmp_path, monkeypatch):
+    """ANY failed read printed `CAMERA IS BLACK - disable iPhone Continuity
+    Camera`, so an unplugged camera — or one Zoom had already taken — sent the
+    operator into iPhone settings after a phone that was never involved. The
+    two faults have two different fixes and now say so."""
+    _patch_gui(monkeypatch)
+    host = _host(tmp_path, src=SyntheticSource(fail_after=2), show=True,
+                 max_frames=6)
+    seen = []
+    real = host.hud.draw
+    host.hud.draw = (lambda img, state, **kw:
+                     seen.append((kw.get("camera_lost"), kw.get("camera_black")))
+                     or real(img, state, **kw))
+    host.run()
+    assert seen[-1][0] is True, "the read failure never reached the HUD"
+    assert not seen[-1][1], "a failed read is not the black-frame symptom"
+
+    drawn = " | ".join(_hud_strings(host.hud, monkeypatch, camera_lost=True))
+    assert "Continuity" not in drawn
+    assert "STOPPED SENDING FRAMES" in drawn
+
+
+def test_the_black_frame_streak_keeps_the_continuity_camera_wording(
+        tmp_path, monkeypatch):
+    """The wording is right for the fault it names — frames ARRIVING but black
+    — and DESIGN.md §6.4 keeps it verbatim for that case."""
+    host = _host(tmp_path, max_frames=1)
+    drawn = " | ".join(_hud_strings(host.hud, monkeypatch, camera_black=True))
+    assert "CAMERA IS BLACK - disable iPhone Continuity Camera" in drawn
 
 
 def test_an_unbanked_look_takes_slot_one_first(tmp_path):
