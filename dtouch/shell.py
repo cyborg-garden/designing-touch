@@ -35,7 +35,7 @@ from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
                          build_signal_section, build_global_rows)
-from .panelspec import Cycle, Slider, apply_look, capture_look
+from .panelspec import Cycle, Section, Slider, apply_look, capture_look
 from . import presets as _presets
 
 
@@ -418,15 +418,30 @@ class Host:
 
         Suppression rule (DESIGN.md §2.4, judge finding): the rack hides any
         control the active mode claims — a mode declares `claims` (a set of
-        store keys, e.g. Dither Girl claims "dither" because it owns dithering
-        as the primary image; two visible dither subsystems in one panel is
-        the bolted-features incoherence the overhaul exists to kill)."""
+        store keys, e.g. Dither Girl claims all the dither quality controls
+        because it owns dithering as the primary image; two visible dither
+        subsystems in one panel is the bolted-features incoherence the
+        overhaul exists to kill).
+
+        Duplicate-control rule (DESIGN.md §4.2, same principle, generic): a
+        global row whose `attr` the mode's own sections already declare is
+        omitted — e.g. Dither Girl's SOURCE has its own Mirror row, so the
+        global Mirror would be a second face on the same state. Derived from
+        the spec itself (no per-mode claims needed): both faces would set the
+        same ui attr, so the attr IS the identity."""
+        spec = mode.panel_spec()
         rack = build_signal_section()
         claims = frozenset(getattr(mode, "claims", ()))
         if claims:
             rack.widgets = [w for w in rack.widgets
                             if getattr(w, "store_key", None) not in claims]
-        return mode.panel_spec() + [rack] + build_global_rows()
+        mode_attrs = {getattr(w, "attr", None)
+                      for s in spec if isinstance(s, Section)
+                      for w in s.widgets}
+        mode_attrs.discard(None)
+        rows = [r for r in build_global_rows()
+                if getattr(r, "attr", None) not in mode_attrs]
+        return spec + [rack] + rows
 
     # ----- mode switching (DESIGN.md §3 / §8 step 8) -----
     def request_mode(self, mode_id):

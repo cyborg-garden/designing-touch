@@ -27,7 +27,7 @@ from ..hud import AMBER, put_outlined, text_size, u as _u
 from ..imgui import DIM
 from ..matte import make_matte
 from ..overlay_ui import RES_OPTIONS
-from ..panelspec import Cycle, Readout, Section, Slider, Toggle
+from ..panelspec import Cycle, PresetList, Readout, Section, Slider, Toggle
 from .particles import MATTE_H, MATTE_W, MATTES
 
 # Accent (DESIGN.md §5): magenta-leaning, picked by measured WCAG contrast —
@@ -185,9 +185,13 @@ class DitherGirlMode:
 
     # ----- panel (DESIGN.md §4.2) -----
     def panel_spec(self):
-        """SOURCE / ALGORITHM / TONE / PALETTE; the shell appends the SIGNAL
-        rack (minus our claimed dither row) + global rows."""
+        """TEMPLATES / SOURCE / ALGORITHM / TONE / PALETTE; the shell appends
+        the SIGNAL rack (minus our claimed rows) + global rows (minus our own
+        Mirror). TEMPLATES is the generic PresetList (DESIGN.md §7): built-ins
+        as rows, user looks per mode, recall/save/rename/delete/slot badges
+        all shell-owned."""
         return [
+            Section("TEMPLATES", [PresetList()]),
             Section("SOURCE", [
                 Cycle("input", "input_idx", ["camera", "still..."], save=False),
                 Cycle("matte", "dg_matte_idx", list(MATTES_DG), save_key="matte"),

@@ -123,9 +123,12 @@ def test_status_line_is_spec_derived_and_ascii(tmp_path):
 # ---------- panel spec structure (DESIGN.md §4.2) ----------
 
 def test_panel_sections_and_widgets():
+    from dtouch.panelspec import PresetList
     spec = DitherGirlMode().panel_spec()
     titles = [s.title for s in spec]
-    assert titles == ["SOURCE", "ALGORITHM", "TONE", "PALETTE"]
+    assert titles == ["TEMPLATES", "SOURCE", "ALGORITHM", "TONE", "PALETTE"]
+    # TEMPLATES at the top, like Particles (DESIGN.md §7 — user looks reachable)
+    assert isinstance(spec[0].widgets[0], PresetList)
     by = {s.title: s.widgets for s in spec}
     # SOURCE: input cycle, matte cycle, matte-bg toggle, output res, Mirror
     src = by["SOURCE"]
@@ -189,6 +192,31 @@ def test_rack_keeps_dither_and_quality_rows_for_particles():
     keys = [getattr(w, "store_key", None) for w in rack.widgets]
     for k in ("dither", "bits", "gamma", "bias"):
         assert k in keys
+
+
+# ---------- duplicate-control rule (DESIGN.md §4.2: one Mirror) ----------
+
+def test_global_mirror_omitted_when_the_mode_declares_its_own(tmp_path):
+    """Dither Girl's SOURCE declares Mirror — the composed spec must carry
+    exactly one mirror control (the mode's), never two faces on one attr."""
+    host = _booted(tmp_path)
+    mirrors = [w for w in host.ui.iter_widgets()
+               if getattr(w, "attr", None) == "mirror"]
+    assert len(mirrors) == 1
+    in_source = next(s for s in host.ui.spec
+                     if isinstance(s, Section) and s.title == "SOURCE")
+    assert mirrors[0] in in_source.widgets
+
+
+def test_global_mirror_kept_for_particles():
+    spec = Host(ParticlesMode()).compose_spec(ParticlesMode())
+    tail = [w for item in spec if not isinstance(item, Section)
+            for w in [item]]
+    assert any(getattr(w, "attr", None) == "mirror" for w in tail)
+    # and the Menu/Quit Actions survive the dedup untouched
+    from dtouch.panelspec import Action
+    cmds = [w.command for w in tail if isinstance(w, Action)]
+    assert cmds == ["menu.open", "quit"]
 
 
 # ---------- palette mapping (DESIGN.md §4.2) ----------
@@ -404,6 +432,35 @@ def test_preset_round_trip_restores_state(tmp_path):
     assert (ui.dg_bits, ui.dg_contrast) == (4.0, 2.0)
     assert list(PALETTES)[ui.dg_palette_idx] == "amber"
     assert ui.glitch is True and ui.drift == 33.0        # signal nesting applied
+
+
+def test_user_look_save_recall_bank_round_trip_via_the_panel_path(tmp_path):
+    """DESIGN.md §7 through the TEMPLATES panel path: '+ Save current look'
+    click -> auto-name + rename box; recall via a preset-row click; slot
+    badge click banks it; everything persists per mode."""
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.dg_algo_idx = ALGOS.index("Riemersma")
+    ui.dg_bits = 4.0
+    ui._activate("save", None, 0)                        # panel Save row click
+    assert ui.pending_save is True
+    host._pump_preset_mailboxes()
+    name = next(iter(ui.user_presets))
+    assert ui.renaming == name                           # naming is one flow
+    ui.renaming = None
+    ui._activate("slot", name, 0)                        # slot badge click
+    host._pump_preset_mailboxes()
+    slot = next(s for s, n in ui.bank.items() if n == name)
+    assert _presets.bank(host.presets_path, mode="dithergirl")[slot] == name
+    # scramble, then recall through the panel's preset-row click path
+    ui.dg_algo_idx, ui.dg_bits = 0, 1.0
+    ui._activate("preset", ui.presets.index(name), 0)
+    host._pump_preset_mailboxes()
+    assert ALGOS[ui.dg_algo_idx] == "Riemersma" and ui.dg_bits == 4.0
+    # the look survives a fresh boot (per-mode persistence)
+    host2 = _booted(tmp_path)
+    assert name in host2.ui.presets
+    assert host2.ui.bank[slot] == name
 
 
 def test_builtins_seed_bank_slots(tmp_path):
