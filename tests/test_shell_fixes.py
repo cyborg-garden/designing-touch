@@ -6,6 +6,7 @@ tests monkeypatch cv2's window calls so `show=True` code paths run headless.
 """
 import json
 import os
+import time
 
 import numpy as np
 import pytest
@@ -739,6 +740,132 @@ def test_keys_still_work_while_every_single_frame_fails(tmp_path, monkeypatch):
     host = _host(tmp_path, mode=BoomMode(fail_from=1), show=True)
     host.run()
     assert host.ps.quit is True
+
+
+# ---------- a contained failure must idle, not spin ----------
+# Containment turned a fatal produce error into a caught one, which is right —
+# but a caught error that repeats every frame with nothing to wait on is a busy
+# loop. Shown, that pegged a core at 983 iterations/sec behind a frozen
+# picture. Headless with no frame budget it was worse: no window, no key pump,
+# no output, and only Ctrl-C to end it — a state the pre-containment code
+# could not reach, so containment created it.
+
+
+def test_a_headless_permanent_failure_ends_with_the_real_cause(tmp_path,
+                                                               monkeypatch):
+    """Nothing to look at and nothing to press: an infinite silent busy loop
+    is worse than the traceback containment replaced. It ends, and it says
+    what was actually wrong."""
+    monkeypatch.setattr(shell_mod, "FRAME_FAIL_SLEEP_S", 0.0)
+    src = SyntheticSource()
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), src=src)
+    assert host.max_frames is None and host.show is False
+
+    with pytest.raises(RuntimeError) as caught:
+        host.run()
+    assert "mediapipe" in str(caught.value)       # the cause, not just 'failed'
+    assert src.released                           # teardown still ran
+
+
+def test_a_headless_camera_that_never_arrives_ends_the_run(tmp_path,
+                                                           monkeypatch):
+    """The same shape from the other direction: reads that return (False,
+    None) forever, with no window to draw the waiting card on."""
+    monkeypatch.setattr(shell_mod, "FRAME_FAIL_SLEEP_S", 0.0)
+    host = _host(tmp_path, src=SyntheticSource(fail_after=0))
+    with pytest.raises(RuntimeError) as caught:
+        host.run()
+    assert "no frame ever arrived" in str(caught.value)
+
+
+def test_a_shown_permanent_failure_runs_at_a_sane_rate(tmp_path, monkeypatch):
+    """Shown, the loop must NOT end — a window that explains itself and
+    answers `q` is the whole point. It must not burn a core to do it: measured
+    983 iterations/sec, against ~30/s for a healthy loop."""
+    _patch_gui(monkeypatch, keys=[255] * 30 + [ord("q"), ord("q")])
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), show=True)
+
+    t0 = time.perf_counter()
+    count, _ = host.run()
+    rate = count / max(time.perf_counter() - t0, 1e-6)
+
+    assert host.ps.quit is True                   # it kept answering keys
+    assert count >= 30
+    assert rate < 200, f"the failing loop spun at {rate:.0f} frames/sec"
+
+
+def test_fps_reports_rendered_frames_not_loop_spins(tmp_path):
+    """`count` incremented on frames that were never rendered, so the HUD and
+    the `i` readout showed 953.5 fps while the picture was frozen."""
+    healthy = _host(tmp_path, max_frames=12)
+    healthy.run()
+    assert healthy.fps > 0.0                      # a working loop still reports
+
+    broken = _host(tmp_path, mode=BoomMode(fail_from=2), max_frames=40)
+    broken.run()
+    assert broken.fps < 1.0, "fps reported the spin rate, not the picture"
+
+
+def test_a_first_read_that_raises_shows_the_real_cause(tmp_path, monkeypatch):
+    """A first `source.read()` that RAISES (rather than returning False) left
+    `frame` unbound inside the contained produce half, so the present half
+    raised too — caught, and then standing in the operator's error line in
+    place of the camera error, forever, over a black rectangle instead of the
+    §6.4 waiting card."""
+    shown = []
+    _patch_gui(monkeypatch, keys=[255] * 3 + [ord("q"), ord("q")], shown=shown)
+    src = SyntheticSource()
+
+    def boom(n):
+        raise OSError(5, "Input/output error")
+
+    src.on_read = boom
+    host = _host(tmp_path, src=src, show=True)
+    cards = []
+    real = host._draw_waiting_note
+    host._draw_waiting_note = lambda img: cards.append(1) or real(img)
+    host.run()
+
+    assert host._err_key[0] == "OSError"          # the real cause, and only it
+    assert any("OSError" in t for t in _hints(host))
+    # the present half never raised at all — not raised-and-swallowed
+    assert not any(k[0] == "UnboundLocalError" for k in host._err_seen)
+    assert cards, "the §6.4 waiting card never drew - black fallback instead"
+    assert shown and shown[-1].any()
+
+
+def test_a_stall_never_hands_a_mode_an_unbounded_dt(tmp_path, monkeypatch):
+    """`last_t` only advanced after the mailboxes, so anything failing earlier
+    kept accumulating: a measured 7-frame stall handed mode.step a single
+    0.409 s dt, and a long one would hand a mode a multi-second integration
+    step — particles teleport, fades blow out, and the recovery frame looks
+    worse than the stall did."""
+    monkeypatch.setattr(shell_mod, "FRAME_FAIL_SLEEP_S", 0.0)
+    dts = []
+
+    class Watch(DitherGirlMode):
+        def step(self, frame_bgr, audio_levels, dt):
+            dts.append(dt)
+            return super().step(frame_bgr, audio_levels, dt)
+
+    src = SyntheticSource()
+
+    def stall(n):
+        # the failure lands BEFORE the clock line, which is the whole bug:
+        # a camera that raises mid-read, three frames of it
+        if 2 <= n <= 4:
+            time.sleep(0.15)
+            raise OSError(5, "Input/output error")
+
+    src.on_read = stall
+    host = _host(tmp_path, mode=Watch(), src=src, max_frames=6)
+    t0 = time.perf_counter()
+    host.run()
+    stalled_for = time.perf_counter() - t0
+
+    assert len(dts) == 3                          # frames 1, 5, 6 got through
+    assert stalled_for > shell_mod.DT_MAX         # a real stall really happened
+    assert max(dts) <= shell_mod.DT_MAX, f"a mode was handed {max(dts):.3f}s"
 
 
 def test_keyboard_interrupt_still_propagates(tmp_path):

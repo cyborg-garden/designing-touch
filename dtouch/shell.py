@@ -1253,12 +1253,21 @@ class Host:
         # read-only launch dir used to end the boot with a traceback (§6.4).
 
         t0 = time.time(); fps = 0.0; count = 0
+        presented = 0        # frames actually RENDERED since the last fps tick
         black_streak = 0
         last_frame = None    # last good camera frame, held across read failures
         camera_lost = False
         last_t = time.monotonic()
         out = None
         last_out = None      # last good PICTURE, held when a frame fails
+        # bound BEFORE the loop: the present half passes `frame` to the menu
+        # backdrop, and a first read that RAISES never binds it inside the
+        # contained produce half. That made the present half raise
+        # UnboundLocalError, which was caught — and then stood in the operator's
+        # error line in place of the real cause, forever.
+        frame = None
+        fail_streak = 0      # consecutive frames the produce half did not make
+        fatal = None         # ends the run AFTER teardown (headless only)
         try:
             while True:
                 # DESIGN.md §6.4 / §8 step 10 (any traceback = release
@@ -1320,6 +1329,17 @@ class Host:
                                     break
                             if self.max_frames is not None:
                                 break
+                            # waiting is not spinning: throttle, and headless
+                            # (no card, no key pump, no output at all) give up
+                            # eventually instead of turning a missing camera
+                            # into a silent busy loop
+                            fail_streak += 1
+                            last_t = time.monotonic()   # not a stall to integrate
+                            presented, t0, fps = 0, time.time(), 0.0
+                            self.fps = 0.0              # nothing is rendering
+                            fatal = self._frame_failed(fail_streak)
+                            if fatal is not None:
+                                break
                             continue
                     else:
                         last_frame, camera_lost = frame, False
@@ -1339,7 +1359,15 @@ class Host:
                         frame = cv2.flip(frame, 1)
 
                     now_t = time.monotonic()
-                    dt, last_t = now_t - last_t, now_t
+                    # Clamped (DESIGN.md §2.2). `last_t` only advanced here, so
+                    # anything that failed EARLIER in the produce half kept
+                    # accumulating: a measured 7-frame stall handed mode.step a
+                    # single 0.409 s dt, and a long one would hand a mode a
+                    # multi-second integration step — particles teleport, fades
+                    # blow out, and the recovery frame looks worse than the
+                    # stall. The failure paths reset the clock too, so this cap
+                    # is the backstop, not the mechanism.
+                    dt, last_t = min(now_t - last_t, DT_MAX), now_t
                     levels = (self.mic.levels()
                               if self.mic is not None and self.mic.available
                               else None)
@@ -1399,27 +1427,62 @@ class Host:
                     # Hold the last good PICTURE. A broken frame freezes the
                     # image and says so; it never blanks the projector and it
                     # never drops the operator back to a shell prompt.
+                    self._frame_ok = False
                     self._frame_error(e)
                     out = last_out
                     if out is None:
                         out = np.zeros((self.res[1], self.res[0], 3), np.uint8)
+                    # containment without a throttle is a busy loop: a produce
+                    # half that fails every frame has nothing to wait on, and
+                    # this used to spin at 983 iterations/sec behind a frozen
+                    # picture (headless, forever and silently)
+                    last_t = time.monotonic()        # the stall is not the mode's
+                    fail_streak += 1
+                    fatal = self._frame_failed(fail_streak, e)
+                    if fatal is not None:
+                        break
                 else:
                     last_out = out
+                    self._frame_ok = True
+                    fail_streak = 0
 
                 count += 1
-                if count % 10 == 0:
-                    now = time.time(); fps = 10.0 / (now - t0); t0 = now
+                # fps counts PRESENTED frames (DESIGN.md §6.2). Counting loop
+                # iterations meant a failing loop reported its own spin rate:
+                # the HUD and the `i` readout showed 953.5 fps while the
+                # picture was frozen and nothing was being rendered at all.
+                # The window is time-based as well as frame-based so a stall
+                # decays toward 0 instead of holding the last good number.
+                if self._frame_ok:
+                    presented += 1
+                now = time.time()
+                if presented >= 10 or now - t0 >= 1.0:
+                    fps = presented / max(now - t0, 1e-6)
+                    presented, t0 = 0, now
                 self.fps = fps
 
                 if self.show:
                     try:
-                        bgr = self._compose_frame(
-                            out, frame,
-                            camera_lost=(camera_lost or black_streak > 15))
+                        if frame is None:
+                            # nothing has EVER arrived — including a first
+                            # read that RAISED. The §6.4 waiting card is the
+                            # answer, not a black rectangle explaining nothing.
+                            bgr = np.zeros((self.res[1], self.res[0], 3),
+                                           np.uint8)
+                            self._draw_waiting_note(bgr)
+                            self.hud.draw(bgr, self.overlay,
+                                          blackout=self.ps.blackout)
+                        else:
+                            bgr = self._compose_frame(
+                                out, frame,
+                                camera_lost=(camera_lost or black_streak > 15))
                     except (KeyboardInterrupt, SystemExit):
                         raise
                     except Exception as e:           # noqa: BLE001 — §6.4
-                        self._frame_error(e)
+                        # internal: our own present half. It must never stand
+                        # in the error line in place of the produce failure it
+                        # was trying to draw.
+                        self._frame_error(e, internal=True)
                         bgr = np.zeros((self.res[1], self.res[0], 3), np.uint8)
                         self.hud.toasts.draw(bgr)    # keep the explanation visible
                     cv2.imshow(self.WIN, bgr)
@@ -1447,4 +1510,9 @@ class Host:
                 self.mode.stop()
             if self.show:
                 cv2.destroyAllWindows(); cv2.waitKey(1)
+        if fatal is not None:
+            # raised AFTER teardown, so the camera, mic and any take are
+            # released first — and only ever headless, where there is no
+            # window to carry the message and no `q` to end the run
+            raise fatal
         return count, out
