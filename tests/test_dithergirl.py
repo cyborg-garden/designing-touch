@@ -387,6 +387,50 @@ def test_slow_warning_only_for_error_diffusion_at_high_scale(tmp_path):
     assert m._draw_perf_note(frame, g, 10, 10, 200) > 10    # renders the note
 
 
+def test_the_slow_threshold_is_inclusive(tmp_path):
+    """A threshold named SLOW_SCALE means "this value IS slow" — `>` left the
+    boundary itself silently fast, which is where `newsprint` used to sit."""
+    from dtouch.modes.dithergirl import SLOW_SCALE
+
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("Floyd-Steinberg")
+    ui.dg_scale = SLOW_SCALE - 1.0
+    assert m.slow_warning() is False
+    ui.dg_scale = SLOW_SCALE
+    assert m.slow_warning() is True
+
+
+def test_no_shipped_look_balances_on_the_slow_threshold(tmp_path):
+    """`newsprint` shipped at exactly 180.0 against a `>` test, so the one
+    built-in the perf line was closest to could never trigger it and the
+    coincidence was invisible. Every error-diffusion built-in must now be
+    clearly on one side or the other — which side is a design choice per
+    look, but balancing on the line is not a choice, it is an accident."""
+    from dtouch.modes.dithergirl import ORDERED, SLOW_SCALE
+
+    for name, look in DitherGirlMode.BUILTIN.items():
+        if look["algorithm"] in ORDERED:
+            continue                     # ordered dithers are fine at full res
+        assert abs(look["scale"] - SLOW_SCALE) > SLOW_SCALE * 0.05, (
+            "%s sits within 5%% of the perf line - make it deliberate" % name)
+
+
+def test_which_side_of_the_line_each_shipped_look_is_on(tmp_path):
+    """The live-usable built-ins are below it; `riemersma still` is named for
+    stills and is deliberately above, so it SHOULD carry the amber note."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    warned = {}
+    for name, look in DitherGirlMode.BUILTIN.items():
+        ui.dg_algo_idx = ALGOS.index(look["algorithm"])
+        ui.dg_scale = look["scale"]
+        warned[name] = m.slow_warning()
+    assert warned["newsprint"] is False       # the boundary case, now decided
+    assert warned["classic"] is False
+    assert warned["riemersma still"] is True
+
+
 def test_perf_note_wraps_inside_the_panel_column_at_720p(tmp_path):
     """At 720p the one-line note overflowed the sidebar — it must word-wrap
     to the column width (§4.2: the note is part of the panel, not graffiti

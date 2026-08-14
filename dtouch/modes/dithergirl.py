@@ -54,7 +54,15 @@ PALETTES = {
 MATTES_DG = ["off"] + MATTES          # "off" = dither the whole frame
 
 SCALE_LO, SCALE_HI, SCALE_DEFAULT = 45.0, 720.0, 72.0
-SLOW_SCALE = 180.0                    # error-diffusion above this = amber note
+# Error diffusion AT OR ABOVE this working height gets the amber note. The
+# comparison is >= on purpose: a threshold named SLOW_SCALE should mean "this
+# value is slow", and `newsprint` shipped sitting exactly on 180.0 with a `>`
+# test, so the one built-in the threshold was closest to could never trigger
+# it. `newsprint` now sits at 160.0 — deliberately a step under the line
+# rather than balanced on it (a shipped built-in is part of the known-good
+# set; it must not boot into a perf warning, and it must not be one float
+# nudge away from one either).
+SLOW_SCALE = 180.0
 
 
 def _dither(gray, algo, bits, gamma, bias):
@@ -97,7 +105,7 @@ class DitherGirlMode:
                         bias="auto", contrast=1.0, scale=72.0,
                         palette="white-on-black", matte="off"),
         "newsprint": dict(algorithm="Floyd-Steinberg", bits=1.0, gamma=True,
-                          bias="light", contrast=1.15, scale=180.0,
+                          bias="light", contrast=1.15, scale=160.0,
                           palette="black-on-white", matte="off"),
         "phosphor": dict(algorithm="Bayer", bits=2.0, gamma=True,
                          bias="auto", contrast=1.1, scale=144.0,
@@ -179,9 +187,9 @@ class DitherGirlMode:
 
     def slow_warning(self):
         """True when the inline amber perf note should render (§4.2): an
-        error-diffusion algorithm with Scale dragged high."""
+        error-diffusion algorithm at or above the slow working height."""
         return (self._algo() not in ORDERED
-                and self._ui("dg_scale", SCALE_DEFAULT) > SLOW_SCALE)
+                and self._ui("dg_scale", SCALE_DEFAULT) >= SLOW_SCALE)
 
     # ----- panel (DESIGN.md §4.2) -----
     def panel_spec(self):
