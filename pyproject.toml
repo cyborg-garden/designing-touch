@@ -16,7 +16,12 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2.0",
-    "opencv-python>=4.10",
+    # <5 is a real pin, not caution: cv2 5 rasterises Hershey text differently,
+    # which moves every pixel of the drawn control panel (measured up to 5.2
+    # mean-abs-diff over the panel ROI) and fails tests/test_goldens.py on a
+    # fresh install. The panel is drawn entirely with cv2 primitives, so this
+    # is a UI-affecting dependency, not just a decoder.
+    "opencv-python>=4.10,<5",
     "moderngl>=5.12",
     "Pillow>=10.0",
     "imageio>=2.34",
