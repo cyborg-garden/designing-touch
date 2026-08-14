@@ -147,6 +147,60 @@ def test_corrupt_backup_not_duplicated_on_repeated_reads(tmp_path):
     presets.take_notes()
 
 
+def test_failed_backup_blocks_the_overwrite_and_says_so_loudly(tmp_path,
+                                                               monkeypatch):
+    """Backup copy fails (disk full) => the corrupt file is the user's ONLY
+    copy. Saving over it would be silent unrecoverable data loss, so the write
+    is refused with a note instead (DESIGN.md §9)."""
+    path = str(tmp_path / "presets.json")
+    garbage = '{"embers": {"fade": 0.93}'          # truncated but recoverable
+    with open(path, "w") as f:
+        f.write(garbage)
+
+    def no_space(src, dst):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(presets.shutil, "copy2", no_space)
+    presets.load(path)
+    notes = presets.take_notes()
+    assert any("NOT saving over it" in n for n in notes)
+    assert not list(tmp_path.glob("presets.corrupt.*.bak.json"))
+
+    presets.save("mine", CFG, path=path)           # no-op, never raises
+    with open(path) as f:
+        assert f.read() == garbage                 # the only copy survives
+    assert any("not saved" in n for n in presets.take_notes())
+
+    # …and once the disk frees up, the backup lands and the save goes through
+    monkeypatch.undo()
+    presets.save("mine", CFG, path=path)
+    assert len(list(tmp_path.glob("presets.corrupt.*.bak.json"))) == 1
+    assert presets.load(path)["mine"] == CFG
+    presets.take_notes()
+
+
+def test_partial_previous_backup_does_not_count_as_backed_up(tmp_path):
+    """A copy2 that died midway leaves a short file. Its bytes differ, but the
+    dedup must not need a full compare to notice — a size mismatch is enough,
+    and the retry lands under a fresh name instead of clobbering it."""
+    path = str(tmp_path / "presets.json")
+    garbage = "{broken but long enough to truncate"
+    with open(path, "w") as f:
+        f.write(garbage)
+    # a half-written backup, named for THIS second so the retry's default name
+    # collides with it — the retry must not clobber the only artifact there is
+    stamp = presets.time.strftime("%Y%m%d_%H%M%S")
+    partial = tmp_path / ("presets.corrupt.%s.bak.json" % stamp)
+    partial.write_text(garbage[:5])
+
+    presets.load(path)
+    baks = sorted(tmp_path.glob("presets.corrupt.*.bak.json"))
+    assert len(baks) == 2                          # a real backup was attempted
+    assert partial.read_text() == garbage[:5]      # the partial is not clobbered
+    assert any(b.read_text() == garbage for b in baks)
+    assert not presets._is_poisoned(path)
+    presets.take_notes()
+
+
 def test_write_is_atomic_old_content_survives_replace_failure(tmp_path,
                                                               monkeypatch):
     path = str(tmp_path / "p.json")

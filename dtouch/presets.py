@@ -82,6 +82,12 @@ BUILTIN: Dict[str, dict] = {
 # a bug — DESIGN.md §9: presets are the one user-data-loss surface).
 _notes: list = []
 
+# Paths whose content is unreadable AND could not be copied to a backup (disk
+# full, permissions). Writing over them would destroy the user's only copy with
+# no recovery path, so every write to a poisoned path is a no-op + note until a
+# backup finally succeeds (DESIGN.md §9).
+_no_overwrite: set = set()
+
 
 def take_notes() -> list:
     """Drain the queued store warnings (the shell toasts them if it can)."""
@@ -90,12 +96,38 @@ def take_notes() -> list:
     return out
 
 
+def _note(text: str):
+    print(text)
+    _notes.append(text)
+
+
+def _is_poisoned(path: str) -> bool:
+    return os.path.abspath(path) in _no_overwrite
+
+
+def _backup_name(base: str, ext: str) -> str:
+    """A backup path that does not exist yet — never clobber an earlier backup
+    (a same-second retry after a partial copy must not overwrite it)."""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    bak = f"{base}.corrupt.{stamp}.bak{ext}"
+    n = 2
+    while os.path.exists(bak):
+        bak = f"{base}.corrupt.{stamp}_{n}.bak{ext}"
+        n += 1
+    return bak
+
+
 def _corrupt_backup(path: str):
     """An unreadable file is copied to {base}.corrupt.<ts>.bak.json before the
     store proceeds empty — the next write would otherwise overwrite the user's
     looks with no recovery path. Backed up once per distinct corruption (a
-    re-read of the same bad bytes never stacks duplicates). Returns the
-    warning note, or None when this corruption is already backed up."""
+    re-read of the same bad bytes never stacks duplicates); a *partial* earlier
+    backup has a different size, so it never counts as one and a fresh attempt
+    is made under a new name. Returns the warning note, or None when this
+    corruption is already backed up.
+
+    A failed copy poisons the path: nothing may overwrite the original until a
+    later attempt succeeds."""
     try:
         with open(path, "rb") as f:
             bad = f.read()
@@ -105,16 +137,22 @@ def _corrupt_backup(path: str):
     ext = ext or ".json"
     for bak in glob.glob(f"{glob.escape(base)}.corrupt.*.bak{ext}"):
         try:
+            if os.path.getsize(bak) != len(bad):
+                continue            # partial/other backup — not this corruption
             with open(bak, "rb") as f:
                 if f.read() == bad:
+                    _no_overwrite.discard(os.path.abspath(path))
                     return None
         except OSError:
             pass
-    bak = f"{base}.corrupt.{time.strftime('%Y%m%d_%H%M%S')}.bak{ext}"
+    bak = _backup_name(base, ext)
     try:
         shutil.copy2(path, bak)
     except OSError:
-        return None
+        _no_overwrite.add(os.path.abspath(path))
+        return (f"{os.path.basename(path)} is unreadable AND could not be "
+                f"backed up - NOT saving over it")
+    _no_overwrite.discard(os.path.abspath(path))
     return (f"{os.path.basename(path)} unreadable - "
             f"backup saved to {os.path.basename(bak)}")
 
@@ -127,8 +165,7 @@ def _read(path: str) -> dict:
         except Exception:
             note = _corrupt_backup(path)
             if note:
-                print(note)
-                _notes.append(note)
+                _note(note)
     return {}
 
 
@@ -186,10 +223,19 @@ def load_file(path: str = "presets.json") -> dict:
     return raw
 
 
-def write_file(data: dict, path: str = "presets.json"):
+def write_file(data: dict, path: str = "presets.json") -> bool:
     """Persist v2. If the on-disk file is still v1, copy it to
-    presets.v1.bak.json first (once) — the mandatory migration backup."""
-    raw = _read(path)
+    presets.v1.bak.json first (once) — the mandatory migration backup.
+
+    Refuses (no-op + note, never an exception — the show must not die) while
+    the path is poisoned: unreadable with no backup, so a write would be an
+    unrecoverable overwrite. `_read` retries the backup on every call, so the
+    next save after the disk frees up goes through. Returns True when written."""
+    raw = _read(path)          # also retries a failed corrupt-backup
+    if _is_poisoned(path):
+        _note(f"{os.path.basename(path)} not saved - unreadable and could not "
+              f"be backed up")
+        return False
     if is_v1(raw):
         bak = backup_path(path)
         if not os.path.exists(bak):
