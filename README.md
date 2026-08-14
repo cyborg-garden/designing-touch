@@ -32,13 +32,18 @@ in System Settings → Privacy & Security.
 ## The live instrument
 
 One window, and it opens already playing — the mode you used last, its look moving, and a
-hint that fades after four seconds: `m menu - TAB panel - ? keys`. Those are the three doors.
+hint that fades after four seconds: `m menu - TAB panel - ? keys`. Those three doors go with
+the hint. A fourth one doesn't: there's a small chevron in the top-right corner, and clicking
+it opens the panel. It's there for as long as the HUD is, so the mouse is never a dead end.
 
 **`TAB` cycles what's drawn over the render:**
 
-- **hidden** — nothing but the picture. This is what you point OBS at.
-- **HUD** — a small status line top-left plus momentary toasts, so every key you press says
-  what it did. This is where you start.
+- **hidden** — the picture, and after a beat nothing else. A toast you just triggered still
+  finishes playing (so does the nudge readout, and an armed blackout keeps its amber corner
+  tick) — but those all expire, and once they have, hidden leaves the frame untouched
+  pixel-for-pixel. This is what you point OBS at.
+- **HUD** — a small status line top-left, momentary toasts so every key you press says what it
+  did, and the panel chevron top-right. This is where you start.
 - **panel** — the full control sidebar on the right. Everything below lives here.
 
 `Esc` always steps back toward hidden, and never quits.
@@ -165,8 +170,12 @@ particle render).
 ## Tests
 
 ```bash
+pip install -e ".[person,dev]"   # pytest lives in the dev extra
 pytest tests/ -q
 ```
+
+The Quick start above installs `.[person]`, which does **not** include pytest — add `dev` (or
+install it on its own) before running the suite.
 
 Verified on Apple Silicon (Metal-backed GL 4.1). The render tests need a GPU/GL context.
 
