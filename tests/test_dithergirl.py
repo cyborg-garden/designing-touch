@@ -171,20 +171,24 @@ def test_gamma_default_on(tmp_path):
 
 # ---------- SIGNAL rack suppression (DESIGN.md §2.4) ----------
 
-def test_rack_hides_the_dither_row_for_dithergirl(tmp_path):
+def test_rack_hides_all_dither_quality_controls_for_dithergirl(tmp_path):
+    """DESIGN.md §2.4: Dither Girl owns ALL dither quality controls — the
+    rack loses its dither row AND Bits/Gamma/Bias, keeping the rest."""
     host = _booted(tmp_path)
     rack = next(s for s in host.ui.spec
                 if isinstance(s, Section) and s.title == "SIGNAL")
     keys = [getattr(w, "store_key", None) for w in rack.widgets]
-    assert "dither" not in keys
-    assert "chroma" in keys and "glitch" in keys        # rack minus dither only
+    for claimed in ("dither", "bits", "gamma", "bias"):
+        assert claimed not in keys
+    assert "chroma" in keys and "glitch" in keys        # rack minus claims only
 
 
-def test_rack_keeps_the_dither_row_for_particles():
+def test_rack_keeps_dither_and_quality_rows_for_particles():
     rack = next(s for s in Host(ParticlesMode()).compose_spec(ParticlesMode())
                 if isinstance(s, Section) and s.title == "SIGNAL")
     keys = [getattr(w, "store_key", None) for w in rack.widgets]
-    assert "dither" in keys
+    for k in ("dither", "bits", "gamma", "bias"):
+        assert k in keys
 
 
 # ---------- palette mapping (DESIGN.md §4.2) ----------

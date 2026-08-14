@@ -78,7 +78,11 @@ class DitherGirlMode:
     accent = ACCENT
     accepts_still = True
     blurb = "live + still\ndithering"      # home-menu card copy (DESIGN.md §3)
-    claims = frozenset({"dither"})         # §2.4: the rack hides what we own
+    # §2.4: the rack hides what we own — Dither Girl owns ALL dither quality
+    # controls (dither row + Bits/Gamma/Bias), not just the dither cycle; two
+    # visible dither subsystems in one panel is the bolted-features
+    # incoherence the overhaul exists to kill.
+    claims = frozenset({"dither", "bits", "gamma", "bias"})
 
     # option lists the shell's boot path reads (OverlayUI ctor)
     palettes = list(PALETTES)

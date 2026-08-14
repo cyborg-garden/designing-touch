@@ -33,7 +33,8 @@ from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
                   u as _u)
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
-from .overlay_ui import (OverlayUI, build_signal_section, build_global_rows)
+from .overlay_ui import (OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
+                         build_signal_section, build_global_rows)
 from .panelspec import Cycle, Slider, apply_look, capture_look
 from . import presets as _presets
 
@@ -949,6 +950,12 @@ class Host:
                     cb.scan_drift = ui.drift
                     cb.bit_crush = int(ui.crush)
                     cb.scanlines = ui.scanlines
+                    # dither-quality controls (DESIGN.md §4.1: Bits int-snapped
+                    # 1-4, Gamma default ON, Bias auto/light/dark)
+                    cb.dither_bits = int(np.clip(round(ui.sig_bits), 1, 4))
+                    cb.dither_gamma = bool(ui.sig_gamma)
+                    cb.dither_invert = SIGNAL_BIAS_INVERT[
+                        SIGNAL_BIASES[int(ui.sig_bias_idx) % len(SIGNAL_BIASES)]]
                     # suppression rule (DESIGN.md §2.4): a mode that claims
                     # "dither" owns dithering — the rack runs minus its dither
                     claimed = frozenset(getattr(mode, "claims", ()))

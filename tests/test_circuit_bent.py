@@ -18,6 +18,46 @@ def _grey_ramp_frame(h=72, w=128):
     return frame
 
 
+class TestDitherQualityControls:
+    """The SIGNAL rack's Bits/Gamma/Bias drive the dither call (DESIGN.md
+    §2.4/§4.1) — output density/level counts must actually change."""
+
+    @staticmethod
+    def _cb(**kw):
+        kw.setdefault("dither_mode", "bayer")
+        kw.setdefault("dither_size", None)
+        return CircuitBent(seed=0, chroma_shift=0, scan_drift=0,
+                           glitch_prob=0.0, bit_crush=0, scanlines=False, **kw)
+
+    def test_bits_changes_the_level_count(self):
+        frame = _grey_ramp_frame()
+        one = self._cb(dither_bits=1).process(frame)
+        three = self._cb(dither_bits=3).process(frame)
+        assert len(np.unique(one[:, :, 0])) == 2          # 1 bit = two-tone
+        assert len(np.unique(three[:, :, 0])) > 2
+        assert not np.array_equal(one, three)
+
+    def test_gamma_changes_the_output(self):
+        frame = _grey_ramp_frame()
+        lin = self._cb(dither_gamma=True).process(frame)
+        crushed = self._cb(dither_gamma=False).process(frame)
+        assert not np.array_equal(lin, crushed)
+        # both are still valid dithers of the same ramp (same level count)
+        assert len(np.unique(lin[:, :, 0])) == len(np.unique(crushed[:, :, 0]))
+
+    def test_bias_flips_the_rounding_direction(self):
+        frame = _grey_ramp_frame()
+        light = self._cb(dither_bits=1, dither_invert=False).process(frame)
+        dark = self._cb(dither_bits=1, dither_invert=True).process(frame)
+        assert not np.array_equal(light, dark)
+
+    def test_quality_controls_reach_error_diffusion_too(self):
+        frame = _grey_ramp_frame()
+        fs_lin = self._cb(dither_mode="fs", dither_gamma=True).process(frame)
+        fs_off = self._cb(dither_mode="fs", dither_gamma=False).process(frame)
+        assert not np.array_equal(fs_lin, fs_off)
+
+
 class TestCircuitBentBasics:
     def test_output_shape(self):
         cb = CircuitBent(seed=0)

@@ -408,6 +408,54 @@ def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
                         mode="dithergirl")[slot] == "neon dancer"
 
 
+# ---------- SIGNAL rack dither-quality controls (DESIGN.md §2.4/§4.1) ----------
+
+class NoClaimsMode(DitherGirlMode):
+    """A GL-free mode that claims nothing — the full rack stays visible."""
+    id = "noclaims"
+    title = "NoClaims"
+    claims = frozenset()
+
+
+def test_rack_quality_controls_drive_circuitbent(tmp_path):
+    """Bits/Gamma/Bias from the rack reach the CircuitBent dither call."""
+    host = _host(tmp_path, mode=NoClaimsMode(), max_frames=3)
+
+    def on_read(n):
+        if n == 2:
+            ui = host.ui
+            ui.glitch = True
+            ui.dither_idx = 0                # bayer
+            ui.sig_bits = 1.6                # int-snaps to 2
+            ui.sig_gamma = False
+            ui.sig_bias_idx = 2              # dark -> invert True
+
+    host._source.on_read = on_read
+    host.run()
+    assert host.cb is not None
+    assert host.cb.dither_bits == 2
+    assert host.cb.dither_gamma is False
+    assert host.cb.dither_invert is True
+
+
+def test_rack_quality_controls_round_trip_inside_signal(tmp_path):
+    """The rack's Bits/Gamma/Bias persist under the look's "signal" block and
+    apply back (DESIGN.md §7)."""
+    host = _booted(tmp_path, mode=NoClaimsMode())
+    ui = host.ui
+    ui.sig_bits, ui.sig_gamma, ui.sig_bias_idx = 2.0, False, 2
+    cfg = host._capture_cfg()
+    assert cfg["signal"]["bits"] == 2.0
+    assert cfg["signal"]["gamma"] is False
+    assert cfg["signal"]["bias"] == "dark"
+    presets.save("bent", cfg, path=host.presets_path, mode="noclaims")
+    host._reload_presets()
+    ui.sig_bits, ui.sig_gamma, ui.sig_bias_idx = 3.0, True, 0   # scramble
+    ui.pending_preset = "bent"
+    host._apply_pending_preset()
+    assert (ui.sig_bits, ui.sig_gamma, ui.sig_bias_idx) == (2.0, False, 2)
+
+
 # ---------- global Menu (M) row + panel title + 'i' in HIDDEN ----------
 
 def test_menu_row_action_opens_the_menu(tmp_path):

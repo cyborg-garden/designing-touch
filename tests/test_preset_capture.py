@@ -55,8 +55,9 @@ def test_capture_produces_v1_compatible_flat_keys_plus_nested_signal():
     # MOTION stays flat (mode-owned); SIGNAL nests (shell rack, DESIGN.md §2.4)
     for key in ("flock", "cohere", "align", "separate"):
         assert key in cfg, key
-    assert set(cfg["signal"]) == {"glitch", "dither", "chroma", "drift",
-                                  "crush", "scanlines"}
+    # incl. the §4.1 dither-quality controls (bits/gamma/bias)
+    assert set(cfg["signal"]) == {"glitch", "dither", "bits", "gamma", "bias",
+                                  "chroma", "drift", "crush", "scanlines"}
     # save=False widgets stay out
     for key in ("record", "mirror", "res", "res_idx"):
         assert key not in cfg

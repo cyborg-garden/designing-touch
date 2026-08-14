@@ -36,6 +36,11 @@ BASE_H = 1080   # resolution the layout literals are authored against
 # disabled state — the glitch chain is still worth having without the dither.
 DITHERS = ["bayer", "blue", "fs", "riemersma", "off"]
 
+# SIGNAL rack dither-quality bias options (DESIGN.md §4.1): the ordered
+# dithers' rounding direction — auto flips on dark frames, light/dark force it.
+SIGNAL_BIASES = ["auto", "light", "dark"]
+SIGNAL_BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
+
 RES_OPTIONS = [("720p", 1280, 720), ("1080p", 1920, 1080),
                ("1440p", 2560, 1440), ("4K", 3840, 2160)]
 
@@ -123,6 +128,16 @@ def build_signal_section():
     return Section("SIGNAL", key_hint="G", widgets=[
             Toggle("Glitch", "glitch"),
             Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
+            # dither-quality controls (DESIGN.md §2.4/§4.1: the audit's
+            # quality controls grow the rack; a mode that claims them —
+            # Dither Girl owns ALL dither quality — hides them)
+            Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
+                   tip="Dither bit depth. 1 = pure two-tone; higher keeps "
+                       "more shades."),
+            Toggle("Gamma", "sig_gamma", save_key="gamma",
+                   tip="Dither in linear light so mid-tones keep their "
+                       "perceived brightness. Off = the crushed retro look."),
+            Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias"),
             _slider_spec("Chroma", "chroma",
                          "Colour bleed: red and blue drift apart, slowly."),
             _slider_spec("Drift", "drift",
@@ -182,6 +197,9 @@ class OverlayUI:
         self.glitch = False
         self.chroma, self.drift, self.crush = 10.0, 8.0, 0.0
         self.dither_idx = 0
+        # dither-quality controls (DESIGN.md §4.1): defaults match CircuitBent's
+        # shipped behaviour (3-bit, gamma-correct, auto bias)
+        self.sig_bits, self.sig_gamma, self.sig_bias_idx = 3.0, True, 0
         self.scanlines = True
         self.attract_speed = 4.5   # captured Param — no panel control yet
         self.res_options = list(RES_OPTIONS)
