@@ -273,6 +273,64 @@ class TestBayerInvert:
         assert np.allclose(std, 1.0 - inv)
 
 
+class TestAutoBiasThreshold:
+    """WHERE "auto" flips, not just that it flips somewhere.
+
+    The existing auto tests use 0.1 and 0.9 — so far either side that the
+    threshold could be moved anywhere in the middle of the range and they all
+    still pass. These bracket it: gamma-correct dithering compares the LINEAR
+    mean against mid-grey-in-linear (~0.214), NOT against 0.5. Comparing a
+    linear mean against 0.5 would flip the bias on ordinary mid-tone frames,
+    which is a visible density jump on live footage.
+    """
+
+    @staticmethod
+    def _decides(v, gamma, expect):
+        """`auto` on a flat plane of value `v` must match the explicit choice
+        `expect` — and must NOT match the other one (a degenerate frame where
+        both agree would prove nothing)."""
+        img = _uniform(h=64, w=64, v=float(v))
+        auto = bayer_dither(img, bits=1, invert="auto", gamma=gamma)
+        same = bayer_dither(img, bits=1, invert=expect, gamma=gamma)
+        other = bayer_dither(img, bits=1, invert=not expect, gamma=gamma)
+        assert not np.array_equal(same, other), "degenerate: both biases agree"
+        assert np.array_equal(auto, same)
+
+    def test_gamma_path_flips_at_mid_grey_in_linear_light(self):
+        below = linear_to_srgb(np.float32(0.12))     # linear mean under ~0.214
+        above = linear_to_srgb(np.float32(0.35))     # ...and over it
+        assert 0.214 < float(above) < 0.75           # sRGB-side sanity
+        self._decides(below, gamma=True, expect=True)
+        self._decides(above, gamma=True, expect=False)
+
+    def test_non_gamma_path_flips_at_plain_half(self):
+        """Without gamma there is no linearization, so the honest midpoint is
+        0.5 of the working domain."""
+        self._decides(0.42, gamma=False, expect=True)
+        self._decides(0.58, gamma=False, expect=False)
+
+    def test_the_two_paths_disagree_where_they_should(self):
+        """On a FLAT plane both thresholds are the same point (mid-grey and
+        its linear image), so a flat frame can never show they are two
+        thresholds. A frame with structure can: the mean of the linear values
+        is not the linear of the mean, so a mostly-lit dark-background frame
+        lands above mid-grey in linear light and below it in sRGB — and each
+        path has to answer in its own domain."""
+        from dtouch.dither import _MID_GREY_LINEAR
+
+        img = np.zeros((64, 64), np.float32)
+        img[:46] = 0.6                              # lit region on black
+        assert float(srgb_to_linear(img).mean()) > _MID_GREY_LINEAR
+        assert float(img.mean()) < 0.5              # ...but dark in sRGB terms
+
+        for gamma, expect in ((True, False), (False, True)):
+            auto = bayer_dither(img, bits=1, invert="auto", gamma=gamma)
+            same = bayer_dither(img, bits=1, invert=expect, gamma=gamma)
+            other = bayer_dither(img, bits=1, invert=not expect, gamma=gamma)
+            assert not np.array_equal(same, other)
+            assert np.array_equal(auto, same), gamma
+
+
 # ---------------------------------------------------------------------------
 # Blue-noise ordered dithering
 # ---------------------------------------------------------------------------

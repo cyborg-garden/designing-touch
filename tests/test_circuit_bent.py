@@ -57,6 +57,36 @@ class TestDitherQualityControls:
         fs_off = self._cb(dither_mode="fs", dither_gamma=False).process(frame)
         assert not np.array_equal(fs_lin, fs_off)
 
+    def test_the_shipped_defaults_are_3_bit_and_gamma_correct(self):
+        """DESIGN.md §4.1: "Bits int-snapped 1-4, Gamma default ON". The
+        panel seeds sig_bits/sig_gamma to match CircuitBent's own defaults, so
+        the two have to agree — and nothing checked the constructor end. A
+        default of 1 bit would ship the rack as a two-tone crusher; gamma off
+        would ship the crushed retro look as the neutral one."""
+        cb = CircuitBent()
+        assert cb.dither_bits == 3
+        assert cb.dither_gamma is True
+        assert cb.dither_invert == "auto"
+
+        # ...and the defaults are load-bearing, not just stored
+        frame = _grey_ramp_frame()
+        default = self._cb().process(frame)
+        assert np.array_equal(default, self._cb(dither_bits=3,
+                                                dither_gamma=True).process(frame))
+        assert not np.array_equal(default, self._cb(dither_bits=1).process(frame))
+        assert not np.array_equal(default,
+                                  self._cb(dither_gamma=False).process(frame))
+
+    def test_the_panel_defaults_agree_with_the_engine_defaults(self):
+        """The rack's UI seeds and CircuitBent's constructor are two copies of
+        the same numbers; drift between them is silent."""
+        from dtouch.overlay_ui import OverlayUI
+
+        ui = OverlayUI(64, 36, ["abstract"], ["ice"], ["auto"])
+        cb = CircuitBent()
+        assert int(ui.sig_bits) == cb.dither_bits
+        assert bool(ui.sig_gamma) is cb.dither_gamma
+
 
 class TestCircuitBentBasics:
     def test_output_shape(self):

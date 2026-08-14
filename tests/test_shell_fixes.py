@@ -1015,3 +1015,220 @@ def test_the_chevron_does_not_draw_with_the_panel_disabled(tmp_path,
     host._source.on_read = lambda i: setattr(host, "overlay", OverlayState.HUD)
     host.run()
     assert host.ui._hot == []
+
+
+# ---------- pins for behaviour the suite could not see ----------
+# Each of these survived the whole suite unchanged: the line could be broken
+# and every test still passed. They are shipped promises, so they get pins.
+
+
+def test_state_json_records_the_active_mode(tmp_path):
+    """DESIGN.md §6.4: crash restart resumes the same look, and state.json is
+    the single last-mode authority (§7). Nothing checked the mode it wrote."""
+    import dtouch.modes as modes
+
+    class OtherMode(DitherGirlMode):
+        id = "other"
+        title = "Other"
+
+    host = _booted(tmp_path)
+    written = presets.load_state(host.state_path)
+    assert written["mode"] == "dithergirl"
+    assert written["preset"] == host.ui.preset_name
+
+    modes.REGISTRY.append(OtherMode)
+    try:
+        host._switch_mode("other")                  # a live switch re-autosaves
+    finally:
+        modes.REGISTRY.remove(OtherMode)
+    assert presets.load_state(host.state_path)["mode"] == "other"
+
+
+def test_state_json_records_the_active_modes_bank(tmp_path):
+    host = _booted(tmp_path)
+    host.ui.bank = {"4": "phosphor"}
+    host._autosave_state()
+    assert presets.load_state(host.state_path)["bank"] == {
+        "dithergirl": {"4": "phosphor"}}
+
+
+def test_the_panel_mirror_toggle_reaches_the_frame(tmp_path):
+    """The panel's Mirror row sets ui.mirror; the shell copies it every frame
+    and flips the picture. Nothing pinned the copy, so the row could stop
+    doing anything at all."""
+    seen = []
+
+    class Spy(DitherGirlMode):
+        def step(self, frame_bgr, audio_levels, dt):
+            seen.append(frame_bgr.copy())
+            return super().step(frame_bgr, audio_levels, dt)
+
+    class ConstSource(SyntheticSource):
+        """Same picture every read, so a difference is the mirror and only
+        the mirror."""
+        base = np.random.default_rng(3).integers(0, 256, (36, 64, 3), np.uint8)
+
+        def read(self):
+            self.reads += 1
+            if self.on_read:
+                self.on_read(self.reads)
+            return True, self.base.copy()
+
+    src = ConstSource()
+    host = _host(tmp_path, mode=Spy(), src=src, max_frames=4, mirror=True)
+
+    def on_read(n):
+        if n == 3:
+            host.ui.mirror = False                  # the panel row, in effect
+
+    src.on_read = on_read
+    host.run()
+
+    assert host.mirror is False                     # the host followed the UI
+    assert np.array_equal(seen[0], src.base[:, ::-1])   # frame 1 WAS flipped…
+    assert np.array_equal(seen[2], src.base)            # …and frame 3 is not
+
+
+def test_a_mirror_toggle_is_actually_on_the_composed_panel(tmp_path):
+    """Mouse parity for the same state (DESIGN.md §6.3): exactly one Mirror
+    control on the panel — the mode's own, or the shell's global row when the
+    mode does not declare one (the duplicate-control rule, §4.2)."""
+    from dtouch.panelspec import Section, Toggle
+
+    host = _booted(tmp_path)
+    rows = [w for w in host.ui.iter_widgets()
+            if isinstance(w, Toggle) and w.attr == "mirror"]
+    assert len(rows) == 1
+    before = host.ui.mirror
+    host.ui._activate(rows[0].attr, None, 0)        # what a click does
+    assert host.ui.mirror is not before
+
+
+def test_the_mic_starts_and_stops_with_the_sound_toggle(tmp_path,
+                                                        monkeypatch):
+    """`a` / the Sound react row flips ui.audio; the shell owns the LiveMic
+    lifecycle off it. A leaked mic is a held OS device."""
+    class FakeMic:
+        instances = []
+
+        def __init__(self):
+            self.started = self.stopped = False
+            self.available = False
+            FakeMic.instances.append(self)
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def levels(self):
+            return None
+
+    monkeypatch.setattr(shell_mod, "LiveMic", FakeMic)
+    host = _host(tmp_path, max_frames=7)
+    seen = {}
+
+    def on_read(n):
+        # _sync_host_state runs after this hook, so frame N observes the
+        # lifecycle decision frame N-1 made
+        if n == 2:
+            host.ui.audio = True
+        if n == 4:
+            seen["armed"] = host.mic
+        if n == 5:
+            host.ui.audio = False
+        if n == 7:
+            seen["disarmed"] = host.mic
+
+    host._source.on_read = on_read
+    host.run()
+
+    assert len(FakeMic.instances) == 1              # one mic, opened once
+    mic = FakeMic.instances[0]
+    assert seen["armed"] is mic and mic.started
+    # released the moment Sound react went off — NOT merely at teardown, which
+    # would leave a live OS mic held for the rest of the performance
+    assert seen["disarmed"] is None
+    assert mic.stopped
+    assert host.mic is None
+
+
+def test_the_mic_is_released_when_the_run_ends(tmp_path, monkeypatch):
+    class FakeMic:
+        def __init__(self):
+            self.stopped = False
+            self.available = False
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.stopped = True
+
+        def levels(self):
+            return None
+
+    monkeypatch.setattr(shell_mod, "LiveMic", FakeMic)
+    host = _host(tmp_path, max_frames=3)
+    host._source.on_read = lambda n: setattr(host.ui, "audio", True)
+    host.run()
+    assert host.mic is None
+
+
+def test_camera_loss_reaches_the_hud(tmp_path, monkeypatch):
+    """DESIGN.md §6.4: hold the last good frame AND say so. The saying-so half
+    is a kwarg the HUD receives — nothing checked it ever arrived True."""
+    _patch_gui(monkeypatch)
+    host = _host(tmp_path, src=SyntheticSource(fail_after=2), show=True,
+                 max_frames=6)
+    seen = []
+    real = host.hud.draw
+    host.hud.draw = (lambda img, state, **kw:
+                     seen.append(kw.get("camera_lost")) or real(img, state, **kw))
+    host.run()
+    assert seen[:2] == [False, False]               # frames still arriving
+    assert all(seen[2:]), "camera loss never reached the HUD"
+
+
+def test_a_long_black_streak_reaches_the_hud(tmp_path, monkeypatch):
+    """The other half of the same note: frames arrive, but they are black
+    (the iPhone Continuity Camera case the message names)."""
+    _patch_gui(monkeypatch)
+
+    class BlackSource(SyntheticSource):
+        def read(self):
+            self.reads += 1
+            return True, np.zeros((self.h, self.w, 3), np.uint8)
+
+    host = _host(tmp_path, src=BlackSource(), show=True, max_frames=20)
+    seen = []
+    real = host.hud.draw
+    host.hud.draw = (lambda img, state, **kw:
+                     seen.append(kw.get("camera_lost")) or real(img, state, **kw))
+    host.run()
+    assert seen[:15] == [False] * 15                # the streak has to build
+    assert seen[-1] is True
+
+
+def test_an_unbanked_look_takes_slot_one_first(tmp_path):
+    """DESIGN.md §6.3: a slot-badge click takes the NEXT FREE slot, and on an
+    empty bank that is 1 — the slot a performer reaches for first."""
+    host = _booted(tmp_path)
+    host.ui.bank = {}
+    host._assign_slot("phosphor")
+    assert host.ui.bank == {"1": "phosphor"}
+    host._assign_slot("classic")
+    assert host.ui.bank == {"1": "phosphor", "2": "classic"}
+    host._assign_slot("phosphor")                   # clicking again clears it
+    assert host.ui.bank == {"2": "classic"}
+    host._assign_slot("newsprint")                  # 1 is free again
+    assert host.ui.bank == {"1": "newsprint", "2": "classic"}
+
+
+def test_a_full_bank_says_so_instead_of_dropping_the_click(tmp_path):
+    host = _booted(tmp_path)
+    host.ui.bank = {str(i): "x%d" % i for i in range(1, 10)}
+    host._assign_slot("phosphor")
+    assert "phosphor" not in host.ui.bank.values()
+    assert any("bank full" in t for t in _hints(host))
