@@ -346,17 +346,22 @@ class DitherGirlMode:
             sens = float(self._ui("sens", 1.0))
             contrast *= 1.0 + 0.35 * sens * float(audio_levels["bass"])
 
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-        if contrast != 1.0:
-            gray = np.clip((gray - 0.5) * contrast + 0.5, 0.0, 1.0)
-
+        # perf: all float work happens at WORKING res — grayscale stays uint8
+        # through the resize, contrast runs on the small plane (identical
+        # result up to uint8 rounding), and the palette maps BEFORE the
+        # nearest-neighbour upscale (bitwise identical: NEAREST replicates
+        # pixels and the palette map is per-pixel).
+        gray_u8 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         wh = int(np.clip(round(scale), SCALE_LO, SCALE_HI))
         ww = max(8, int(round(wh * rw / float(rh))))
-        small = cv2.resize(gray, (ww, wh), interpolation=cv2.INTER_AREA)
+        small = (cv2.resize(gray_u8, (ww, wh), interpolation=cv2.INTER_AREA)
+                 .astype(np.float32) / 255.0)
+        if contrast != 1.0:
+            small = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
 
         lit = _dither(small, algo, bits, gamma, bias)
-        lit = cv2.resize(lit, (rw, rh), interpolation=cv2.INTER_NEAREST)
         out = self._palette_map(lit, off, on)
+        out = cv2.resize(out, (rw, rh), interpolation=cv2.INTER_NEAREST)
 
         if matte_kind != "off":
             # matte gate: dither the matted subject only; elsewhere the raw
@@ -365,11 +370,12 @@ class DitherGirlMode:
                 self.mat = make_matte(matte_kind)
                 self._mat_kind = matte_kind
             m = self.mat.compute(cv2.resize(frame_bgr, (MATTE_W, MATTE_H)))
-            m = np.clip(cv2.resize(m, (rw, rh)), 0.0, 1.0)[:, :, None]
+            m = np.clip(cv2.resize(m, (rw, rh)), 0.0, 1.0).astype(np.float32)
             if self._ui("dg_matte_black", False):
                 bg = np.zeros_like(out)
             else:
                 bg = cv2.cvtColor(cv2.resize(frame_bgr, (rw, rh)),
                                   cv2.COLOR_BGR2RGB)
-            out = (out * m + bg * (1.0 - m)).astype(np.uint8)
+            # perf: uint8 blend in cv2 — no full-res float temporaries
+            out = cv2.blendLinear(out, bg, m, 1.0 - m)
         return out
