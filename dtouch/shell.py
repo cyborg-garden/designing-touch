@@ -31,15 +31,17 @@ from .commands import Command, CommandRegistry
 from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
                   draw_corner_tick, draw_help, esc_overlay, put_outlined,
                   u as _u)
+from .imgui import DIM, HOVER, PANEL, in_rect
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
-from .overlay_ui import (OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
+from .overlay_ui import (BASE_H, OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
                          build_signal_section, build_global_rows)
 from .panelspec import Cycle, Section, Slider, apply_look, capture_look
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
 ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
+PANEL_OPEN = "panel.open"   # the HUD chevron and TAB reach the same named command
 
 
 class PerformState:
@@ -548,6 +550,11 @@ class Host:
         from any overlay state; each mode's letter switches directly)."""
         self.reg.add("menu.open", "Menu", "m",
                      lambda: self.menu.toggle(self.mode.id if self.mode else None))
+        # unbound (TAB already reaches PANEL and is listed in the help table) —
+        # this is the named command the HUD chevron posts, so the mouse path
+        # and the key path are one implementation (DESIGN.md principle 7)
+        self.reg.add(PANEL_OPEN, "Open the panel", None,
+                     lambda: setattr(self, "overlay", OverlayState.PANEL))
         for cls in REGISTRY:
             self.reg.add(f"mode.{cls.id}", f"Switch to {cls.title}", cls.id[:1],
                          lambda mid=cls.id: self.request_mode(mid))
@@ -959,6 +966,33 @@ class Host:
         self.hud.toasts.hint(f"{type(e).__name__}: {str(e)[:70]}", AMBER)
         print("frame error:", type(e).__name__, e)
 
+    def _draw_panel_chevron(self, img):
+        """The one always-clickable affordance in HUD state (DESIGN.md §6.3:
+        the mouse cannot be required, but it must not be a dead end either).
+
+        Boot state is HUD (§6.1), which draws no sidebar — and `ui._hot` is
+        emptied whenever the panel is hidden, so after boot there was nothing
+        on the whole frame a click could reach: an audit fired 576 clicks
+        across it and got no response at all. The shipped build always drew
+        the sidebar, so the double-click cohort HAD a mouse path to the panel
+        and lost it, and the only remaining hint fades after 4 s.
+
+        This is the panel-open chevron in the panel's own shipped collapsed
+        position (top-right), drawn DIM so it reads as chrome rather than
+        content, and it posts the same named command TAB reaches.
+
+        It deliberately does NOT draw in HIDDEN. That state's whole contract
+        is provably clean output — the OBS capture contract — and output is
+        sacred; HIDDEN is the state you switch to precisely so nothing of
+        ours is in the picture."""
+        ui, g = self.ui, self.ui._gui
+        h, w = img.shape[:2]
+        ui._hot = g.begin(max(1.0, h / BASE_H), ui.mouse, ui.accent)
+        r = (w - g.S(48), g.S(12), w - g.S(12), g.S(42))
+        g.box(img, r, HOVER if in_rect(r, ui.mouse) else PANEL)
+        g.text(img, "<", w - g.S(37), g.S(33), DIM, 0.6, 2)
+        ui._hot.append((r, PANEL_OPEN, None))
+
     # ----- the present half of a frame -----
     def _compose_frame(self, out, frame, camera_lost=False):
         """The window image for one frame: the mode's RGB output converted to
@@ -987,6 +1021,8 @@ class Host:
             else:
                 if self.panel and self.overlay is OverlayState.PANEL:
                     ui.draw(bgr, {"status": ""})
+                elif self.panel and self.overlay is OverlayState.HUD:
+                    self._draw_panel_chevron(bgr)
                 else:
                     ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
                 self.hud.draw(bgr, self.overlay, status=self._status_line(),

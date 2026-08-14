@@ -937,3 +937,81 @@ def test_make_matte_raises_matte_unavailable_not_the_raw_import_error(
     assert "[person] extra" in str(e.value)
     with pytest.raises(KeyError):                      # a bad kind is still a bug
         matte_mod.make_matte("nonsense")
+
+
+# ---------- mouse/key parity at boot (DESIGN.md §6.1 + §6.3) ----------
+# Boot state is HUD, which draws no sidebar, and ui._hot is emptied whenever
+# the panel is hidden — so after boot NOTHING on the frame answered a click.
+# An audit fired 576 clicks across the whole frame and got no response at all.
+
+
+def _run_frames(tmp_path, monkeypatch, overlay, n=2, keys=()):
+    shown = []
+    _patch_gui(monkeypatch, keys=keys, shown=shown)
+    host = _host(tmp_path, show=True, panel=True, max_frames=n)
+    host._source.on_read = lambda i: setattr(host, "overlay", overlay)
+    host.run()
+    return host, shown
+
+
+def test_hud_state_leaves_one_clickable_way_into_the_panel(tmp_path,
+                                                           monkeypatch):
+    host, shown = _run_frames(tmp_path, monkeypatch, OverlayState.HUD)
+    assert host.ui._hot, "HUD had no hit rect at all — the mouse is a dead end"
+    rects = [(r, k) for r, k, _ in host.ui._hot]
+    assert [k for _, k in rects] == ["panel.open"]     # exactly one, no clutter
+    (x0, y0, x1, y1), _ = rects[0]
+    w, h = RES
+    assert x1 <= w and x0 > w * 0.7 and y0 < h * 0.3   # shipped top-right spot
+
+
+def test_clicking_the_hud_chevron_opens_the_panel(tmp_path, monkeypatch):
+    """It routes through the same named command TAB reaches — one
+    implementation for both paths (DESIGN.md principle 7)."""
+    host, _ = _run_frames(tmp_path, monkeypatch, OverlayState.HUD)
+    host._wire_keys()
+    (x0, y0, x1, y1), _, _ = host.ui._hot[0]
+    host._on_mouse(cv2.EVENT_LBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2, 0)
+    assert host.ui.pending_commands == ["panel.open"]
+    host._pump_preset_mailboxes()
+    assert host.overlay is OverlayState.PANEL
+
+
+def test_the_chevron_never_draws_in_hidden(tmp_path, monkeypatch):
+    """HIDDEN's whole contract is provably clean output — the OBS capture
+    contract. Output is sacred: nothing of ours may be in that picture."""
+    host, shown = _run_frames(tmp_path, monkeypatch, OverlayState.HIDDEN)
+    assert host.ui._hot == []           # nothing drawn means nothing to hit
+
+
+def test_hidden_output_is_pixel_identical_to_a_ui_free_render(tmp_path,
+                                                              monkeypatch):
+    """Directly: the same source through the same mode, once with the window
+    in HIDDEN and once headless, must produce the same picture."""
+    shown = []
+    _patch_gui(monkeypatch, shown=shown)
+    lit = _host(tmp_path, show=True, panel=True, max_frames=3)
+
+    def hidden_and_quiet(i):
+        lit.overlay = OverlayState.HIDDEN
+        # the boot hint is a toast, and toasts legitimately draw in HIDDEN
+        # until they fade (DESIGN.md §6.1) — this test is about the chrome
+        lit.hud.toasts._hints, lit.hud.toasts._center = [], None
+
+    lit._source.on_read = hidden_and_quiet
+    lit.run()
+
+    bare = _host(tmp_path, show=False, max_frames=3)
+    _, out = bare.run()
+    assert np.array_equal(shown[-1], cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
+
+
+def test_the_chevron_does_not_draw_with_the_panel_disabled(tmp_path,
+                                                           monkeypatch):
+    """`--ui keys` means no panel, so there is no panel to open."""
+    shown = []
+    _patch_gui(monkeypatch, shown=shown)
+    host = _host(tmp_path, show=True, panel=False, max_frames=2)
+    host._source.on_read = lambda i: setattr(host, "overlay", OverlayState.HUD)
+    host.run()
+    assert host.ui._hot == []
