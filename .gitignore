@@ -8,7 +8,17 @@ __pycache__/
 *.mp4
 !docs/**
 dtouch/assets/*.tflite
+
+# user data written next to the app at runtime (DESIGN.md §6.4/§7):
+# saved looks, the autosaved bank/mode/preset state, and the backups the
+# preset store makes before a v1->v2 migration or a corrupt-file rewrite.
 presets.json
 **/presets.json
+state.json
+**/state.json
+presets.v1.bak.json
+**/presets.v1.bak.json
+*.corrupt.*.bak.json
+**/*.corrupt.*.bak.json
 dtouch.egg-info/
 *.egg-info/
