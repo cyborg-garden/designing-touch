@@ -4,15 +4,19 @@ Everything here drives the real Host loop headless with DitherGirlMode (pure
 numpy/cv2 — no GL, so these run everywhere test_dithergirl.py does). GUI-path
 tests monkeypatch cv2's window calls so `show=True` code paths run headless.
 """
+import os
+
 import numpy as np
 import pytest
 
 import cv2
 
+from dtouch import matte as matte_mod
 from dtouch import presets
+from dtouch import shell as shell_mod
 from dtouch.hud import OverlayState
-from dtouch.modes.dithergirl import DitherGirlMode
-from dtouch.shell import Host
+from dtouch.modes.dithergirl import MATTES_DG, DitherGirlMode
+from dtouch.shell import CameraSource, Host
 
 RES = (192, 108)
 
@@ -614,3 +618,322 @@ def test_refused_store_write_toasts_the_stores_own_reason(tmp_path,
     host._pump_preset_mailboxes()
     assert any("not saved" in t for t in _hints(host))
     presets.take_notes()
+
+
+# ---------- the frame loop is contained: no traceback ends the show ----------
+# DESIGN.md §6.4 + §8 step 10 ("any traceback = release blocker"). Nothing in
+# the per-frame loop used to be wrapped, so ONE exception out of source.read,
+# cv2.flip, mode.step or writer.append_data ended the performance with a stack
+# trace on the projector.
+
+
+class BoomMode(DitherGirlMode):
+    """A mode whose step() raises from frame `fail_from` onward."""
+
+    def __init__(self, fail_from=2, exc=None, **kw):
+        super().__init__(**kw)
+        self.fail_from = fail_from
+        self.exc = exc or ModuleNotFoundError("No module named 'mediapipe'")
+        self.steps = 0
+
+    def step(self, frame_bgr, audio_levels, dt):
+        self.steps += 1
+        if self.steps >= self.fail_from:
+            raise self.exc
+        return super().step(frame_bgr, audio_levels, dt)
+
+
+def test_mode_step_exception_holds_the_last_frame_instead_of_ending_the_show(
+        tmp_path):
+    """The most reachable path: a start.command install with no mediapipe,
+    one click on the shipped `portrait` template, ModuleNotFoundError out of
+    mode.step(). The loop must survive it and keep holding the last good
+    picture."""
+    mode = BoomMode(fail_from=3)
+    host = _host(tmp_path, mode=mode, max_frames=8)
+    count, out = host.run()
+
+    assert count == 8                                # the loop never exited
+    assert mode.steps == 8                           # ...and kept stepping
+    assert out is not None and out.any()             # last good picture held
+    assert host.hud.toasts._center.text == "something went wrong - show continues"
+    assert any("ModuleNotFoundError" in t for t in _hints(host))
+
+
+def test_a_frame_error_on_the_very_first_frame_is_survivable(tmp_path):
+    """Nothing good has been rendered yet, so there is no picture to hold —
+    an intentional black frame, not an unbound-variable crash."""
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), max_frames=3)
+    count, out = host.run()
+    assert count == 3
+    assert out is not None and not out.any()
+
+
+def test_repeating_frame_error_does_not_spam_the_toasts(tmp_path):
+    """A per-frame exception at 60 fps would refill the toast stack sixty
+    times a second and bury the status line under its own error."""
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), max_frames=40)
+    flashes = []
+    host.hud.toasts.flash = lambda text, color=None: flashes.append(text)
+    host.run()
+    assert flashes.count("something went wrong - show continues") == 1
+
+
+def test_a_different_frame_error_toasts_immediately(tmp_path):
+    """Rate-limiting is per (type, message) — a NEW failure is news."""
+    host = _host(tmp_path, max_frames=1)
+    host.hud.toasts.flash = lambda *a, **k: None
+    host._frame_error(ValueError("first"))
+    first = host._err_at
+    host._frame_error(TypeError("second"))
+    assert host._err_at != first
+    assert host._err_key == ("TypeError", "second")
+
+
+def test_keys_still_work_while_every_single_frame_fails(tmp_path, monkeypatch):
+    """The contract that matters (DESIGN.md §6.4: no keyboard-reachable state
+    requires a restart) — the produce half is contained, so the present half
+    still draws and still pumps `q`."""
+    _patch_gui(monkeypatch, keys=[255, ord("q"), ord("q")])
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), show=True)
+    host.run()
+    assert host.ps.quit is True
+
+
+def test_keyboard_interrupt_still_propagates(tmp_path):
+    """Ctrl-C means stop. The guard is for bugs, not for the operator."""
+    host = _host(tmp_path, mode=BoomMode(fail_from=1, exc=KeyboardInterrupt()),
+                 max_frames=4)
+    with pytest.raises(KeyboardInterrupt):
+        host.run()
+
+
+def test_source_read_exception_is_contained(tmp_path):
+    """A camera that raises rather than returning (False, None) — a USB yank
+    mid-read — is the same event to the operator."""
+    src = SyntheticSource()
+
+    def boom(n):
+        if n >= 2:
+            raise OSError(5, "Input/output error")
+    src.on_read = boom
+    host = _host(tmp_path, src=src, max_frames=5)
+    count, _ = host.run()
+    assert count == 5
+    assert any("OSError" in t for t in _hints(host))
+
+
+# ---------- a failing recorder stops recording, not the show ----------
+
+def test_recorder_write_failure_stops_the_take_and_keeps_running(tmp_path):
+    class BadWriter(FakeWriter):
+        def append_data(self, f):
+            raise OSError(28, "No space left on device")
+
+    host = _host(tmp_path, max_frames=6)
+
+    def on_read(n):
+        if n == 2:
+            host.ui.record = True
+            host.writer, host.rec_path = BadWriter(), "fake.mp4"
+
+    host._source.on_read = on_read
+    count, out = host.run()
+
+    assert count == 6                                # the show carried on
+    assert host.writer is None                       # closed cleanly
+    assert host.ui.record is False                   # and disarmed, not retried
+    assert host.hud.toasts._center.text == "recording stopped - write failed"
+
+
+# ---------- recordings: out/ on first take, and never a silent overwrite ----------
+
+def test_out_dir_is_not_created_at_boot(tmp_path, monkeypatch):
+    """`os.makedirs("out")` at boot raised PermissionError on a read-only
+    launch dir (a run from a mounted DMG) — a traceback before any window
+    existed, for a directory most sessions never use."""
+    monkeypatch.chdir(tmp_path)
+    _booted(tmp_path)
+    assert not (tmp_path / "out").exists()
+
+
+def test_first_record_creates_out_and_names_the_take(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    host = _booted(tmp_path)
+    made = []
+    monkeypatch.setattr(shell_mod.imageio, "get_writer",
+                        lambda p, **kw: made.append(p) or FakeWriter())
+    host.ui.record = True
+    host._sync_host_state()
+    assert (tmp_path / "out").is_dir()
+    assert made and made[0] == host.rec_path
+    assert os.path.basename(host.rec_path).startswith("rec_")
+
+
+def test_a_launch_dir_that_cannot_take_recordings_toasts_and_disarms(
+        tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "out").write_text("not a directory")   # makedirs raises here
+    host = _booted(tmp_path)
+    host.ui.record = True
+    host._sync_host_state()                            # must not raise
+    assert host.writer is None
+    assert host.ui.record is False                     # disarmed, not retried
+    assert host.hud.toasts._center.text == "cannot write recordings here"
+
+
+def test_two_takes_in_the_same_second_get_distinct_filenames(tmp_path,
+                                                             monkeypatch):
+    """Names are second-resolution. Stopping and restarting a take inside one
+    second reused the name and silently truncated the first file — the take
+    you just made, gone."""
+    monkeypatch.chdir(tmp_path)
+    host = _booted(tmp_path)
+    monkeypatch.setattr(shell_mod.time, "strftime",
+                        lambda fmt: "20260101_120000")
+    os.makedirs("out", exist_ok=True)
+
+    first = host._rec_path()
+    open(first, "wb").close()                          # the take now on disk
+    second = host._rec_path()
+    open(second, "wb").close()
+    third = host._rec_path()
+
+    assert os.path.basename(first) == "rec_20260101_120000.mp4"
+    assert os.path.basename(second) == "rec_20260101_120000_2.mp4"
+    assert os.path.basename(third) == "rec_20260101_120000_3.mp4"
+
+
+# ---------- a camera that will not open never reaches a traceback ----------
+
+def test_camera_that_cannot_be_opened_still_opens_the_window(tmp_path,
+                                                             monkeypatch):
+    """`open_camera` raises whenever isOpened() is False — no camera, TCC
+    denied, or the device held by Zoom/OBS. That traceback landed before any
+    window existed, so the plain-language permission card DESIGN.md §6.4
+    promises could never be shown."""
+    def denied(device):
+        raise RuntimeError("could not open camera 'builtin'")
+    monkeypatch.setattr(shell_mod, "open_camera", denied)
+    shown = []
+    _patch_gui(monkeypatch, keys=[255, ord("q"), ord("q")], shown=shown)
+
+    host = Host(DitherGirlMode(), source=None, res=RES, show=True, preset=None,
+                **_paths(tmp_path))
+    count, out = host.run()                            # must not raise
+
+    assert count == 0
+    assert host.ps.quit is True                        # still quittable
+    assert shown and float(shown[0].mean()) < 20 and shown[0].max() > 0
+    assert any("could not open camera" in t for t in _hints(host))
+
+
+def test_camera_source_recovers_when_the_camera_appears(monkeypatch):
+    """Recovery is automatic: the open is retried, so the show starts by
+    itself when the device is freed."""
+    class FakeCap:
+        def read(self):
+            return True, np.zeros((4, 4, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    tries = []
+    clock = [0.0]
+
+    def flaky(device):
+        tries.append(device)
+        if len(tries) < 3:
+            raise RuntimeError("busy")
+        return FakeCap(), "FaceTime HD"
+    monkeypatch.setattr(shell_mod, "open_camera", flaky)
+
+    src = CameraSource("builtin", now=lambda: clock[0])
+    assert src.read() == (False, None)
+    assert src.name == "no camera" and src.error is not None
+
+    clock[0] += CameraSource.RETRY_S
+    assert src.read() == (False, None)                 # retried, still busy
+    clock[0] += CameraSource.RETRY_S
+    ok, frame = src.read()
+    assert ok and frame is not None
+    assert src.name == "FaceTime HD" and src.error is None
+    src.release()
+
+
+def test_camera_source_does_not_retry_faster_than_the_backoff(monkeypatch):
+    calls = []
+
+    def busy(device):
+        calls.append(device)
+        raise RuntimeError("nope")
+    monkeypatch.setattr(shell_mod, "open_camera", busy)
+    src = CameraSource("builtin", now=lambda: 0.0)
+    for _ in range(20):
+        src.read()
+    assert len(calls) == 1                             # one open, not twenty
+
+
+def test_a_late_camera_gets_its_name_onto_the_status_line(tmp_path):
+    """A CameraSource that only opened on its third retry boots named 'no
+    camera'; the status line has to pick up the real name when frames start."""
+    src = SyntheticSource()
+    src.name = "no camera"
+    host = _host(tmp_path, src=src, max_frames=4)
+
+    def on_read(n):
+        if n >= 3:
+            src.name = "FaceTime HD"                   # the camera turns up
+
+    src.on_read = on_read
+    host.run()
+    assert host.cam_name == "FaceTime HD"
+
+
+# ---------- a missing optional matte reverts the cycle, it never raises ----------
+
+def _no_mediapipe(monkeypatch):
+    def missing():
+        raise ModuleNotFoundError("No module named 'mediapipe'")
+    monkeypatch.setitem(matte_mod.KINDS, "person", missing)
+
+
+def test_missing_person_matte_reverts_the_cycle_and_toasts_the_extra(
+        tmp_path, monkeypatch):
+    """The shipped `portrait` and `sigil` templates both select `person`, so
+    on any install without the extra this is one click from the frame loop."""
+    _no_mediapipe(monkeypatch)
+    host = _host(tmp_path, max_frames=6)
+
+    def on_read(n):
+        if n == 3:
+            host.ui.dg_matte_idx = MATTES_DG.index("person")
+
+    host._source.on_read = on_read
+    count, out = host.run()
+
+    assert count == 6
+    assert host.ui.dg_matte_idx == MATTES_DG.index("off")   # reverted
+    # a graceful step-back with the fix in it, NOT the generic frame-error path
+    assert host.hud.toasts._center.text == "person matte needs the [person] extra"
+
+
+def test_select_matte_keeps_the_callers_operator_on_refusal(monkeypatch):
+    _no_mediapipe(monkeypatch)
+
+    class UI:
+        idx = 1
+    ui = UI()
+    mat, kind = matte_mod.select_matte(ui, "idx", ["luma", "person"], "luma")
+    assert mat is None and kind == "luma"
+    assert ui.idx == 0                                 # the cycle stepped back
+
+
+def test_make_matte_raises_matte_unavailable_not_the_raw_import_error(
+        monkeypatch):
+    _no_mediapipe(monkeypatch)
+    with pytest.raises(matte_mod.MatteUnavailable) as e:
+        matte_mod.make_matte("person")
+    assert "[person] extra" in str(e.value)
+    with pytest.raises(KeyError):                      # a bad kind is still a bug
+        matte_mod.make_matte("nonsense")

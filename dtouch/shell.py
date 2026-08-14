@@ -38,6 +38,9 @@ from .overlay_ui import (OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
 from .panelspec import Cycle, Section, Slider, apply_look, capture_look
 from . import presets as _presets
 
+REC_DIR = "out"        # recordings land beside the launch dir; created on first take
+ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
+
 
 class PerformState:
     """Mutable perform-layer flags (DESIGN.md §6.2), owned by the shell."""
@@ -285,16 +288,50 @@ def _overlay_key(key, state, toasts):
 
 
 class CameraSource:
-    """The default frame source — wraps camera selection (dtouch.camera)."""
+    """The default frame source — wraps camera selection (dtouch.camera).
 
-    def __init__(self, device="builtin"):
-        self.cap, self.name = open_camera(device)
+    A camera that will not open is NOT fatal (DESIGN.md §6.4). `open_camera`
+    raises whenever `isOpened()` is False — no camera attached, macOS TCC
+    denied, or the device already held by Zoom/OBS — and that traceback used
+    to land before any window existed, so the plain-language permission card
+    the design promises could never be shown.
+
+    Instead the source starts empty: every `read()` reports failure (the shell
+    draws its 'waiting for camera' card and stays quittable) and the open is
+    retried about once a second, so the show starts by itself the moment the
+    camera appears or the other app lets go of it.
+    """
+
+    RETRY_S = 1.0
+
+    def __init__(self, device="builtin", now=time.monotonic):
+        self._device = device
+        self._now = now
+        self.cap = None
+        self.name = "no camera"
+        self.error = None          # the last open failure, for the boot toast
+        self._retry_at = 0.0
+        self._open()
+
+    def _open(self):
+        self._retry_at = self._now() + self.RETRY_S
+        try:
+            self.cap, self.name = open_camera(self._device)
+            self.error = None
+        except Exception as e:                       # noqa: BLE001 — §6.4
+            self.cap, self.error = None, e
 
     def read(self):
+        if self.cap is None:
+            if self._now() >= self._retry_at:
+                self._open()                          # automatic recovery
+            if self.cap is None:
+                return False, None
         return self.cap.read()
 
     def release(self):
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
 
 
 class StillSource:
@@ -361,6 +398,8 @@ class Host:
         self.all_presets = {}
         self.cam_name = "?"
         self.fps = 0.0
+        self._err_key = None      # (type, message) of the last frame error…
+        self._err_at = 0.0        # …and when it was last toasted (rate limit)
 
     # ----- mode lifecycle (DESIGN.md §2.1) -----
     def _resolve_boot_mode(self):
@@ -843,13 +882,126 @@ class Host:
         elif not ui.audio and self.mic is not None:
             self.mic.stop(); self.mic = None
         if ui.record and self.writer is None:
-            self.rec_path = os.path.join(
-                "out", "rec_%s.mp4" % time.strftime("%Y%m%d_%H%M%S"))
-            self.writer = imageio.get_writer(self.rec_path, fps=24, macro_block_size=8)
+            self._start_recording()
         elif not ui.record and self.writer is not None:
             self.writer.close(); print("saved", self.rec_path)
             self.hud.toasts.hint("saved " + self.rec_path)   # filename toast on stop
             self.writer = None
+
+    # ----- recorder (DESIGN.md §6.4: a take that can't start never ends the show) -----
+    def _rec_path(self):
+        """A recording filename that is not already taken. Names are
+        second-resolution, so stopping and restarting a take inside one second
+        used to reuse the name and silently truncate the first file — the
+        take you just made, gone. Same same-second suffix pattern the preset
+        auto-namer uses."""
+        base = os.path.join(REC_DIR, "rec_%s" % time.strftime("%Y%m%d_%H%M%S"))
+        path, n = base + ".mp4", 2
+        while os.path.exists(path):
+            path, n = "%s_%d.mp4" % (base, n), n + 1
+        return path
+
+    def _start_recording(self):
+        """Open the writer for a new take, creating out/ on the way.
+
+        Directory creation is deferred to HERE on purpose: `os.makedirs("out")`
+        at boot raises PermissionError on a read-only launch dir (a run from a
+        mounted DMG) or FileExistsError if something called `out` is already
+        there — a traceback before the window existed, for a directory most
+        sessions never use. A launch dir that cannot take recordings now costs
+        the recordings, not the show."""
+        path = None
+        try:
+            os.makedirs(REC_DIR, exist_ok=True)
+            path = self._rec_path()
+            self.writer = imageio.get_writer(path, fps=24, macro_block_size=8)
+        except Exception as e:                       # noqa: BLE001 — §6.4
+            self.writer = None
+            self.ui.record = False                   # disarm; don't retry every frame
+            self.hud.toasts.flash("cannot write recordings here", AMBER)
+            self.hud.toasts.hint(str(e)[:80], AMBER)
+            print("recording could not start:", e)
+            return
+        self.rec_path = path
+        print("recording", path)
+
+    def _recorder_failed(self, e):
+        """A write that fails mid-take (disk fills, the volume goes away).
+        Stop cleanly, keep whatever landed, and keep the show running — the
+        recorder is not the performance (DESIGN.md §6.4)."""
+        try:
+            if self.writer is not None:
+                self.writer.close()
+        except Exception:                            # noqa: BLE001 — §6.4
+            pass
+        self.writer = None
+        if self.ui is not None:
+            self.ui.record = False
+        self.hud.toasts.flash("recording stopped - write failed", AMBER)
+        self.hud.toasts.hint(str(e)[:80], AMBER)
+        print("recorder failed:", e)
+
+    def _frame_error(self, e):
+        """One caught per-frame exception (DESIGN.md §6.4, §8 step 10: any
+        traceback is a release blocker). Toast a human summary in amber and
+        keep going.
+
+        Rate-limited by (type, message): a failure that repeats every frame
+        would otherwise refill the toast stack 60 times a second and bury the
+        status line under its own error — and spray stdout hard enough to
+        matter. A DIFFERENT error always toasts immediately."""
+        key = (type(e).__name__, str(e)[:80])
+        now = time.monotonic()
+        if key == self._err_key and now - self._err_at < ERR_TOAST_S:
+            return
+        self._err_key, self._err_at = key, now
+        self.hud.toasts.flash("something went wrong - show continues", AMBER)
+        self.hud.toasts.hint(f"{type(e).__name__}: {str(e)[:70]}", AMBER)
+        print("frame error:", type(e).__name__, e)
+
+    # ----- the present half of a frame -----
+    def _compose_frame(self, out, frame, camera_lost=False):
+        """The window image for one frame: the mode's RGB output converted to
+        BGR, then menu / panel / HUD / help on top.
+
+        Called AFTER the recorder write in run() — recordings never contain
+        HUD, panel, or menu (the shipped invariant, kept; the boot card is the
+        one deliberate recorded UI frame, DESIGN.md §3). The BGR conversion
+        happens only here, so a hidden window pays nothing.
+
+        The overlay draw is contained: chrome that fails is still only chrome,
+        and the picture underneath is the show (DESIGN.md §6.4)."""
+        ui, mode = self.ui, self.mode
+        bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+        try:
+            if self.menu.open:
+                # home menu (DESIGN.md §3): live camera through 1-bit blue
+                # noise + 65% scrim + mode cards; the running mode keeps
+                # stepping untouched behind it
+                ui._hot = []
+                self.menu.rects = draw_menu(bgr, frame, self.menu.cards,
+                                            self.menu.sel)
+                # HIDDEN-state HUD = toasts + blackout tick only
+                self.hud.draw(bgr, OverlayState.HIDDEN,
+                              blackout=self.ps.blackout)
+            else:
+                if self.panel and self.overlay is OverlayState.PANEL:
+                    ui.draw(bgr, {"status": ""})
+                else:
+                    ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
+                self.hud.draw(bgr, self.overlay, status=self._status_line(),
+                              debug_status=self.debug_line(),
+                              recording=(self.writer is not None),
+                              blackout=self.ps.blackout,
+                              camera_lost=camera_lost)
+            if self.ps.help_open:
+                # help carries the active mode's accent (§5 one-accent)
+                draw_help(bgr, self.help_rows, accent=mode.accent)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:                       # noqa: BLE001 — §6.4
+            self._frame_error(e)
+        return bgr
 
     # ----- the loop -----
     def run(self):
@@ -858,8 +1010,15 @@ class Host:
             # no explicit --mode: resume the last-used mode (DESIGN.md §3)
             self._boot_mode = self._resolve_boot_mode()
         if self._source is None:
+            # never raises: a camera that will not open yields no frames and
+            # keeps retrying, so the window still opens on the 'waiting for
+            # camera' card and the operator can read it and quit (§6.4)
             self._source = CameraSource(self._device)
         self.cam_name = getattr(self._source, "name", "source")
+        cam_error = getattr(self._source, "error", None)
+        if cam_error is not None:
+            self.hud.toasts.hint(str(cam_error)[:80], AMBER, ttl=4.0)
+            print("camera unavailable:", cam_error)
         if self._still_path is not None and self.still is None:
             self.still = cv2.imread(self._still_path, cv2.IMREAD_COLOR)
             if self.still is None:
@@ -925,7 +1084,8 @@ class Host:
         # doors — menu, panel, key map. ASCII only (Hershey).
         self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
 
-        os.makedirs("out", exist_ok=True)
+        # out/ is created by the first record, not here: makedirs on a
+        # read-only launch dir used to end the boot with a traceback (§6.4).
 
         t0 = time.time(); fps = 0.0; count = 0
         black_streak = 0
@@ -933,107 +1093,153 @@ class Host:
         camera_lost = False
         last_t = time.monotonic()
         out = None
+        last_out = None      # last good PICTURE, held when a frame fails
         try:
             while True:
-                if self.pending_mode is not None:
-                    mode_id, self.pending_mode = self.pending_mode, None
-                    self._switch_mode(mode_id)
-                    mode = self.mode
+                # DESIGN.md §6.4 / §8 step 10 (any traceback = release
+                # blocker). Every line in the PRODUCE half below is reachable
+                # mid-show — source.read, cv2.flip, mode.step, the recorder
+                # write — and a single exception used to end the performance
+                # with a stack trace. The most reachable path: a start.command
+                # install with no mediapipe, one click on the shipped
+                # `portrait` or `sigil` template, ModuleNotFoundError straight
+                # out of mode.step().
+                #
+                # The produce half is contained here; the PRESENT half (draw,
+                # imshow, waitKey, key routing) runs whether or not it
+                # succeeded, so even a failure that repeats every single frame
+                # still leaves a window that explains itself and answers `q`.
+                try:
+                    if self.pending_mode is not None:
+                        mode_id, self.pending_mode = self.pending_mode, None
+                        self._switch_mode(mode_id)
+                        mode = self.mode
 
-                ok, frame = self._source.read()
-                # Still input (DESIGN.md §2.2: modes never special-case stills
-                # — the shell substitutes the loaded still for the camera when
-                # an accepts_still mode's input cycle selects it)
-                use_still = (getattr(mode, "accepts_still", False)
-                             and getattr(ui, "input_idx", 0) == 1)
-                if use_still and self.still is None:
-                    ui.input_idx = 0        # snap back; v1 has no file dialog
-                    self.hud.toasts.hint("no still loaded - launch with --still PATH")
-                    use_still = False
-                if use_still:
-                    frame, camera_lost = self.still, False
-                elif not ok:
-                    # Camera loss: hold the last good frame and say so on the HUD
-                    # (DESIGN.md §6.4); recovery is automatic when reads resume.
-                    # Modes never see None (DESIGN.md §2.2).
-                    if last_frame is not None:
-                        frame, camera_lost = last_frame, True
+                    ok, frame = self._source.read()
+                    # Still input (DESIGN.md §2.2: modes never special-case
+                    # stills — the shell substitutes the loaded still for the
+                    # camera when an accepts_still mode's input cycle selects it)
+                    use_still = (getattr(mode, "accepts_still", False)
+                                 and getattr(ui, "input_idx", 0) == 1)
+                    if use_still and self.still is None:
+                        ui.input_idx = 0     # snap back; v1 has no file dialog
+                        self.hud.toasts.hint(
+                            "no still loaded - launch with --still PATH")
+                        use_still = False
+                    if use_still:
+                        frame, camera_lost = self.still, False
+                    elif not ok:
+                        # Camera loss: hold the last good frame and say so on the
+                        # HUD (DESIGN.md §6.4); recovery is automatic when reads
+                        # resume. Modes never see None (DESIGN.md §2.2).
+                        if last_frame is not None:
+                            frame, camera_lost = last_frame, True
+                        else:
+                            # No frame has EVER arrived (§6.4) — including the
+                            # camera that never opened at all: never a frozen,
+                            # unquittable window. Show an intentional black frame
+                            # with the human fix and keep pumping keys through the
+                            # normal path so q/quit works.
+                            if self.show:
+                                waiting = np.zeros((self.res[1], self.res[0], 3),
+                                                   np.uint8)
+                                self._draw_waiting_note(waiting)
+                                self.hud.draw(waiting, self.overlay,
+                                              blackout=self.ps.blackout)
+                                cv2.imshow(self.WIN, waiting)
+                                self._route_key(cv2.waitKey(1) & 0xFF)
+                                if self.ps.quit or ui.quit:
+                                    break
+                                if cv2.getWindowProperty(
+                                        self.WIN, cv2.WND_PROP_VISIBLE) < 0:
+                                    break
+                            if self.max_frames is not None:
+                                break
+                            continue
                     else:
-                        # No frame has EVER arrived (§6.4): never a frozen,
-                        # unquittable window — show an intentional black frame
-                        # with the human fix and keep pumping keys through the
-                        # normal path so q/quit works.
-                        if self.show:
-                            waiting = np.zeros((self.res[1], self.res[0], 3),
-                                               np.uint8)
-                            self._draw_waiting_note(waiting)
-                            self.hud.draw(waiting, self.overlay,
-                                          blackout=self.ps.blackout)
-                            cv2.imshow(self.WIN, waiting)
-                            self._route_key(cv2.waitKey(1) & 0xFF)
-                            if self.ps.quit or ui.quit:
-                                break
-                            if cv2.getWindowProperty(
-                                    self.WIN, cv2.WND_PROP_VISIBLE) < 0:
-                                break
-                        if self.max_frames is not None:
-                            break
-                        continue
+                        last_frame, camera_lost = frame, False
+                        # a camera that appeared late (CameraSource retries the
+                        # open) names itself only once it starts yielding
+                        self.cam_name = getattr(self._source, "name", self.cam_name)
+                    # perf: subsampled mean — a full-frame mean cost ~9 ms at 4K
+                    # for a black-streak heuristic that only needs a coarse level
+                    black_streak = (0 if use_still else
+                                    black_streak + 1
+                                    if float(frame[::16, ::16].mean()) < 3.0 else 0)
+
+                    self._pump_preset_mailboxes()
+                    self._sync_host_state()
+
+                    if self.mirror:
+                        frame = cv2.flip(frame, 1)
+
+                    now_t = time.monotonic()
+                    dt, last_t = now_t - last_t, now_t
+                    levels = (self.mic.levels()
+                              if self.mic is not None and self.mic.available
+                              else None)
+                    out = mode.step(frame, levels, dt)
+
+                    # SIGNAL rack post-FX (DESIGN.md §2.4). Applied here on
+                    # purpose: after the mode's render + video composite (so it
+                    # bends the whole picture), before the recorder (so captures
+                    # match what you see) and before ui.draw (so the panel never
+                    # gets glitched into unreadability). CircuitBent is documented
+                    # for BGR; `out` is RGB, which only swaps which channel drifts
+                    # left vs right — the offsets are independent symmetric draws,
+                    # so the look is identical. Constructed lazily so a session
+                    # that never enables it pays nothing.
+                    if ui.glitch:
+                        if self.cb is None:
+                            self.cb = CircuitBent(seed=self.seed)
+                        cb = self.cb
+                        cb.chroma_shift = ui.chroma
+                        cb.scan_drift = ui.drift
+                        cb.bit_crush = int(ui.crush)
+                        cb.scanlines = ui.scanlines
+                        # dither-quality controls (DESIGN.md §4.1: Bits
+                        # int-snapped 1-4, Gamma default ON, Bias auto/light/dark)
+                        cb.dither_bits = int(np.clip(round(ui.sig_bits), 1, 4))
+                        cb.dither_gamma = bool(ui.sig_gamma)
+                        cb.dither_invert = SIGNAL_BIAS_INVERT[
+                            SIGNAL_BIASES[int(ui.sig_bias_idx)
+                                          % len(SIGNAL_BIASES)]]
+                        # suppression rule (DESIGN.md §2.4): a mode that claims
+                        # "dither" owns dithering — the rack runs minus its dither
+                        claimed = frozenset(getattr(mode, "claims", ()))
+                        cb.dither_mode = (None if "dither" in claimed
+                                          or ui.dither_name == "off"
+                                          else ui.dither_name)
+                        out = cb.process(out)
+                    if self.ps.blackout:
+                        # Hard black AFTER mode render/composite/glitch, BEFORE
+                        # the recorder — blackout is part of the show and IS
+                        # recorded; the UI/HUD still draw on top per overlay state
+                        # (DESIGN.md §6.2).
+                        out[:] = 0
+                    if self.writer is not None:
+                        try:
+                            # the writer takes RGB `out` directly
+                            self.writer.append_data(out)
+                        except (KeyboardInterrupt, SystemExit):
+                            raise
+                        except Exception as e:       # noqa: BLE001 — §6.4
+                            # a failing recorder stops recording; it does not
+                            # stop the show, and it never takes the picture
+                            # down with it
+                            self._recorder_failed(e)
+                except (KeyboardInterrupt, SystemExit):
+                    raise                            # Ctrl-C still means stop
+                except Exception as e:               # noqa: BLE001 — §6.4
+                    # Hold the last good PICTURE. A broken frame freezes the
+                    # image and says so; it never blanks the projector and it
+                    # never drops the operator back to a shell prompt.
+                    self._frame_error(e)
+                    out = last_out
+                    if out is None:
+                        out = np.zeros((self.res[1], self.res[0], 3), np.uint8)
                 else:
-                    last_frame, camera_lost = frame, False
-                # perf: subsampled mean — a full-frame mean cost ~9 ms at 4K
-                # for a black-streak heuristic that only needs a coarse level
-                black_streak = (0 if use_still else
-                                black_streak + 1
-                                if float(frame[::16, ::16].mean()) < 3.0 else 0)
-
-                self._pump_preset_mailboxes()
-                self._sync_host_state()
-
-                if self.mirror:
-                    frame = cv2.flip(frame, 1)
-
-                now_t = time.monotonic()
-                dt, last_t = now_t - last_t, now_t
-                levels = (self.mic.levels()
-                          if self.mic is not None and self.mic.available else None)
-                out = mode.step(frame, levels, dt)
-
-                # SIGNAL rack post-FX (DESIGN.md §2.4). Applied here on purpose:
-                # after the mode's render + video composite (so it bends the whole
-                # picture), before the recorder (so captures match what you see)
-                # and before ui.draw (so the panel never gets glitched into
-                # unreadability). CircuitBent is documented for BGR; `out` is RGB,
-                # which only swaps which channel drifts left vs right — the offsets
-                # are independent symmetric draws, so the look is identical.
-                # Constructed lazily so a session that never enables it pays nothing.
-                if ui.glitch:
-                    if self.cb is None:
-                        self.cb = CircuitBent(seed=self.seed)
-                    cb = self.cb
-                    cb.chroma_shift = ui.chroma
-                    cb.scan_drift = ui.drift
-                    cb.bit_crush = int(ui.crush)
-                    cb.scanlines = ui.scanlines
-                    # dither-quality controls (DESIGN.md §4.1: Bits int-snapped
-                    # 1-4, Gamma default ON, Bias auto/light/dark)
-                    cb.dither_bits = int(np.clip(round(ui.sig_bits), 1, 4))
-                    cb.dither_gamma = bool(ui.sig_gamma)
-                    cb.dither_invert = SIGNAL_BIAS_INVERT[
-                        SIGNAL_BIASES[int(ui.sig_bias_idx) % len(SIGNAL_BIASES)]]
-                    # suppression rule (DESIGN.md §2.4): a mode that claims
-                    # "dither" owns dithering — the rack runs minus its dither
-                    claimed = frozenset(getattr(mode, "claims", ()))
-                    cb.dither_mode = (None if "dither" in claimed
-                                      or ui.dither_name == "off" else ui.dither_name)
-                    out = cb.process(out)
-                if self.ps.blackout:
-                    # Hard black AFTER mode render/composite/glitch, BEFORE the
-                    # recorder — blackout is part of the show and IS recorded; the
-                    # UI/HUD still draw on top per overlay state (DESIGN.md §6.2).
-                    out[:] = 0
-                if self.writer is not None:
-                    self.writer.append_data(out)   # the writer takes RGB `out` directly
+                    last_out = out
 
                 count += 1
                 if count % 10 == 0:
@@ -1041,39 +1247,16 @@ class Host:
                 self.fps = fps
 
                 if self.show:
-                    # HUD/panel/menu draw AFTER the recorder write above —
-                    # recordings never contain HUD, panel, or menu (the shipped
-                    # invariant, kept; the boot card is the one deliberate
-                    # recorded UI frame, DESIGN.md §3). The BGR conversion for
-                    # the window happens only here — a hidden window pays
-                    # nothing (perf: it was unconditional).
-                    bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
-                    rw, rh = self.res
-                    status = self._status_line()
-                    dbg = self.debug_line()
-                    if self.menu.open:
-                        # home menu (DESIGN.md §3): live camera through 1-bit
-                        # blue noise + 65% scrim + mode cards; the running mode
-                        # keeps stepping untouched behind it
-                        ui._hot = []
-                        self.menu.rects = draw_menu(bgr, frame, self.menu.cards,
-                                                    self.menu.sel)
-                        # HIDDEN-state HUD = toasts + blackout tick only
-                        self.hud.draw(bgr, OverlayState.HIDDEN,
-                                      blackout=self.ps.blackout)
-                    else:
-                        if self.panel and self.overlay is OverlayState.PANEL:
-                            ui.draw(bgr, {"status": ""})
-                        else:
-                            ui._hot = []   # panel hidden: stale hit-rects must not eat clicks
-                        self.hud.draw(bgr, self.overlay, status=status,
-                                      debug_status=dbg,
-                                      recording=(self.writer is not None),
-                                      blackout=self.ps.blackout,
-                                      camera_lost=(camera_lost or black_streak > 15))
-                    if self.ps.help_open:
-                        # help carries the active mode's accent (§5 one-accent)
-                        draw_help(bgr, self.help_rows, accent=mode.accent)
+                    try:
+                        bgr = self._compose_frame(
+                            out, frame,
+                            camera_lost=(camera_lost or black_streak > 15))
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except Exception as e:           # noqa: BLE001 — §6.4
+                        self._frame_error(e)
+                        bgr = np.zeros((self.res[1], self.res[0], 3), np.uint8)
+                        self.hud.toasts.draw(bgr)    # keep the explanation visible
                     cv2.imshow(self.WIN, bgr)
                     key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
                     # menu → rename box → perform layer (see _route_key)

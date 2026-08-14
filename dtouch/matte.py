@@ -25,6 +25,8 @@ import urllib.request
 import cv2
 import numpy as np
 
+from .hud import AMBER
+
 _MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
               "selfie_segmenter/float16/latest/selfie_segmenter.tflite")
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "assets", "selfie_segmenter.tflite")
@@ -132,8 +134,56 @@ def ensure_person_model(path: str = _MODEL_PATH):
     return path
 
 
+KINDS = {
+    "auto": AutoMatte, "saliency": SaliencyMatte, "motion": MotionMatte,
+    "edges": EdgeMatte, "luma": LumaMatte, "person": PersonMatte,
+}
+
+# Plain-language fixes for the optional mattes (DESIGN.md §6.4: a human
+# summary, never a traceback). Only `person` has a dependency beyond cv2.
+UNAVAILABLE_HINT = {
+    "person": "person matte needs the [person] extra",
+}
+
+
+class MatteUnavailable(RuntimeError):
+    """An optional matte cannot be built here — its dependency is missing, or
+    its model could not be fetched. Distinct from a bad `kind` (KeyError):
+    this one is an install/network fact about the machine, so it is a thing to
+    say out loud and step back from, not a bug (DESIGN.md §6.4)."""
+
+
 def make_matte(kind: str = "auto"):
-    return {
-        "auto": AutoMatte, "saliency": SaliencyMatte, "motion": MotionMatte,
-        "edges": EdgeMatte, "luma": LumaMatte, "person": PersonMatte,
-    }[kind]()
+    """Build a matte operator. Raises MatteUnavailable when the optional
+    dependency is missing or its model cannot be fetched — a `person` matte on
+    a start.command install with no mediapipe used to raise ModuleNotFoundError
+    straight out of a mode's step() and end the show with a traceback."""
+    factory = KINDS[kind]                       # unknown kind stays a KeyError
+    try:
+        return factory()
+    except (ImportError, OSError) as e:         # missing extra / model fetch
+        raise MatteUnavailable(
+            UNAVAILABLE_HINT.get(kind, f"{kind} matte is not available here")
+        ) from e
+
+
+def select_matte(ui, attr, options, current, toasts=None):
+    """Switch the matte cycle at ``ui.<attr>`` to its selected option.
+
+    A matte that cannot be built here is not an error the operator can act on
+    mid-performance, so it is not allowed to reach the frame loop: the cycle
+    REVERTS to `current`, the plain-language fix is toasted in amber, and the
+    caller keeps the operator it already had. Returns (operator, kind) with
+    operator None when the build was refused — the shipped `portrait` and
+    `sigil` templates both select `person`, so this is one click away on any
+    install without the [person] extra."""
+    kind = options[int(getattr(ui, attr, 0)) % len(options)]
+    try:
+        return make_matte(kind), kind
+    except MatteUnavailable as e:
+        if current in options:
+            setattr(ui, attr, options.index(current))
+        if toasts is not None:
+            toasts.flash(str(e), AMBER)
+        print("matte unavailable:", e)
+        return None, current

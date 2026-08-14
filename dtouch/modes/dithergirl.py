@@ -25,7 +25,7 @@ from ..dither import (bayer_dither, blue_noise_dither, floyd_steinberg,
                       riemersma_dither)
 from ..hud import AMBER, put_outlined, text_size, u as _u
 from ..imgui import DIM
-from ..matte import make_matte
+from ..matte import select_matte
 from ..overlay_ui import RES_OPTIONS
 from ..panelspec import Cycle, PresetList, Readout, Section, Slider, Toggle
 from .particles import MATTE_H, MATTE_W, MATTES
@@ -375,8 +375,15 @@ class DitherGirlMode:
             # matte gate: dither the matted subject only; elsewhere the raw
             # camera picture, or black (the 'Matte bg black' toggle)
             if self._mat_kind != matte_kind:
-                self.mat = make_matte(matte_kind)
-                self._mat_kind = matte_kind
+                # a matte whose optional dependency is missing reverts the
+                # cycle + toasts instead of raising out of step() (§6.4);
+                # this frame simply renders un-matted
+                mat, self._mat_kind = select_matte(
+                    self.host.ui, "dg_matte_idx", MATTES_DG,
+                    self._mat_kind or "off", self.host.hud.toasts)
+                if mat is None:
+                    return out
+                self.mat = mat
             m = self.mat.compute(cv2.resize(frame_bgr, (MATTE_W, MATTE_H)))
             m = np.clip(cv2.resize(m, (rw, rh)), 0.0, 1.0).astype(np.float32)
             if self._ui("dg_matte_black", False):

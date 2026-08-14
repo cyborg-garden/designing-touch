@@ -17,8 +17,9 @@ import cv2
 import numpy as np
 
 from ..glow import GlowRenderer
+from ..hud import AMBER
 from ..imgui import ACC
-from ..matte import make_matte
+from ..matte import MatteUnavailable, make_matte, select_matte
 from ..overlay_ui import build_particles_sections
 from ..particles import ParticleFlow, PALETTES
 from .. import presets as _presets
@@ -95,7 +96,15 @@ class ParticlesMode:
         self.host = host
         gw, gh = self.grid
         rw, rh = host.res
-        self.mat = make_matte(self.matte_kind)
+        try:
+            self.mat = make_matte(self.matte_kind)
+        except MatteUnavailable as e:
+            # `--matte person` on an install without the extra: say so and
+            # boot on the default matte, rather than failing the whole mode
+            # (DESIGN.md §6.4 — the show still has to start).
+            host.hud.toasts.flash(str(e), AMBER)
+            self.matte_kind = "auto"
+            self.mat = make_matte(self.matte_kind)
         self.pf = ParticleFlow(n=self.n, gw=gw, gh=gh, seed=self.seed)
         self.glow = GlowRenderer(rw, rh, self.n, fade=0.90, exposure=1.4)
 
@@ -163,8 +172,13 @@ class ParticlesMode:
 
         if ui is not None:
             if ui.matte_name != self.matte_kind:
-                self.matte_kind = ui.matte_name
-                self.mat = make_matte(self.matte_kind)
+                # a matte whose optional dependency is missing reverts the
+                # cycle + toasts instead of raising out of step() (§6.4)
+                mat, self.matte_kind = select_matte(
+                    ui, "matte_idx", ui.mattes, self.matte_kind,
+                    self.host.hud.toasts)
+                if mat is not None:
+                    self.mat = mat
             pf.palette = ui.palette_name
             pf.curl_amp = ui.curl
             pf.base_size = ui.dot
