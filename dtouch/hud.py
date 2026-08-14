@@ -90,6 +90,30 @@ def text_size(text, px):
     return tw, th, base
 
 
+def fit_px(text, px, max_w, min_px=6):
+    """The largest type size at or below `px` whose rendered width fits
+    `max_w` (DESIGN.md §5: nothing crosses the title-safe inset).
+
+    The u-unit scales type with the FRAME, not with the string, so a long
+    line at a fixed size overflows every resolution equally: the containment
+    flash is 1435 px wide in a 1280 px frame at 720p, 2152 in 1920, 4303 in
+    3840 — clipped at both ends, rendering as 'mething went wrong - show
+    continu'. That is the one message the whole containment mechanism exists
+    to show, so it shrinks to fit rather than being cropped to nonsense.
+
+    Hershey advance is not linear in the size (integer scale and thickness),
+    so the proportional guess is corrected downward until it really fits."""
+    if px <= min_px or max_w <= 0:
+        return max(px, min_px)
+    tw, _, _ = text_size(text, px)
+    if tw <= max_w or tw <= 0:
+        return px
+    px = max(min_px, int(px * max_w / tw))
+    while px > min_px and text_size(text, px)[0] > max_w:
+        px -= 1
+    return px
+
+
 def blend_outlined(img, text, org, px, color, alpha):
     """Outlined text at partial opacity, blended over a small ROI only (budget)."""
     if alpha <= 0.0:
@@ -187,22 +211,27 @@ class Toasts:
         now = self._now()
         h, w = img.shape[:2]
         uu = u(h)
+        # every toast fits inside the title-safe box, whatever it says: these
+        # carry exception text and file paths, and a clipped explanation of a
+        # failure is not an explanation (DESIGN.md §5, §6.4)
+        safe_w = max(1, w - 2 * int(w * TITLE_SAFE))
         if self._center is not None:
             a = self._center.alpha(now)
             if a <= 0:
                 self._center = None
             else:
-                px = int(3.0 * uu)
+                px = fit_px(self._center.text, int(3.0 * uu), safe_w)
                 tw, _, _ = text_size(self._center.text, px)
                 blend_outlined(img, self._center.text, ((w - tw) // 2, (h + px) // 2),
                                px, self._center.color, a)
         self._hints = [t for t in self._hints if t.alpha(now) > 0]
-        px = int(0.75 * uu)
+        base_px = int(0.75 * uu)
         y = h - int(h * TITLE_SAFE)
         for t in reversed(self._hints):
+            px = fit_px(t.text, base_px, safe_w)
             tw, _, _ = text_size(t.text, px)
             blend_outlined(img, t.text, ((w - tw) // 2, y), px, t.color, t.alpha(now))
-            y -= int(1.5 * px)
+            y -= int(1.5 * base_px)
 
 
 class Osd:

@@ -117,6 +117,64 @@ def test_hints_stack_and_cap_at_three():
     assert not np.array_equal(img, _frame())
 
 
+# ---------- a toast that does not fit is not a message ----------
+# The u-unit scales type with the FRAME, not with the string, so a long line
+# at a fixed size overflows every resolution equally. The containment flash
+# measured 1435 px in a 1280 px frame at 720p, 2152 in 1920 and 4303 in 3840 —
+# clipped at both ends, rendering as "mething went wrong - show continu". It is
+# the one message the whole containment mechanism exists to show.
+
+CONTAINMENT_FLASH = "something went wrong - show continues"
+SIZES = [(1280, 720), (1920, 1080), (3840, 2160)]
+
+
+def _drawn(monkeypatch, toasts, w, h):
+    """Every (text, org, px) blend_outlined lays down for one draw()."""
+    calls = []
+    real = H.blend_outlined
+    monkeypatch.setattr(
+        H, "blend_outlined",
+        lambda img, text, org, px, color, alpha:
+            calls.append((text, org, px)) or real(img, text, org, px, color, alpha))
+    toasts.draw(_frame(w, h))
+    return calls
+
+
+@pytest.mark.parametrize("w,h", SIZES)
+def test_a_flash_always_fits_inside_the_title_safe_box(monkeypatch, w, h):
+    t = Toasts(Clock())
+    t.flash(CONTAINMENT_FLASH)
+    (text, org, px), = _drawn(monkeypatch, t, w, h)
+
+    inset = int(w * H.TITLE_SAFE)
+    tw, _, _ = H.text_size(text, px)
+    assert org[0] >= inset, f"{w}x{h}: clipped at the left"
+    assert org[0] + tw <= w - inset, f"{w}x{h}: {tw}px of text in a {w}px frame"
+
+
+@pytest.mark.parametrize("w,h", SIZES)
+def test_a_hint_carrying_exception_text_also_fits(monkeypatch, w, h):
+    """Hints carry `str(e)[:80]` and file paths — a clipped explanation of a
+    failure is not an explanation."""
+    t = Toasts(Clock())
+    t.hint("ModuleNotFoundError: No module named 'mediapipe' - "
+           "reinstall with the [person] extra")
+    (text, org, px), = _drawn(monkeypatch, t, w, h)
+
+    inset = int(w * H.TITLE_SAFE)
+    tw, _, _ = H.text_size(text, px)
+    assert org[0] >= inset and org[0] + tw <= w - inset
+
+
+def test_a_short_flash_keeps_its_full_3u_size(monkeypatch):
+    """Shrink-to-fit only shrinks what does not fit: a mode name is still the
+    3.0u type the design specifies (DESIGN.md §5 type table)."""
+    t = Toasts(Clock())
+    t.flash("EMBERS")
+    (_, _, px), = _drawn(monkeypatch, t, 1920, 1080)
+    assert px == int(3.0 * u(1080))
+
+
 # ---------- HIDDEN is provably clean ----------
 
 def test_hidden_draws_nothing_after_toasts_expire():
