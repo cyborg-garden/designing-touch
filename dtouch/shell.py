@@ -934,8 +934,11 @@ class Host:
                         continue
                 else:
                     last_frame, camera_lost = frame, False
+                # perf: subsampled mean — a full-frame mean cost ~9 ms at 4K
+                # for a black-streak heuristic that only needs a coarse level
                 black_streak = (0 if use_still else
-                                black_streak + 1 if float(frame.mean()) < 3.0 else 0)
+                                black_streak + 1
+                                if float(frame[::16, ::16].mean()) < 3.0 else 0)
 
                 self._pump_preset_mailboxes()
                 self._sync_host_state()
@@ -983,8 +986,7 @@ class Host:
                     # UI/HUD still draw on top per overlay state (DESIGN.md §6.2).
                     out[:] = 0
                 if self.writer is not None:
-                    self.writer.append_data(out)
-                bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+                    self.writer.append_data(out)   # the writer takes RGB `out` directly
 
                 count += 1
                 if count % 10 == 0:
@@ -995,7 +997,10 @@ class Host:
                     # HUD/panel/menu draw AFTER the recorder write above —
                     # recordings never contain HUD, panel, or menu (the shipped
                     # invariant, kept; the boot card is the one deliberate
-                    # recorded UI frame, DESIGN.md §3).
+                    # recorded UI frame, DESIGN.md §3). The BGR conversion for
+                    # the window happens only here — a hidden window pays
+                    # nothing (perf: it was unconditional).
+                    bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
                     rw, rh = self.res
                     status = self._status_line()
                     dbg = self.debug_line()

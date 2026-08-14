@@ -169,13 +169,19 @@ def draw_menu(img, cam_bgr, cards, sel):
     h, w = img.shape[:2]
     uu = u(h)
 
-    # background: the live camera through the newest feature (1-bit blue noise)
+    # background: the live camera through the newest feature (1-bit blue
+    # noise). Perf: dithered at HALF res then NEAREST-upscaled — the doubled
+    # dither cells read as deliberate texture, and the full-res version cost
+    # ~38 ms/frame at 4K for a dimmed backdrop.
     if cam_bgr is not None:
-        cam = cam_bgr if cam_bgr.shape[:2] == (h, w) else cv2.resize(cam_bgr, (w, h))
+        hw, hh = max(1, w // 2), max(1, h // 2)
+        cam = cv2.resize(cam_bgr, (hw, hh))
         gray = cv2.cvtColor(cam, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         lit = blue_noise_dither(gray, bits=1)
         shade = np.uint8(round(255 * (1.0 - MENU_SCRIM)))   # dimmed under the scrim
-        img[:] = (lit * float(shade)).astype(np.uint8)[:, :, None]
+        small = (lit * float(shade)).astype(np.uint8)
+        img[:] = cv2.resize(small, (w, h),
+                            interpolation=cv2.INTER_NEAREST)[:, :, None]
     else:
         img[:] = 0
 

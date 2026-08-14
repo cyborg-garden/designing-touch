@@ -23,6 +23,7 @@ frame instead of shrinking to a tiny fixed pixel box (issue #3).
 from __future__ import annotations
 
 import cv2
+import numpy as np
 
 from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
@@ -240,6 +241,7 @@ class OverlayUI:
         self._drag = None
         self._flash = 0          # frames of click feedback left
         self._flash_key = None   # (kind, payload-identity) — re-located each draw
+        self._scrim = None       # cached PANEL-colored blend buffer (perf)
         # per-mode accent (DESIGN.md §5): exactly one accent on screen, owned by
         # the active mode. Default ACC green = the shipped Particles chrome, so
         # a bare OverlayUI (goldens, tests) renders identical pixels.
@@ -364,9 +366,18 @@ class OverlayUI:
             return frame
 
         px = w - pw
-        ov = frame.copy()
-        cv2.rectangle(ov, (px, 0), (w, h), PANEL, -1)
-        cv2.addWeighted(ov, 0.86, frame, 0.14, 0, frame)
+        # panel scrim restricted to the panel ROI (perf: the full-frame
+        # copy+addWeighted was an identity op outside the panel — pixels
+        # elsewhere are untouched, so the result is unchanged). The blend
+        # runs on a contiguous copy of the ROI (cv2 on a column-sliced view
+        # is slower than copying), against a cached PANEL-colored buffer.
+        sx = max(px, 0)                # a frame narrower than the panel clamps
+        roi = np.ascontiguousarray(frame[:, sx:])
+        if self._scrim is None or self._scrim.shape != roi.shape:
+            self._scrim = np.empty_like(roi)
+            self._scrim[:] = PANEL
+        cv2.addWeighted(self._scrim, 0.86, roi, 0.14, 0, dst=roi)
+        frame[:, sx:] = roi
         # the column can be taller than the window (e.g. 720p) — scroll, clamped so it's
         # a no-op when everything fits. content height comes from the previous draw.
         self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
