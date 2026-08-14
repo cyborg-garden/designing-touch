@@ -42,6 +42,8 @@ from . import presets as _presets
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
 ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
 ERR_TOAST_MAX = 3      # ...and at most this many DISTINCT errors per window
+ERR_PRINT_MAX = 20     # ...and at most this many stdout lines per window
+ERR_SEEN_MAX = 64      # ...and the remembered-key map never grows past this
 PANEL_OPEN = "panel.open"   # the HUD chevron and TAB reach the same named command
 
 # A produce half that fails every frame must idle, not spin. Containment
@@ -384,8 +386,12 @@ class Host:
     def __init__(self, mode, source=None, device="builtin", res=(1920, 1080),
                  mirror=True, seed=1, preset="abstract", audio=False,
                  panel=True, show=True, max_frames=None, still=None,
-                 presets_path="presets.json", state_path="state.json"):
+                 presets_path="presets.json", state_path="state.json",
+                 now=time.monotonic):
         self.mode = None
+        # injectable clock, same pattern as PerformState: the error rate limit
+        # is a TIME window, and a window nothing can advance is untestable
+        self._now = now
         self._boot_mode = mode
         self._source = source
         self._device = device
@@ -419,10 +425,10 @@ class Host:
         self.all_presets = {}
         self.cam_name = "?"
         self.fps = 0.0
-        self._err_key = None      # (type, message) of the last frame error…
-        self._err_at = 0.0        # …and when it was last toasted (rate limit)
         self._err_seen = {}       # every (type, message) seen inside the window
         self._err_flood = False   # ...more distinct errors than fit in a window
+        self._err_prints = 0      # stdout lines spent on errors this window…
+        self._err_print_t0 = None  # …and when that window opened
         self._frame_ok = True     # did THIS frame's produce half succeed?
 
     # ----- mode lifecycle (DESIGN.md §2.1) -----
@@ -1051,36 +1057,64 @@ class Host:
         the rest went. Errors that vary their text every frame (a coordinate,
         a timestamp) are floods too — the cap catches those as well.
 
+        The window only slides if the entries are allowed to age. Re-stamping
+        the key on every arrival — including the suppressed ones — refreshed
+        it 30 times a second, so the 5 s prune could never drop it and the
+        limit latched forever: a permanently broken show (mode.step raising
+        ModuleNotFoundError, one click on `portrait` with no mediapipe) said
+        so ONCE, three seconds in, and was then silent for the rest of the
+        night behind a black projector and a perfectly normal status line.
+        The stamp now happens only on the arrival that is actually reported.
+
         `internal=True` marks an error raised by our OWN present half. When
         the produce half already failed this frame, that error is a symptom of
         the failure being reported and must never REPLACE it: the operator was
         reading `UnboundLocalError: frame` — our bug — instead of the camera
         error that caused it, forever, with no way to reach the real one."""
         key = (type(e).__name__, str(e)[:80])
-        now = time.monotonic()
+        now = self._now()
         # drop keys that aged out, so the window slides instead of latching
         self._err_seen = {k: t for k, t in self._err_seen.items()
                           if now - t < ERR_TOAST_S}
-        seen = key in self._err_seen
-        # record even when suppressed below: an error that keeps arriving must
-        # not re-print every frame either
-        self._err_seen[key] = now
-        if seen:
+        if key in self._err_seen:
             return
+        if len(self._err_seen) < ERR_SEEN_MAX:
+            # bounded: a flood of never-repeating text (a frame number, a
+            # coordinate) grew this map one entry per frame — 300 entries,
+            # rebuilt by the comprehension above on every single call. Past
+            # the bound the map stops growing; it is already far past
+            # ERR_TOAST_MAX, so the flood branch stays engaged either way.
+            self._err_seen[key] = now
         if internal and not self._frame_ok:
-            print("frame error (while reporting one):", type(e).__name__, e)
+            self._err_print("frame error (while reporting one):", e, now)
             return
         if len(self._err_seen) > ERR_TOAST_MAX:
             if not self._err_flood:
                 self._err_flood = True
                 self.hud.toasts.hint("more errors - see the terminal", AMBER)
-            print("frame error:", type(e).__name__, e)
+            self._err_print("frame error:", e, now)
             return
         self._err_flood = False
-        self._err_key, self._err_at = key, now
         self.hud.toasts.flash("something went wrong - show continues", AMBER)
         self.hud.toasts.hint(f"{type(e).__name__}: {str(e)[:70]}", AMBER)
-        print("frame error:", type(e).__name__, e)
+        self._err_print("frame error:", e, now)
+
+    def _err_print(self, prefix, e, now):
+        """One bounded stdout line for a frame error.
+
+        The toast cap points the operator AT the terminal, so the terminal is
+        the fuller record — but it was not bounded at all: 300 varying-text
+        errors printed 300 lines while the toasts correctly capped at 3, which
+        just moves the flood to the place the hint sends you. Same window,
+        higher ceiling, and one line saying the rest were dropped."""
+        if self._err_print_t0 is None or now - self._err_print_t0 >= ERR_TOAST_S:
+            self._err_print_t0, self._err_prints = now, 0
+        self._err_prints += 1
+        if self._err_prints <= ERR_PRINT_MAX:
+            print(prefix, type(e).__name__, e)
+        elif self._err_prints == ERR_PRINT_MAX + 1:
+            print(f"frame errors: more than {ERR_PRINT_MAX} in "
+                  f"{ERR_TOAST_S:g}s - further ones suppressed")
 
     def _frame_failed(self, streak, err=None):
         """The produce half of one frame failed (raised, or never produced a

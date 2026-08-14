@@ -673,7 +673,12 @@ def test_a_frame_error_on_the_very_first_frame_is_survivable(tmp_path):
 
 def test_repeating_frame_error_does_not_spam_the_toasts(tmp_path):
     """A per-frame exception at 60 fps would refill the toast stack sixty
-    times a second and bury the status line under its own error."""
+    times a second and bury the status line under its own error.
+
+    This covers ONE window only (40 frames land inside ERR_TOAST_S however
+    fast the loop runs) — the other half of the contract, that the same error
+    re-toasts once the window passes, is
+    test_a_permanently_broken_show_keeps_saying_so."""
     host = _host(tmp_path, mode=BoomMode(fail_from=1), max_frames=40)
     flashes = []
     host.hud.toasts.flash = lambda text, color=None: flashes.append(text)
@@ -681,15 +686,41 @@ def test_repeating_frame_error_does_not_spam_the_toasts(tmp_path):
     assert flashes.count("something went wrong - show continues") == 1
 
 
+def test_a_permanently_broken_show_keeps_saying_so(tmp_path):
+    """The rate limit is a sliding WINDOW, and the entry has to be allowed to
+    age out of it. Re-stamping the key on every arrival — suppressed ones
+    included — refreshed it 30 times a second, so the 5 s prune never dropped
+    it: a show broken for good (mode.step raising ModuleNotFoundError after
+    one click on `portrait` with no mediapipe) toasted once, three seconds in,
+    then went silent for the rest of the night while the projector stayed
+    black and the status line read completely normally.
+
+    16 s at 30 fps of the identical error: 1 flash before, ~4 after."""
+    clock = [0.0]
+    host = _host(tmp_path, max_frames=1, now=lambda: clock[0])
+    at = []
+    host.hud.toasts.flash = lambda text, color=None: at.append(clock[0])
+    for _ in range(16 * 30):
+        host._frame_error(ModuleNotFoundError("No module named 'mediapipe'"))
+        clock[0] += 1.0 / 30.0
+
+    assert len(at) >= 4, "a permanently broken show went silent"
+    gaps = [b - a for a, b in zip(at, at[1:])]
+    assert all(g >= shell_mod.ERR_TOAST_S - 1e-6 for g in gaps), \
+        "re-toasting faster than the window is spam"
+    assert all(g < shell_mod.ERR_TOAST_S + 0.2 for g in gaps), \
+        "the window is meant to be ERR_TOAST_S, not longer"
+
+
 def test_a_different_frame_error_toasts_immediately(tmp_path):
     """Rate-limiting is per (type, message) — a NEW failure is news."""
     host = _host(tmp_path, max_frames=1)
-    host.hud.toasts.flash = lambda *a, **k: None
+    flashes = []
+    host.hud.toasts.flash = lambda text, color=None: flashes.append(text)
     host._frame_error(ValueError("first"))
-    first = host._err_at
     host._frame_error(TypeError("second"))
-    assert host._err_at != first
-    assert host._err_key == ("TypeError", "second")
+    assert len(flashes) == 2
+    assert any("TypeError: second" in t for t in _hints(host))
 
 
 def test_two_alternating_errors_cannot_defeat_the_rate_limit(tmp_path):
@@ -719,6 +750,23 @@ def test_errors_that_vary_their_text_are_a_flood_too(tmp_path):
     assert any("more errors" in t for t in _hints(host))
 
 
+def test_a_flood_is_bounded_on_stdout_and_in_memory_too(tmp_path, capsys):
+    """The cap bounded the TOASTS and nothing else: 300 varying-text errors
+    printed 300 stdout lines — the flood simply moved to the terminal the
+    hint points at — while `_err_seen` grew to 300 entries that the sliding
+    window rebuilt by comprehension on every single call."""
+    host = _host(tmp_path, max_frames=1)
+    host.hud.toasts.flash = lambda *a, **k: None
+    capsys.readouterr()
+    for i in range(300):
+        host._frame_error(ValueError("bad pixel at %d" % i))
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+
+    assert len(lines) <= shell_mod.ERR_PRINT_MAX + 1, "stdout was not bounded"
+    assert any("suppressed" in l for l in lines), "silence is not an answer"
+    assert len(host._err_seen) <= shell_mod.ERR_SEEN_MAX
+
+
 def test_an_error_from_our_own_reporting_never_hides_the_real_cause(tmp_path):
     """The present half is OUR code. When it fails while reporting a produce
     failure, the operator was left reading our bug ('UnboundLocalError: frame')
@@ -727,8 +775,7 @@ def test_an_error_from_our_own_reporting_never_hides_the_real_cause(tmp_path):
     host._frame_ok = False                           # produce failed this frame
     host._frame_error(OSError(5, "Input/output error"))
     host._frame_error(UnboundLocalError("frame"), internal=True)
-    assert host._err_key[0] == "OSError"             # the cause still stands
-    assert any("OSError" in t for t in _hints(host))
+    assert any("OSError" in t for t in _hints(host))  # the cause still stands
     assert not any("UnboundLocalError" in t for t in _hints(host))
 
 
@@ -826,7 +873,8 @@ def test_a_first_read_that_raises_shows_the_real_cause(tmp_path, monkeypatch):
     host._draw_waiting_note = lambda img: cards.append(1) or real(img)
     host.run()
 
-    assert host._err_key[0] == "OSError"          # the real cause, and only it
+    # the real cause, and only it
+    assert any(k[0] == "OSError" for k in host._err_seen)
     assert any("OSError" in t for t in _hints(host))
     # the present half never raised at all — not raised-and-swallowed
     assert not any(k[0] == "UnboundLocalError" for k in host._err_seen)
