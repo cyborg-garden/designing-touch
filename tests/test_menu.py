@@ -175,6 +175,39 @@ def test_draw_menu_survives_no_camera_frame():
 
 # ---------- boot card ----------
 
+def test_card_titles_render_in_caps(monkeypatch):
+    """DESIGN.md §3: the real mode cards render their titles in CAPS."""
+    import dtouch.menu as M
+    texts = []
+    real = M.put_outlined
+
+    def spy(img, text, *a, **k):
+        texts.append(text)
+        return real(img, text, *a, **k)
+    monkeypatch.setattr(M, "put_outlined", spy)
+    draw_menu(np.zeros((360, 640, 3), np.uint8), None, registry_cards(), 0)
+    assert "PARTICLES" in texts and "DITHER GIRL" in texts
+    assert "Particles" not in texts and "Dither Girl" not in texts
+
+
+def test_reserved_card_border_is_dashed():
+    """DESIGN.md §3 sketch: the FLOCKING card's frame is dashed (and dimmed);
+    real cards keep a solid border."""
+    img = np.zeros((360, 640, 3), np.uint8)
+    rects = draw_menu(img, None, registry_cards(), 0)
+    solid = next(r for r, c in rects if c.enabled and c.id == "dithergirl")
+    dashed = next(r for r, c in rects if not c.enabled)
+
+    def runs(rect):
+        x0, y0, x1, _ = rect
+        row = img[y0, x0:x1 + 1].any(axis=1)
+        return row
+
+    assert runs(solid).all(), "enabled card top border must be continuous"
+    d = runs(dashed)
+    assert d.any() and not d.all(), "reserved card top border must have gaps"
+
+
 def test_boot_card_is_black_with_the_modes_accent():
     accent = (245, 140, 245)
     card = render_boot_card((640, 360), "Dither Girl", accent)

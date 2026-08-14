@@ -146,6 +146,22 @@ class Menu:
         return None
 
 
+def _dashed_rect(img, x0, y0, x1, y1, color, thickness=1, dash=8, gap=6):
+    """Dashed rectangle border (short segments) — the reserved 'coming soon'
+    card's frame (DESIGN.md §3 sketch: it is drawn as not-yet-solid)."""
+    step = dash + gap
+
+    def _seg(pa, pb):
+        cv2.line(img, pa, pb, color, thickness, cv2.LINE_AA)
+
+    for x in range(x0, x1, step):
+        _seg((x, y0), (min(x + dash, x1), y0))
+        _seg((x, y1), (min(x + dash, x1), y1))
+    for y in range(y0, y1, step):
+        _seg((x0, y), (x0, min(y + dash, y1)))
+        _seg((x1, y), (x1, min(y + dash, y1)))
+
+
 def draw_menu(img, cam_bgr, cards, sel):
     """Render the menu over `img` (BGR, in place): 1-bit blue-noise-dithered
     live camera under a 65% scrim, 'dtouch' top-left, a centered row of mode
@@ -179,13 +195,19 @@ def draw_menu(img, cam_bgr, cards, sel):
         rect = (x, y0, x + cw, y0 + ch)
         color = c.accent if c.enabled else DIM
         selected = i == sel
-        cv2.rectangle(img, (x, y0), (x + cw, y0 + ch), color,
-                      max(2, int(0.2 * uu)) if selected else 1, cv2.LINE_AA)
-        # title (centered), blurb, key hint — every state redundantly coded
-        # (color + the selection border + the [key] hint)
+        if c.enabled:
+            cv2.rectangle(img, (x, y0), (x + cw, y0 + ch), color,
+                          max(2, int(0.2 * uu)) if selected else 1, cv2.LINE_AA)
+        else:
+            # reserved card (DESIGN.md §3): dashed border, stays dimmed
+            _dashed_rect(img, x, y0, x + cw, y0 + ch, color,
+                         dash=max(4, int(0.4 * uu)), gap=max(3, int(0.3 * uu)))
+        # title (CAPS per the §3 sketch, centered), blurb, key hint — every
+        # state redundantly coded (color + the selection border + [key] hint)
+        title = c.title.upper()
         tp = int(1.0 * uu)
-        tw = text_size(c.title, tp)[0]
-        put_outlined(img, c.title, (x + (cw - tw) // 2, y0 + int(2.2 * uu)), tp,
+        tw = text_size(title, tp)[0]
+        put_outlined(img, title, (x + (cw - tw) // 2, y0 + int(2.2 * uu)), tp,
                      color if (selected or not c.enabled) else INK)
         bp = int(0.62 * uu)
         for j, line in enumerate(c.blurb.split("\n")):

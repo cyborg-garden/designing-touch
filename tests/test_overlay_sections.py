@@ -35,6 +35,59 @@ def _hit(ui, key, w=1920, h=1080):
     ui.on_mouse(cv2.EVENT_LBUTTONDOWN, cx, cy, 0)
 
 
+def test_global_rows_match_the_41_sketch():
+    """DESIGN.md §4.1: Sound react (A) - Sens - Record (R) - Mirror -
+    Menu (M) - Quit. The Menu row is an Action posting menu.open."""
+    from dtouch.overlay_ui import build_global_rows
+    from dtouch.panelspec import Action
+    rows = build_global_rows()
+    labels = [getattr(r, "label", None) for r in rows]
+    assert labels == ["Sound react (A)", "Sens", "Record (R)", "Mirror",
+                      "Menu (M)", "Quit"]
+    rec = rows[2]
+    assert rec.label_fn(False) == "Record (R)"
+    assert rec.label_fn(True) == "Stop recording (R)"
+    menu = rows[4]
+    assert isinstance(menu, Action) and menu.command == "menu.open"
+
+
+def test_section_key_hints_declared_and_drawn_right_aligned():
+    """DESIGN.md §4.1: MOTION (F), SIGNAL (G) — DIM, right-aligned in the
+    header."""
+    from dtouch import imgui
+    from dtouch.overlay_ui import (build_particles_sections,
+                                   build_signal_section)
+    secs = build_particles_sections(list(PALETTES), MATTES)
+    motion = next(s for s in secs if s.title == "MOTION")
+    assert motion.key_hint == "F"
+    assert build_signal_section().key_hint == "G"
+
+    a = np.zeros((100, 400, 3), np.uint8)
+    b = np.zeros((100, 400, 3), np.uint8)
+    ga = imgui.Gui(); ga.begin(1.0, (-1, -1))
+    ga.section(a, "MOTION", True, 10, 20, 300)
+    gb = imgui.Gui(); gb.begin(1.0, (-1, -1))
+    gb.section(b, "MOTION", True, 10, 20, 300, key_hint="F")
+    diff = (a != b).any(axis=2)
+    assert diff.any(), "the key hint must draw"
+    ys, xs = np.where(diff)
+    assert xs.min() > 10 + 150, "the key hint must be right-aligned"
+
+
+def test_particles_status_marks_matte_and_color():
+    """DESIGN.md §2.3: the status line derives from status-marked widgets —
+    Particles marks its matte and color cycles."""
+    from dtouch.overlay_ui import build_particles_sections
+    from dtouch.panelspec import Cycle
+    secs = build_particles_sections(list(PALETTES), MATTES)
+    by = {s.title: s.widgets for s in secs}
+    matte = next(w for w in by["SOURCE"] if isinstance(w, Cycle)
+                 and w.attr == "matte_idx")
+    color = next(w for w in by["LOOK"] if isinstance(w, Cycle))
+    assert matte.status == "matte {}"
+    assert color.status == "{}"
+
+
 def test_new_sections_start_closed_so_the_panel_still_fits_1080p():
     ui = _ui()
     assert ui.sections["MOTION"] is False

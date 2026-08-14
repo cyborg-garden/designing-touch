@@ -85,7 +85,8 @@ def build_particles_sections(palettes, mattes):
     return [
         Section("TEMPLATES", [PresetList()]),
         Section("SOURCE", [
-            Cycle("matte", "matte_idx", list(mattes), save_key="matte"),
+            Cycle("matte", "matte_idx", list(mattes), save_key="matte",
+                  status="matte {}"),
             Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
                   key="res", save=False),
             Toggle("Video bg", "video_bg"),
@@ -95,14 +96,14 @@ def build_particles_sections(palettes, mattes):
         ]),
         Section("LOOK", [
             Cycle("color", "palette_idx", list(palettes), gap=4,
-                  save_key="palette"),
+                  save_key="palette", status="{}"),
         ] + look_sliders + [
             # captured-but-undrawn: saved since v1, no panel control yet
             Param("attract_speed"),
         ]),
         # MOTION — boids steering (dtouch.flock). The sliders stay visible while off so the
         # section reads as a thing you can turn on, not a thing that appears from nowhere.
-        Section("MOTION", [
+        Section("MOTION", key_hint="F", widgets=[
             Toggle("Flock", "flock"),
             _slider_spec("Cohere", "cohere",
                          "Steer toward the local centre. Pulls the cloud into shoals."),
@@ -119,7 +120,7 @@ def build_signal_section():
     (dtouch.circuit_bent) applied to every mode's output after render + video
     composite, before recorder and panel (so the panel stays readable). Its
     state serializes under "signal" inside each mode's looks."""
-    return Section("SIGNAL", [
+    return Section("SIGNAL", key_hint="G", widgets=[
             Toggle("Glitch", "glitch"),
             Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
             _slider_spec("Chroma", "chroma",
@@ -133,14 +134,18 @@ def build_signal_section():
 
 
 def build_global_rows():
-    """The shell's global rows (below every mode's sections)."""
+    """The shell's global rows (below every mode's sections) — the §4.1
+    sketch: Sound react (A) - Sens - Record (R) - Mirror - Menu (M) - Quit.
+    Key hints live in the labels; the Menu row is an Action posting the
+    `menu.open` command through the walker's pending_commands mailbox."""
     return [
-        Toggle("Sound react", "audio"),
+        Toggle("Sound react (A)", "audio"),
         _slider_spec("Sens", "sens", "How strongly sound drives the visuals.",
                      apply="keep", gap=4),
-        Toggle("Record", "record", save=False,
-               label_fn=lambda v: "Stop recording" if v else "Record"),
+        Toggle("Record (R)", "record", save=False,
+               label_fn=lambda v: "Stop recording (R)" if v else "Record (R)"),
         Toggle("Mirror", "mirror", on_text="on", save=False, gap=4),
+        Action("Menu (M)", "menu.open"),
         Action("Quit", "quit"),
     ]
 
@@ -221,6 +226,10 @@ class OverlayUI:
         # the active mode. Default ACC green = the shipped Particles chrome, so
         # a bare OverlayUI (goldens, tests) renders identical pixels.
         self.accent = ACC
+        # panel title (DESIGN.md §4.1/§4.2 sketch: 'dtouch - MODE TITLE',
+        # ASCII hyphen). The shell sets it per mode; the bare default matches
+        # the goldens' Particles panel.
+        self.panel_title = "dtouch - PARTICLES"
         # still-image mailbox (DESIGN.md §2.1: the shell owns still sources) —
         # a path posted here is loaded by the shell's mailbox pump.
         self.pending_still_path = None
@@ -344,7 +353,7 @@ class OverlayUI:
         # a no-op when everything fits. content height comes from the previous draw.
         self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
         x, cw, y = px + g.S(16), pw - g.S(32), g.S(30) - self.scroll
-        g.text(frame, "dtouch", x, y, self.accent, 0.62, 2)
+        g.text(frame, self.panel_title, x, y, self.accent, 0.62, 2)
         y += g.S(16)
         self._blink += 1
 
@@ -352,7 +361,8 @@ class OverlayUI:
         for item in self.spec:
             if isinstance(item, Section):
                 y, sec_open = g.section(frame, item.title,
-                                        self.sections.get(item.title, True), x, y, cw)
+                                        self.sections.get(item.title, True), x, y, cw,
+                                        key_hint=item.key_hint)
                 if sec_open:
                     for wdg in item.widgets:
                         y = self._draw_widget(frame, wdg, x, y, cw, px)

@@ -144,8 +144,10 @@ class ParticlesMode:
             ui.sections["SIGNAL"] = True
         ui.video_bg = bool(ui.video_bg or self.boot_video_bg)
 
-    def status_line(self, cam_name):
-        return f"matte={self.matte_kind}  color={self.pf.palette}  cam={cam_name[:16]}"
+    def status_tail(self, cam_name):
+        """The camera tail of the spec-derived HUD status (DESIGN.md §2.3 —
+        matte/color render from the status-marked spec widgets)."""
+        return f"cam {cam_name[:16]}"
 
     # ----- per-frame -----
     def step(self, frame_bgr, audio_levels, dt):

@@ -77,7 +77,7 @@ def _register_quit(reg, ps, toasts):
 
 
 def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
-                       safe_look=None, get_overlay=None):
+                       safe_look=None, get_overlay=None, debug_line=None):
     """Register the perform layer (DESIGN.md §6.2) on `reg`.
 
     `recall(name)` must route a preset apply through the same path a panel click
@@ -233,8 +233,16 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     reg.register(ui_toggle_command(ui, toasts, "audio.toggle", "Sound react",
                                    "a", "audio", "SOUND"))
     reg.add("record.toggle", "Record", "r", record)
-    reg.add("debug.toggle", "Debug readout", "i",
-            lambda: setattr(hud, "debug", not hud.debug))   # feedback: the HUD line
+
+    def debug_toggle():
+        # feedback: the HUD status-line variant. In HIDDEN there is no status
+        # line, so 'i' posts the debug line as a transient toast instead —
+        # silence-on-input is a bug (DESIGN.md principle 4).
+        hud.debug = not hud.debug
+        state = get_overlay() if get_overlay is not None else None
+        if state is OverlayState.HIDDEN and debug_line is not None:
+            toasts.hint(debug_line())
+    reg.add("debug.toggle", "Debug readout", "i", debug_toggle)
     reg.add("help.overlay", "Key map", "?",
             lambda: setattr(ps, "help_open", True))
     _register_quit(reg, ps, toasts)
@@ -393,6 +401,7 @@ class Host:
             mk = getattr(mode, "matte_kind", None)
             ui.matte_idx = ui.mattes.index(mk) if mk in ui.mattes else 0
             ui.accent = mode.accent
+            ui.panel_title = "dtouch - " + mode.title.upper()
             ui.set_spec(self.compose_spec(mode))
             mode.configure_ui(ui)
             self._reload_presets()
@@ -496,7 +505,8 @@ class Host:
                            lambda name: setattr(self.ui, "pending_preset", name),
                            mode_commands=self.mode.commands(),
                            safe_look=lambda: self.mode.safe_look(),
-                           get_overlay=lambda: self.overlay)
+                           get_overlay=lambda: self.overlay,
+                           debug_line=self.debug_line)
         self._register_shell_commands()
         self.help_rows = self.reg.table() + [("TAB", "Cycle overlay"),
                                              ("Esc", "Step toward hidden")]
@@ -604,6 +614,35 @@ class Host:
                              "bank": {self.mode.id: dict(ui.bank)} if ui else {}},
                             path=self.state_path)
 
+    # ----- spec-derived HUD status (DESIGN.md §2.3) -----
+    def _status_line(self):
+        """'MODE TITLE  <status-marked widget values in spec order>  <tail>'
+        — e.g. 'DITHER GIRL  blue noise  3-bit  bias auto  src still'. The
+        body renders from the composed spec's `status` flags (the single
+        schema authority); the mode contributes only the cam/src tail."""
+        parts = [self.mode.title.upper()]
+        ui = self.ui
+        for w in ui.iter_widgets():
+            st = getattr(w, "status", None)
+            if not st:
+                continue
+            if isinstance(w, Cycle):
+                opts = list(w.options)
+                val = opts[int(getattr(ui, w.attr)) % len(opts)]
+            else:
+                val = getattr(ui, w.attr)
+            parts.append(st(val) if callable(st) else st.format(val))
+        tail = self.mode.status_tail(self.cam_name)
+        if tail:
+            parts.append(tail)
+        return "  ".join(parts)
+
+    def debug_line(self):
+        """The 'i' status variant: fps / frame-time / res (DESIGN.md §6.2)."""
+        rw, rh = self.res
+        ms = 1000.0 / self.fps if self.fps > 0 else 0.0
+        return f"{self.fps:4.1f}fps  {ms:5.1f}ms  {rw}x{rh}"
+
     def _capture_cfg(self):
         """Spec-derived capture (DESIGN.md §2.1/§7): walk the composed panel
         spec's save=True widgets — the single schema authority. The SIGNAL
@@ -690,6 +729,17 @@ class Host:
                 self.still = frame
                 self.hud.toasts.hint(f"still loaded - {os.path.basename(path)}")
             ui.pending_still_path = None
+        if ui.pending_commands:
+            # Action rows with no dedicated mailbox (e.g. the global 'Menu (M)'
+            # row, §4.1) route through the command registry — the same named
+            # command the 'm' key runs, so both paths stay one implementation.
+            for name in ui.pending_commands:
+                cmd = self.reg.get(name)
+                if cmd is not None:
+                    cmd.run()
+                else:
+                    self.hud.toasts.hint(f"unknown action {name}")
+            ui.pending_commands = []
         if ui.pending_rename:
             old, new = ui.pending_rename
             sel = ui.preset_name if ui.preset_idx < len(ui.presets) else None
@@ -780,6 +830,7 @@ class Host:
                                  matte=getattr(mode, "matte_kind", mattes[0]),
                                  palette=boot_palette)
         ui.accent = mode.accent
+        ui.panel_title = "dtouch - " + mode.title.upper()
         ui.set_spec(self.compose_spec(mode))
         ui.mirror = self.mirror
         ui.audio = self._boot_audio
@@ -924,8 +975,8 @@ class Host:
                     # invariant, kept; the boot card is the one deliberate
                     # recorded UI frame, DESIGN.md §3).
                     rw, rh = self.res
-                    status = mode.status_line(self.cam_name)
-                    dbg = f"{fps:4.1f}fps  {1000.0 / fps if fps > 0 else 0.0:5.1f}ms  {rw}x{rh}"
+                    status = self._status_line()
+                    dbg = self.debug_line()
                     if self.menu.open:
                         # home menu (DESIGN.md §3): live camera through 1-bit
                         # blue noise + 65% scrim + mode cards; the running mode

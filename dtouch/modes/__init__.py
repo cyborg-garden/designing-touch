@@ -18,6 +18,9 @@ sections, its mode-local commands, and its defaults + built-in looks. The shell
         def commands(self) -> dict: ...      # mode-local named commands
         def step(self, frame_bgr, audio, dt): ...  # sim+render -> RGB at host.res
         def safe_look(self) -> str: ...      # the panic target
+        def status_tail(self, cam_name) -> str: ...  # cam/src tail of the HUD
+                                             # status (body is spec-derived,
+                                             # DESIGN.md §2.3)
         def on_resize(self, w, h) -> None: ...
 
 Modes register in REGISTRY (graft from Contract): one import + one line adds a

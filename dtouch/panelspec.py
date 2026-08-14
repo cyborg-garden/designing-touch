@@ -32,6 +32,10 @@ class Slider:
     apply: str = "reset"
     gap: int = 0
     save_key: Optional[str] = None   # serialized name; defaults to attr
+    # status (DESIGN.md §2.3): the HUD status line renders from the spec —
+    # a format string ("{:.0f}-bit") or callable applied to the widget's
+    # value; None = not part of the status line.
+    status: Any = None
 
     @property
     def store_key(self):
@@ -50,6 +54,7 @@ class Toggle:
     label_fn: Optional[Callable[[bool], str]] = None   # e.g. Record / Stop recording
     gap: int = 0
     save_key: Optional[str] = None
+    status: Any = None           # see Slider.status (DESIGN.md §2.3)
 
     @property
     def store_key(self):
@@ -66,6 +71,7 @@ class Cycle:
     apply: str = "reset"
     gap: int = 2
     save_key: Optional[str] = None   # serialized name (stores the VALUE, not the index)
+    status: Any = None           # see Slider.status (DESIGN.md §2.3)
 
     @property
     def hit_key(self):

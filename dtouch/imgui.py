@@ -135,16 +135,23 @@ class Gui:
                          "slider", (attr, tx0, tx1, lo, hi)))
         return y + self.S(30)
 
-    def section(self, img, title, is_open, x, y, w):
+    def section(self, img, title, is_open, x, y, w, key_hint=None):
         """Clickable section header. Returns (next_y, is_open).
 
-        ASCII markers only: cv2's Hershey font renders no glyph for the usual
-        disclosure triangles, so they come out as '???' (see module docstring)."""
+        `key_hint` (DESIGN.md §4.1: MOTION (F), SIGNAL (G)) renders DIM,
+        right-aligned in the header row. ASCII markers only: cv2's Hershey
+        font renders no glyph for the usual disclosure triangles, so they
+        come out as '???' (see module docstring)."""
         rect = (x - self.S(4), y - self.S(4), x + w, y + self.S(14))
         if in_rect(rect, self.mouse):
             self.box(img, rect, HOVER)
         self.text(img, ("- " if is_open else "+ ") + title, x, y + self.S(8),
                   INK if is_open else DIM, 0.4)
+        if key_hint:
+            hint = f"({key_hint})"
+            (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX,
+                                         0.4 * self.s, 1)
+            self.text(img, hint, x + w - tw - self.S(6), y + self.S(8), DIM, 0.4)
         self.hot.append((rect, "section", title))
         return y + self.S(16), is_open
 

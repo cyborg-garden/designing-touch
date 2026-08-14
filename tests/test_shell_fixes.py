@@ -408,6 +408,37 @@ def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
                         mode="dithergirl")[slot] == "neon dancer"
 
 
+# ---------- global Menu (M) row + panel title + 'i' in HIDDEN ----------
+
+def test_menu_row_action_opens_the_menu(tmp_path):
+    """DESIGN.md §4.1: the global 'Menu (M)' Action posts menu.open through
+    pending_commands; the shell routes it to the same command 'm' runs."""
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.ui.pending_commands.append("menu.open")
+    host._pump_preset_mailboxes()
+    assert host.menu.open is True
+    assert host.ui.pending_commands == []
+
+
+def test_panel_title_carries_the_mode(tmp_path):
+    """DESIGN.md §4.1/§4.2 sketch: panel title is 'dtouch - MODE TITLE'."""
+    host = _booted(tmp_path)
+    assert host.ui.panel_title == "dtouch - DITHER GIRL"
+
+
+def test_i_in_hidden_posts_the_debug_line_as_a_toast(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.overlay = OverlayState.HIDDEN
+    host.reg.dispatch(ord("i"))
+    assert any("fps" in t for t in _hints(host))
+    n = sum("fps" in t for t in _hints(host))
+    host.overlay = OverlayState.HUD          # HUD: the status line IS feedback
+    host.reg.dispatch(ord("i"))
+    assert sum("fps" in t for t in _hints(host)) == n
+
+
 # ---------- boot: hint + last-used-mode resume (DESIGN.md §3) ----------
 
 def test_boot_posts_the_4s_hud_hint(tmp_path):

@@ -196,18 +196,21 @@ class DitherGirlMode:
             ]),
             Section("ALGORITHM", [
                 Readout(self._draw_algo_label),
-                Cycle("algorithm", "dg_algo_idx", list(ALGOS), save_key="algorithm"),
+                Cycle("algorithm", "dg_algo_idx", list(ALGOS), save_key="algorithm",
+                      status=str.lower),
                 Readout(self._draw_speed_badge),
                 Readout(self._draw_swatch),
             ]),
             Section("TONE", [
                 Slider("Bits", "dg_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
+                       status="{:.0f}-bit",
                        tip="Output bit depth. 1 = pure two-tone; higher keeps "
                            "more shades."),
                 Toggle("Gamma", "dg_gamma", save_key="gamma",
                        tip="Dither in linear light so mid-tones keep their "
                            "perceived brightness. Off = the crushed retro look."),
-                Cycle("bias", "dg_bias_idx", list(BIASES), save_key="bias"),
+                Cycle("bias", "dg_bias_idx", list(BIASES), save_key="bias",
+                      status="bias {}"),
                 Slider("Contrast", "dg_contrast", 0.25, 3.0, save_key="contrast",
                        tip="Push tones apart before dithering. High contrast "
                            "survives stream compression."),
@@ -230,10 +233,11 @@ class DitherGirlMode:
         """The panic target (DESIGN.md §6.2 '0')."""
         return "classic"
 
-    def status_line(self, cam_name):
+    def status_tail(self, cam_name):
+        """The source tail of the spec-derived HUD status (DESIGN.md §2.3 —
+        the body renders from the status-marked spec widgets)."""
         src = "still" if self._ui("input_idx", 0) == 1 else cam_name[:16]
-        return (f"{self._algo().lower()}  {self._bits()}-bit  "
-                f"bias {self._bias()}  src={src}")
+        return f"src {src}"
 
     # ----- panel readouts -----
     def _draw_algo_label(self, frame, g, x, y, cw):

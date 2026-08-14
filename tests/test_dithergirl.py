@@ -106,16 +106,18 @@ def test_step_without_ui_uses_defaults(tmp_path):
     m.stop()
 
 
-def test_status_line_is_ascii():
-    m = DitherGirlMode()
-
-    class H:
-        ui = None
-        res = RES
-    m.host = H()
-    s = m.status_line("FaceTime HD Camera")
+def test_status_line_is_spec_derived_and_ascii(tmp_path):
+    """DESIGN.md §2.3: the HUD status renders from the status-marked spec
+    widgets — 'MODE TITLE  <values in spec order>  <mode tail>'."""
+    host = _booted(tmp_path)
+    s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
-    assert "floyd-steinberg" in s and "1-bit" in s
+    assert s == "DITHER GIRL  floyd-steinberg  1-bit  bias auto  src synthetic"
+    host.ui.dg_algo_idx = ALGOS.index("Blue noise")
+    host.ui.dg_bits = 3.0
+    host.ui.input_idx = 1                    # still input -> src tail follows
+    assert (host._status_line()
+            == "DITHER GIRL  blue noise  3-bit  bias auto  src still")
 
 
 # ---------- panel spec structure (DESIGN.md §4.2) ----------
