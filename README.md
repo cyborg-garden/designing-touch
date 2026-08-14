@@ -16,9 +16,14 @@ Dance, play music, and it moves with you.
 git clone https://github.com/NimbleCoAI/designing-touch
 cd designing-touch
 python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install --upgrade pip   # stock macOS pip (21.2) can't do editable installs
 pip install -e ".[person]"        # engine + person segmentation
 python experiments/05-live-webcam/run.py
 ```
+
+That `pip` upgrade is not optional on a stock macOS python3: the pip that ships
+with 3.9's `venv` predates PEP 660, so `pip install -e .` stops with
+`File "setup.py" or "setup.cfg" not found`. One upgrade and it installs.
 
 On macOS you can also just **double-click `start.command`** (it sets up the environment on first
 run, then opens the window). Grant your terminal **Camera** (and **Microphone**, for sound) access
@@ -26,9 +31,39 @@ in System Settings → Privacy & Security.
 
 ## The live instrument
 
-One window: the live render plus a collapsible control panel (click the `>` to fold it away).
-The panel is grouped into **collapsible sections** — click a header to open it. `MOTION` and
-`SIGNAL` start closed, so the panel opens at the size it always did.
+One window, and it opens already playing — the mode you used last, its look moving, and a
+hint that fades after four seconds: `m menu - TAB panel - ? keys`. Those are the three doors.
+
+**`TAB` cycles what's drawn over the render:**
+
+- **hidden** — nothing but the picture. This is what you point OBS at.
+- **HUD** — a small status line top-left plus momentary toasts, so every key you press says
+  what it did. This is where you start.
+- **panel** — the full control sidebar on the right. Everything below lives here.
+
+`Esc` always steps back toward hidden, and never quits.
+
+## Modes
+
+Two instruments share the window, the presets, the keys and the recorder:
+
+- **Particles** (`p`) — camera → matte → a flowing cloud of glowing particles. The original.
+- **Dither Girl** (`d`) — the dither pipeline as the picture itself (see below).
+
+`m` opens the **home menu**: your camera behind a scrim, rendered through 1-bit blue-noise
+dither, with a card per mode. `,`/`.` move, `Enter` commits, `Esc` leaves the running mode
+alone — or just click a card. You never need the menu mid-set: `p` and `d` switch directly
+from any state. Switching draws a still boot card rather than a gray flash, and coming back
+to a mode you've already used finds it exactly as you left it.
+
+From the command line, `--mode dithergirl` boots into Dither Girl and `--still photo.jpg`
+loads a still image and implies it; `--flock` and `--glitch` boot Particles with those layers
+already on.
+
+## The Particles panel
+
+`TAB` to the panel. It's grouped into **collapsible sections** — click a header to open one.
+`MOTION` and `SIGNAL` start closed, so the panel opens at the size it always did.
 
 - **Templates** — one-click looks: `abstract` (glowing cloud), `portrait`/`textured`
   (recognizable, painted with your real colors), `embers`, `aurora`, and **`sigil`** (sharp
@@ -36,7 +71,8 @@ The panel is grouped into **collapsible sections** — click a header to open it
   "Save current look" — it captures everything, including Video bg / Vid mix and Sound
   react / Sens. Hover a saved look for `~` (rename — type, Enter saves) and `x` (delete —
   click twice). Built-ins can't be renamed or deleted, and they never touch your live
-  video/sound toggles when you switch to them.
+  video/sound toggles when you switch to them. Click a row's slot badge to put that look on
+  a number key (see below).
 - **Source** — `matte` (what becomes particles: motion / saliency / person / edges / luma),
   `output` resolution (720p → 4K), and **Video bg** — show the raw camera footage behind the
   particles (screen-blended so the glow stays on top), with a `Vid mix` slider for how present
@@ -49,15 +85,55 @@ The panel is grouped into **collapsible sections** — click a header to open it
   grid, because true all-pairs boids at this particle count is ~4x10^10 pair terms.
 - **Signal** — **Glitch**: the circuit-bent chain (chroma bleed, scan drift and sync tears,
   glitch blocks, bit-crush, CRT scan lines) plus Bayer / blue-noise / Floyd-Steinberg /
-  Riemersma **dithering** (sRGB gamma-correct — quantised in linear light), applied
-  to the finished frame. Costs ~6 ms at 720p, ~14 ms at 1080p. The control panel is drawn
-  *after* it, so the panel never glitches into unreadability, and recordings capture what you
-  see. Start it from the CLI with `--glitch` (or `--flock`).
+  Riemersma **dithering**, with `Bits` (1–4, how many shades survive), `Gamma` (dither in
+  linear light so mid-tones keep their brightness — on by default; off is the crushed retro
+  look) and `Bias` (which way the ordered dithers round: auto / light / dark). It's applied
+  to the finished frame, and it's a layer, not a mode — it's there in every mode. Costs ~6 ms
+  at 720p, ~14 ms at 1080p. The control panel is drawn *after* it, so the panel never glitches
+  into unreadability, and recordings capture what you see.
 - **Audio** — toggle sound reactivity (bass pulses brightness; treble adds spark where Spark > 0)
   and a sensitivity slider.
 - **Record** — capture an MP4 of your session.
 
-Quit via the **Quit** button, `q`, or the window's close box.
+## Playing it with keys
+
+The mouse is a fallback here, not the instrument. Press **`?`** for the live key map — it's
+generated from the commands themselves, so it can't go stale. The ones worth memorising:
+
+| Key | What it does |
+|---|---|
+| `1`–`9` | recall the look in that bank slot, instantly (the built-ins start there) |
+| `[` / `]` | previous / next in your setlist |
+| `Space` | blackout — hard black out, with an amber corner tick so you know it's you |
+| `0` | panic: the mode's known-good look, blackout off, glitch off |
+| `TAB` / `Esc` | show more overlay / step back toward none |
+| `p` / `d` / `m` | Particles / Dither Girl / home menu |
+| `f` `g` `v` `a` `r` | flock, glitch, video background, sound react, record |
+| `s` | save the current look (panel only — saving is an edit, not a move) |
+| `,` `.` then `-` `=` | pick a control and nudge it without opening the panel (`_`/`+` = ×5) |
+| `q` | quit — press it **twice** within 2 s; the first press just asks. (The panel's Quit button and the window's close box still work.) |
+
+Every key answers with a big momentary toast, so you can play in the dark without reading the
+panel. Your saved looks live in `presets.json`, and the mode, bank and current look autosave to
+`state.json` — both next to the app, both gitignored, so a restart lands you where you were.
+
+## Dither Girl
+
+The same camera (or a still, via `--still photo.jpg`) run through the dither pipeline as the
+*primary* image rather than as an effect on top:
+
+- **Source** — camera or the loaded still, plus an optional matte so only the subject gets
+  dithered.
+- **Algorithm** — Bayer, blue noise, Floyd-Steinberg or Riemersma, with a live/slow badge and
+  a swatch strip showing a grey ramp through your current settings.
+- **Tone** — Bits, Gamma, Bias, Contrast, and **Scale**: the working height the dither runs at
+  (45–720 px, default 72). Big cells are the look; they're also what survives streaming
+  compression. Drag Scale up with an error-diffusion algorithm active and it says so in amber
+  rather than quietly dropping frames.
+- **Palette** — white-on-black, black-on-white, amber, or green phosphor.
+
+The SIGNAL rack is available on top, minus its dither row — this mode owns dithering, and two
+dither controls in one panel is how you end up with an incoherent instrument.
 
 ## The engine (`dtouch/`)
 
