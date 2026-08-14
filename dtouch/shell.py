@@ -1485,6 +1485,19 @@ class Host:
                     out = last_out
                     if out is None:
                         out = np.zeros((self.res[1], self.res[0], 3), np.uint8)
+                    elif self.ps.blackout:
+                        # Blackout is applied inside the try, so the held
+                        # picture used to go out FULLY LIVE while the amber
+                        # tick and the BLACKOUT flash both said the output was
+                        # dead (measured: blackout=True, nonblack_px=51607).
+                        # An armed indicator that lies about the projector is
+                        # worse than no indicator, and blackout is the one key
+                        # a performer hits when something is wrong on screen.
+                        # A FRESH black frame, never `out[:] = 0`: `out` IS
+                        # `last_out` here, and blacking it in place would
+                        # destroy the held picture for good — the output would
+                        # stay black after blackout was disarmed.
+                        out = np.zeros_like(out)
                     # containment without a throttle is a busy loop: a produce
                     # half that fails every frame has nothing to wait on, and
                     # this used to spin at 983 iterations/sec behind a frozen

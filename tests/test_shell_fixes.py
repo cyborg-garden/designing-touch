@@ -662,6 +662,46 @@ def test_mode_step_exception_holds_the_last_frame_instead_of_ending_the_show(
     assert any("ModuleNotFoundError" in t for t in _hints(host))
 
 
+def test_blackout_still_blacks_the_output_while_the_produce_half_is_failing(
+        tmp_path):
+    """DESIGN.md §6.2: SPACE kills the output, and the amber tick says so.
+
+    The blackout write lived INSIDE the try, so on the failure path (`out =
+    last_out`) it was never re-applied: while a mode raised every frame — the
+    most reachable failure there is — SPACE lit the tick, flashed BLACKOUT,
+    and left the projector fully live (measured nonblack_px=51607). That is
+    the one key a performer hits when something is already wrong on screen."""
+    mode = BoomMode(fail_from=3)
+    host = _host(tmp_path, mode=mode, max_frames=6)
+    host._source.on_read = lambda n: (setattr(host.ps, "blackout", True)
+                                      if n == 3 else None)
+    _, out = host.run()
+    assert mode.steps == 6                       # the produce half kept failing
+    assert not out.any(), "armed blackout, live output - the tick was lying"
+
+
+def test_the_held_picture_survives_a_blackout_taken_while_broken(tmp_path):
+    """...and the fix must not black the HELD frame in place: `out` is
+    `last_out` on that path, so `out[:] = 0` there would destroy the last good
+    picture permanently and keep the projector black long after blackout was
+    disarmed."""
+    good = []
+
+    class Watched(BoomMode):
+        def step(self, frame_bgr, audio_levels, dt):
+            out = super().step(frame_bgr, audio_levels, dt)
+            good.append(out.copy())
+            return out
+
+    host = _host(tmp_path, mode=Watched(fail_from=3), max_frames=8)
+    host._source.on_read = lambda n: (setattr(host.ps, "blackout", n < 6)
+                                      if n >= 3 else None)
+    _, out = host.run()
+    assert good and good[-1].any()               # a real picture was held
+    assert out.any(), "the held picture never came back after blackout"
+    assert np.array_equal(out, good[-1])
+
+
 def test_a_frame_error_on_the_very_first_frame_is_survivable(tmp_path):
     """Nothing good has been rendered yet, so there is no picture to hold —
     an intentional black frame, not an unbound-variable crash."""
