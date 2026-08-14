@@ -375,6 +375,24 @@ def test_slow_warning_only_for_error_diffusion_at_high_scale(tmp_path):
     assert m._draw_perf_note(frame, g, 10, 10, 200) > 10    # renders the note
 
 
+def test_perf_note_wraps_inside_the_panel_column_at_720p(tmp_path):
+    """At 720p the one-line note overflowed the sidebar — it must word-wrap
+    to the column width (§4.2: the note is part of the panel, not graffiti
+    over the picture)."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_scale = 400.0                                  # FS high: note on
+    g = _gui()                                           # s = 1.0 (720p floor)
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    x, cw = 1030, 258                                    # 720p panel column
+    y2 = m._draw_perf_note(frame, g, x, 100, cw)
+    assert y2 > 100
+    ys, xs = np.where(frame.any(axis=2))
+    assert xs.max() <= x + cw, "the note must stay inside the panel column"
+    assert xs.min() >= x
+    assert len(np.unique(ys // 16)) >= 2 or y2 - 100 > 20   # actually wrapped
+
+
 # ---------- audio modulation (minimal — DESIGN.md §4.2) ----------
 
 def test_bass_modulates_contrast_only_when_levels_present(tmp_path):

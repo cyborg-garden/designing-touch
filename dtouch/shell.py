@@ -1020,7 +1020,8 @@ class Host:
                                       blackout=self.ps.blackout,
                                       camera_lost=(camera_lost or black_streak > 15))
                     if self.ps.help_open:
-                        draw_help(bgr, self.help_rows)   # works in every overlay state
+                        # help carries the active mode's accent (§5 one-accent)
+                        draw_help(bgr, self.help_rows, accent=mode.accent)
                     cv2.imshow(self.WIN, bgr)
                     key = cv2.waitKey(1) & 0xFF   # pump GUI + mouse
                     # menu → rename box → perform layer (see _route_key)

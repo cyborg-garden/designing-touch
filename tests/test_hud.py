@@ -193,6 +193,23 @@ def test_camera_note_draws_amber():
     assert (img[diff] == H.AMBER).all(axis=1).any()
 
 
+def test_camera_note_sits_top_left_under_the_status_line():
+    """DESIGN.md §5 center-clear rule: the persistent camera-lost note lives
+    top-left under the status line — the frame center stays reserved for
+    transient toasts. (The pre-show 'waiting for camera' message is the one
+    centered exception.)"""
+    hud = Hud(now=Clock())
+    img = _frame()
+    hud.draw(img, OverlayState.HUD, camera_lost=True)
+    diff = np.any(img != _frame(), axis=2)
+    ys, xs = np.where(diff)
+    assert len(ys) > 0
+    assert ys.max() < 1080 * 0.25, "note must sit near the top"
+    assert xs.min() >= int(1920 * 0.03), "title-safe left inset"
+    assert not diff[int(1080 * 0.4):int(1080 * 0.6)].any(), \
+        "the frame center must stay clear"
+
+
 # ---------- OSD ----------
 
 def test_osd_draws_bottom_left_and_fades():

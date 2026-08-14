@@ -93,6 +93,16 @@ class Gui:
         cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale * self.s, color,
                     max(1, int(round(thick * self.s))), cv2.LINE_AA)
 
+    def text_outlined(self, img, s, x, y, color=INK, scale=0.46, thick=1):
+        """Double-drawn text — black under the ink (DESIGN.md §5), for text
+        that lands outside the panel scrim (rename hint, armed-delete
+        confirm) where the live picture is the background."""
+        t = max(1, int(round(thick * self.s)))
+        cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale * self.s,
+                    (0, 0, 0), t + 2, cv2.LINE_AA)
+        cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale * self.s,
+                    color, t, cv2.LINE_AA)
+
     def box(self, img, rect, fill, border=TRACK):
         x0, y0, x1, y1 = rect
         cv2.rectangle(img, (x0, y0), (x1, y1), fill, -1)
@@ -197,7 +207,8 @@ class Gui:
         self.box(img, db, RED if armed else (HOVER if in_rect(db, self.mouse) else BTN))
         self.text(img, "x", db[0] + self.S(7), db[3] - self.S(7), INK, 0.45, 2 if armed else 1)
         if armed:
-            self.text(img, "sure? x again", x - self.S(118), y + self.S(16), RED, 0.42, 1)
+            self.text_outlined(img, "sure? x again", x - self.S(118),
+                               y + self.S(16), RED, 0.42, 1)
         self.hot.insert(0, (db, "del", name))
         self.hot.insert(0, (rb, "ren", name))
 
@@ -208,8 +219,8 @@ class Gui:
         self.box(img, rect, DARK, border=self.accent)
         cur = "_" if (blink // 12) % 2 == 0 else ""
         self.text(img, buf + cur, x + self.S(10), y + self.S(16), self.accent, 0.46)
-        self.text(img, "type name: enter=save esc=cancel", px - self.S(240), y + self.S(16),
-                  self.accent, 0.42)
+        self.text_outlined(img, "type name: enter=save esc=cancel",
+                           px - self.S(240), y + self.S(16), self.accent, 0.42)
 
     # ----- deferred / chrome -----
     def draw_tooltip(self, img, clamp_h):

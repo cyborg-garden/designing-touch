@@ -271,12 +271,27 @@ class DitherGirlMode:
 
     def _draw_perf_note(self, frame, g, x, y, cw):
         """Inline amber perf note — renders only when Scale is dragged high
-        while an error-diffusion algorithm is active (§4.2)."""
+        while an error-diffusion algorithm is active (§4.2). Word-wrapped to
+        the panel column (at 720p the one-liner overflows the sidebar)."""
         if not self.slow_warning():
             return y
-        g.text(frame, "slow - ordered dither recommended live",
-               x, y + g.S(12), AMBER, 0.42)
-        return y + g.S(20)
+        words = "slow - ordered dither recommended live".split()
+        lines, cur = [], ""
+        for wd in words:
+            cand = (cur + " " + wd).strip()
+            tw = cv2.getTextSize(cand, cv2.FONT_HERSHEY_SIMPLEX,
+                                 0.42 * g.s, 1)[0][0]
+            if cur and tw > cw:
+                lines.append(cur)
+                cur = wd
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        for line in lines:
+            g.text(frame, line, x, y + g.S(12), AMBER, 0.42)
+            y += g.S(16)
+        return y + g.S(4)
 
     def _draw_swatch(self, frame, g, x, y, cw):
         """Swatch strip: a horizontal 0->1 gradient ramp rendered through the

@@ -88,6 +88,76 @@ def test_particles_status_marks_matte_and_color():
     assert color.status == "{}"
 
 
+# ---------- click-flash: border-only + relocation ----------
+
+def _pure_white(img):
+    return (img == 255).all(axis=2)
+
+
+def test_click_flash_is_border_only():
+    """The flash must not fill the row (it was hiding the armed delete's
+    'sure? x again' content) — border only."""
+    ui = OverlayUI(1280, 720, PRESETS, list(PALETTES), MATTES)
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    ui.draw(frame, {"status": ""})
+    rect = next(r for r, k, _ in ui._hot if k == "preset")
+    cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    ui.on_mouse(cv2.EVENT_LBUTTONDOWN, cx, cy, 0)
+    f1 = np.zeros((720, 1280, 3), np.uint8)
+    ui.draw(f1, {"status": ""})
+    x0, y0, x1, y1 = next(r for r, k, p in ui._hot if k == "preset" and p == 0)
+    white = _pure_white(f1)
+    assert white[y0, x0 + 4:x1 - 4].any(), "border must flash"
+    assert not white[y0 + 4:y1 - 4, x0 + 4:x1 - 4].any(), \
+        "the row's interior must stay visible (no fill)"
+
+
+def test_click_flash_relocates_after_scroll_and_res_change():
+    """A stale flash rect after scroll/reflow/res-change was painting a box
+    over unrelated pixels — the flash re-locates to the clicked control's
+    CURRENT rect, or disappears with it."""
+    ui = OverlayUI(1280, 720, PRESETS, list(PALETTES), MATTES)
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    ui.draw(frame, {"status": ""})
+    rect = next(r for r, k, p in ui._hot if k == "preset" and p == 0)
+    cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    ui.on_mouse(cv2.EVENT_LBUTTONDOWN, cx, cy, 0)
+    ui.scroll = 40                            # panel overflows at 720p
+    f1 = np.zeros((720, 1280, 3), np.uint8)
+    ui.draw(f1, {"status": ""})
+    nx0, ny0, nx1, _ = next(r for r, k, p in ui._hot
+                            if k == "preset" and p == 0)
+    assert ny0 == rect[1] - 40                # the row really moved
+    white = _pure_white(f1)
+    assert white[ny0, nx0 + 4:nx1 - 4].any(), "flash must follow the row"
+    assert not white[rect[1], nx0 + 4:nx1 - 4].any(), "no flash at the stale y"
+    # res change mid-flash: relocation against the new-scale hit rects
+    ui.scroll = 0
+    f2 = np.zeros((2160, 3840, 3), np.uint8)
+    ui.w, ui.h = 3840, 2160
+    ui.draw(f2, {"status": ""})               # must not crash; flash relocated
+    hx0, hy0, hx1, _ = next(r for r, k, p in ui._hot
+                            if k == "preset" and p == 0)
+    assert _pure_white(f2)[hy0, hx0 + 4:hx1 - 4].any()
+
+
+def test_rename_hint_and_armed_delete_have_black_underdraw():
+    """DESIGN.md §5: all text is double-drawn — these two land OUTSIDE the
+    panel scrim, over the live picture, so a white background must not
+    swallow them."""
+    from dtouch import imgui
+    g = imgui.Gui()
+    g.begin(1.0, (-1, -1))
+    img = np.full((100, 900, 3), 255, np.uint8)      # worst case: white wall
+    g.rename_box(img, "name", 0, 700, 40, 180, 700)
+    hint_roi = img[40:72, 700 - 245:700 - 60]
+    assert (hint_roi < 40).all(axis=2).any(), "rename hint needs under-draw"
+    img2 = np.full((100, 900, 3), 255, np.uint8)
+    g.manage_buttons(img2, "n", 700, 40, 180, armed="n")
+    armed_roi = img2[40:72, 700 - 130:700 - 10]
+    assert (armed_roi < 40).all(axis=2).any(), "'sure? x again' needs under-draw"
+
+
 def test_new_sections_start_closed_so_the_panel_still_fits_1080p():
     ui = _ui()
     assert ui.sections["MOTION"] is False

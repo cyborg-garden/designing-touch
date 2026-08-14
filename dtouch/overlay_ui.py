@@ -238,8 +238,8 @@ class OverlayUI:
         self.mouse = (-1, -1)
         self._hot = []
         self._drag = None
-        self._flash = 0
-        self._flash_rect = None
+        self._flash = 0          # frames of click feedback left
+        self._flash_key = None   # (kind, payload-identity) — re-located each draw
         # per-mode accent (DESIGN.md §5): exactly one accent on screen, owned by
         # the active mode. Default ACC green = the shipped Particles chrome, so
         # a bare OverlayUI (goldens, tests) renders identical pixels.
@@ -396,9 +396,18 @@ class OverlayUI:
         self._hot.append((cr, "collapse", None))
         g.scrollbar(frame, px, h, self._content_h, self.scroll)
 
-        # click feedback: flash the last-clicked control
-        if self._flash > 0 and self._flash_rect is not None:
-            g.box(frame, self._flash_rect, BTN, border=(255, 255, 255))
+        # click feedback: flash the last-clicked control — border-only (a fill
+        # would hide the row's own content, e.g. the armed delete's 'sure?'),
+        # re-located against THIS draw's hit rects so a res change, section
+        # reflow, or scroll never leaves the flash on a stale rectangle. A
+        # control that left the screen simply loses its flash.
+        if self._flash > 0:
+            rect = next((r for r, k, p in self._hot
+                         if self._flash_id(k, p) == self._flash_key), None)
+            if rect is not None:
+                x0, y0, x1, y1 = rect
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (255, 255, 255),
+                              max(1, g.S(1)))   # crisp non-AA flash border
             self._flash -= 1
         self._tooltip = g.tooltip
         g.draw_tooltip(frame, self.h)
@@ -472,6 +481,15 @@ class OverlayUI:
             cv2.circle(frame, (w - off, g.S(24)), g.S(7), RED, -1)
 
     # ----- mouse -----
+    @staticmethod
+    def _flash_id(kind, payload):
+        """Stable identity for the click-flash relocation: a slider's payload
+        carries track geometry that changes with res/reflow, so key on its
+        attr; everything else's payload is already stable."""
+        if kind == "slider":
+            return (kind, payload[0])
+        return (kind, payload)
+
     def on_mouse(self, event, x, y, flags, param=None):
         self.mouse = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -482,14 +500,14 @@ class OverlayUI:
             # confirm a preset delete in two presses (data loss).
             for rect, kind, payload in self._hot:
                 if kind == "collapse" and _in(rect, (x, y)):
-                    self._flash_rect, self._flash = rect, 4
+                    self._flash_key, self._flash = self._flash_id(kind, payload), 4
                     self._activate(kind, payload, x)
                     return
             for rect, kind, payload in self._hot:
                 if kind == "collapse":
                     continue
                 if _in(rect, (x, y)):
-                    self._flash_rect, self._flash = rect, 4
+                    self._flash_key, self._flash = self._flash_id(kind, payload), 4
                     self._activate(kind, payload, x)
                     return
             if self.open and x >= self.w - self._panel_px:

@@ -145,6 +145,16 @@ def test_draw_help_darkens_the_frame():
     assert frame.mean() < 120               # 65% scrim took the frame down
 
 
+def test_draw_help_takes_the_mode_accent():
+    """DESIGN.md §5 one-accent rule: help renders in the ACTIVE mode's accent,
+    not a hard-coded green."""
+    a = np.full((360, 640, 3), 120, np.uint8)
+    b = a.copy()
+    draw_help(a, [("q", "Quit")])
+    draw_help(b, [("q", "Quit")], accent=(245, 140, 245))
+    assert not np.array_equal(a, b)
+
+
 # ---------- digits + [ ] : bank recall + setlist (DESIGN.md §7, step 7) ----------
 
 def test_digit_recalls_from_the_active_modes_bank_with_toast():

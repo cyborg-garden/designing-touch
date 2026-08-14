@@ -119,11 +119,13 @@ def draw_corner_tick(img, size_px, color=AMBER):
     cv2.fillConvexPoly(img, pts, color, cv2.LINE_AA)
 
 
-def draw_help(img, rows):
+def draw_help(img, rows, accent=ACC):
     """The live key map over a 65% scrim (DESIGN.md §6.2 `?`). `rows` is
     (key, label) pairs — the registry's table plus any caller extras (TAB/Esc).
     Any key closes it; it works in every overlay state. Full-frame scrim is fine
-    here: help is a modal, not part of the steady-state overlay budget."""
+    here: help is a modal, not part of the steady-state overlay budget.
+    `accent` is the active mode's (DESIGN.md §5: exactly one accent on
+    screen, owned by the active mode)."""
     h, w = img.shape[:2]
     uu = u(h)
     np.copyto(img, cv2.convertScaleAbs(img, alpha=0.35))   # 65% scrim
@@ -133,11 +135,11 @@ def draw_help(img, rows):
     total = row_h * len(rows) + int(2.6 * title_px)
     y = max(int(h * TITLE_SAFE) + title_px, (h - total) // 2 + title_px)
     x = w // 2 - int(9 * uu)
-    put_outlined(img, "KEYS", (x, y), title_px, ACC)
+    put_outlined(img, "KEYS", (x, y), title_px, accent)
     y += int(1.6 * title_px)
     for key, label in rows:
         shown = {" ": "space"}.get(key, key)
-        put_outlined(img, shown, (x, y), px, ACC)
+        put_outlined(img, shown, (x, y), px, accent)
         put_outlined(img, label, (x + int(4.5 * uu), y), px, INK)
         y += row_h
 
@@ -277,9 +279,13 @@ class Hud:
             cv2.circle(img, (ix + tw + int(0.9 * uu), iy + px // 2 + 2),
                        max(2, int(0.3 * uu)), RED, -1, cv2.LINE_AA)
         if camera_lost:
+            # persistent note sits top-left UNDER the status line, title-safe
+            # (DESIGN.md §5: frame center is reserved for transient toasts;
+            # only the pre-show 'waiting for camera' message may sit centered)
             npx = int(1.0 * uu)
-            put_outlined(img, CAMERA_NOTE, (ix, h // 2), npx, AMBER)
-            put_outlined(img, CAMERA_FIX, (ix, h // 2 + int(1.4 * npx)),
+            ny = iy + px + int(1.6 * npx)
+            put_outlined(img, CAMERA_NOTE, (ix, ny), npx, AMBER)
+            put_outlined(img, CAMERA_FIX, (ix, ny + int(1.4 * npx)),
                          int(0.75 * uu), AMBER)
         self.toasts.draw(img)
         self.osd.draw(img)
