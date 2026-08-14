@@ -917,6 +917,49 @@ def test_a_shown_permanent_failure_runs_at_a_sane_rate(tmp_path, monkeypatch):
     assert rate < 200, f"the failing loop spun at {rate:.0f} frames/sec"
 
 
+def test_a_bounded_headless_render_does_not_idle_through_its_budget(
+        tmp_path, monkeypatch):
+    """The throttle is for a loop with nothing to wait on and no end in sight.
+    A headless run WITH a frame budget has an end in sight and nobody watching
+    it: one frame-time per failing frame turned a 300-frame render against a
+    broken source into 11.2 s of sleeping for 0.4 s of work."""
+    slept = []
+    monkeypatch.setattr(shell_mod.time, "sleep", lambda s: slept.append(s))
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), max_frames=300)
+
+    t0 = time.perf_counter()
+    count, _ = host.run()
+    elapsed = time.perf_counter() - t0
+
+    assert count == 300                          # the budget still ran in full
+    assert slept == [], "a bounded headless render paid the show's throttle"
+    assert elapsed < 2.0, f"300 broken frames took {elapsed:.1f}s"
+
+
+def test_an_unbounded_headless_failure_still_idles_before_it_gives_up(
+        tmp_path, monkeypatch):
+    """...and the case the throttle exists for keeps it: no window, no budget,
+    so it must not spin at 983 iterations/sec on its way to the limit."""
+    slept = []
+    monkeypatch.setattr(shell_mod.time, "sleep", lambda s: slept.append(s))
+    host = _host(tmp_path, mode=BoomMode(fail_from=1))
+    with pytest.raises(RuntimeError):
+        host.run()
+    assert len(slept) >= shell_mod.FRAME_FAIL_LIMIT - 1
+    assert all(s == shell_mod.FRAME_FAIL_SLEEP_S for s in slept)
+
+
+def test_a_shown_bounded_run_still_idles(tmp_path, monkeypatch):
+    """A window is a show whether or not it has a frame budget: it holds ~30 Hz
+    so the key pump stays responsive instead of pegging a core."""
+    slept = []
+    _patch_gui(monkeypatch)
+    monkeypatch.setattr(shell_mod.time, "sleep", lambda s: slept.append(s))
+    host = _host(tmp_path, mode=BoomMode(fail_from=1), show=True, max_frames=5)
+    host.run()
+    assert len(slept) == 5
+
+
 def test_fps_reports_rendered_frames_not_loop_spins(tmp_path):
     """`count` incremented on frames that were never rendered, so the HUD and
     the `i` readout showed 953.5 fps while the picture was frozen."""

@@ -1137,6 +1137,15 @@ class Host:
             return RuntimeError(
                 f"frame loop failed {streak} times in a row with no window to "
                 f"show it and no frame limit to end it ({why})")
+        if not self.show and self.max_frames is not None:
+            # A bounded headless render is not a show: there is no window to
+            # hold at a sane rate, no key pump to keep responsive, and nobody
+            # watching it — and the frame budget already ends it. Idling a
+            # frame-time per failure turned a 300-frame render against a
+            # broken source into 11.2 s of sleeping for 0.4 s of work. The
+            # UNBOUNDED headless case keeps both the throttle and the limit;
+            # so does anything with a window.
+            return None
         time.sleep(FRAME_FAIL_SLEEP_S)
         return None
 
