@@ -70,17 +70,32 @@ deterministic NumPy cores (`field`, `audio`, `fluid`, `particles`, `matte`); smo
 ```bash
 python -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip   # stock macOS pip 21.2 predates PEP 660 (no -e)
-pip install -e .            # engine
-pip install -e ".[person]"  # + mediapipe for the person matte
-pytest tests/ -q            # the full suite, a few seconds, no camera needed
+pip install -e .                 # engine only
+pip install -e ".[person,dev]"   # + mediapipe for the person matte, + pytest
+pytest tests/ -q                 # the full suite, a few seconds, no camera needed
 python experiments/05-live-webcam/run.py     # the live instrument (or double-click start.command)
 python experiments/05-live-webcam/run.py --mode dithergirl --still photo.jpg
 ```
 
-**opencv-python is pinned `<5`** in `pyproject.toml`. The panel is drawn entirely with cv2
+**`cv2` is pinned to 4.x, and that takes two pins.** The panel is drawn entirely with cv2
 primitives, and cv2 5 rasterises Hershey text differently — enough to move every panel pixel.
 `tests/test_goldens.py` skips itself (rather than failing, or inviting a `GOLDEN_REGEN` that
 would break everyone else) on any other cv2 major.
+
+`opencv-python>=4.10,<5` in `dependencies` is not sufficient on its own, because
+**`opencv-contrib-python` ships the same `cv2` module**. mediapipe requires it with no upper
+bound, so the documented `pip install -e ".[person]"` used to install opencv-python 4.x and
+then opencv-contrib-python 5 on top of it — and the second one wins the import. Measured on a
+clean py3.9 venv before the fix: opencv-python 4.14.0.94 + opencv-contrib-python 5.0.0.93 →
+`cv2.__version__ == '5.0.0'`, the goldens silently skipping (526 passed, 10 skipped) and the
+panel drawing with ~4.2 ROI drift from the pinned design. So the `person` extra pins
+`opencv-contrib-python>=4.10,<5` as well; after it, the same install resolves both at
+4.14.0.94, `cv2.__version__ == '4.14.0'`, and the suite runs 536 passed / 0 skipped.
+
+**If you touch either bound, move both, and verify in a throwaway venv** — not in the repo's
+`.venv`, which can be masking the problem with an older mediapipe. The check is one line:
+`pip install -e ".[person]" && python -c "import cv2; print(cv2.__version__)"` must print 4.x,
+and the goldens must run rather than skip.
 
 ## How to extend
 
