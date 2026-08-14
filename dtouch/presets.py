@@ -1,22 +1,58 @@
-"""Presets — named bundles of live settings you can switch between and save.
+"""Presets — per-mode looks, banks, and setlists in one v2 file (DESIGN.md §7).
 
-A preset sets the matte, color palette, and the live-tunable look parameters. `n` (particle
-count) and resolution are start-up only and not part of a preset. Built-ins ship in code; your
-own saved presets live in a JSON file (default ./presets.json in the launch dir) and are merged
-on top, so you can capture a look you like and come back to it.
+File schema (v2):
+
+    {
+      "version": 2,
+      "meta": {},
+      "modes": {
+        "particles": {
+          "looks":   {"embers": {…, "signal": {…}}},
+          "bank":    {"1": "abstract", "3": "embers"},
+          "setlist": ["abstract", "embers"]
+        }
+      }
+    }
+
+- Built-ins stay in code per mode (ParticlesMode.BUILTIN references this
+  module's BUILTIN dict) — immune to rename/delete, bankable.
+- The schema of a look is spec-derived (the panel spec's save/apply flags —
+  DESIGN.md §2.1); this module stores what it is given and never filters.
+- Bank slots are explicit assignments (not list position) — slot stability
+  across saves/deletes. delete/rename keep bank + setlist consistent.
+- The file stays in the launch dir (./presets.json), one file for all modes.
+
+Migration: load detects a v1 file (top-level looks, no "version"), migrates in
+memory (every v1 look → modes.particles.looks, filtered through the v1 KEYS
+whitelist exactly as v1 load() did — v1 never persisted MOTION/SIGNAL keys, so
+nothing changes meaning). The first WRITE copies the original file to
+presets.v1.bak.json, then writes v2 (§9: preset migration is the one
+user-data-loss surface — backup + round-trip pins mandatory).
+
+last_mode: state.json (the autosave file, see load_state/save_state) is the
+single authority for the active mode + preset across restarts; the v2 "meta"
+object is reserved for future schema needs and deliberately NOT a second owner
+(DESIGN §7 sketches meta.last_mode — resolved here in favor of state.json so
+the diffable presets file doesn't churn on every mode switch).
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
-from typing import Dict
+import shutil
+import tempfile
+import time
+from typing import Dict, Optional
 
-# live-applicable keys a preset may set. video/audio keys are saved by the panel but
-# absent from built-ins on purpose: a preset only touches the live video-bg / sound-react
-# state when it explicitly recorded one, so template-hopping doesn't reset your toggles.
+# The v1 whitelist of live-applicable keys — retained ONLY for migrating v1
+# files (v1 load() filtered through it, so migration must too). The live
+# schema authority is now the panel spec's save/apply flags (DESIGN.md §2.1).
 KEYS = ("matte", "palette", "fade", "exposure", "spark", "curl_amp", "reseed_frac",
         "base_size", "damp", "pull_falloff", "attract_speed",
         "video_bg", "video_mix", "audio", "sens")
+
+DEFAULT_MODE = "particles"
 
 BUILTIN: Dict[str, dict] = {
     # the loved abstract cloud
@@ -40,60 +76,349 @@ BUILTIN: Dict[str, dict] = {
 }
 
 
+# ----- raw file I/O -----
+
+# Warnings queued for the shell to surface as toasts (silence-on-data-loss is
+# a bug — DESIGN.md §9: presets are the one user-data-loss surface).
+_notes: list = []
+
+# Paths whose content is unreadable AND could not be copied to a backup (disk
+# full, permissions). Writing over them would destroy the user's only copy with
+# no recovery path, so every write to a poisoned path is a no-op + note until a
+# backup finally succeeds (DESIGN.md §9).
+_no_overwrite: set = set()
+
+
+def take_notes() -> list:
+    """Drain the queued store warnings (the shell toasts them if it can)."""
+    out = list(_notes)
+    _notes.clear()
+    return out
+
+
+def _note(text: str):
+    print(text)
+    _notes.append(text)
+
+
+def _is_poisoned(path: str) -> bool:
+    return os.path.abspath(path) in _no_overwrite
+
+
+def _backup_name(base: str, ext: str) -> str:
+    """A backup path that does not exist yet — never clobber an earlier backup
+    (a same-second retry after a partial copy must not overwrite it)."""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    bak = f"{base}.corrupt.{stamp}.bak{ext}"
+    n = 2
+    while os.path.exists(bak):
+        bak = f"{base}.corrupt.{stamp}_{n}.bak{ext}"
+        n += 1
+    return bak
+
+
+def _corrupt_backup(path: str):
+    """An unusable file is copied to {base}.corrupt.<ts>.bak.json before the
+    store proceeds empty — the next write would otherwise overwrite the user's
+    looks with no recovery path. Backed up once per distinct corruption (a
+    re-read of the same bad bytes never stacks duplicates); a *partial* earlier
+    backup has a different size, so it never counts as one and a fresh attempt
+    is made under a new name. Returns the warning note, or None when this
+    corruption is already backed up.
+
+    "Unusable" covers all three failures identically (they are the same event
+    to the user — their looks are at risk): unparseable bytes, valid JSON of
+    the wrong shape, and a file that cannot be READ AT ALL (permissions). The
+    unreadable case used to early-return here, which left the path unpoisoned
+    and let the next save destroy the only copy.
+
+    A failed copy poisons the path: nothing may overwrite the original until a
+    later attempt succeeds."""
+    try:
+        with open(path, "rb") as f:
+            bad = f.read()
+    except OSError:
+        bad = None              # unreadable: no bytes to dedup against, but a
+                                # backup is still attempted before poisoning
+    base, ext = os.path.splitext(path)
+    ext = ext or ".json"
+    if bad is not None:
+        for bak in glob.glob(f"{glob.escape(base)}.corrupt.*.bak{ext}"):
+            try:
+                if os.path.getsize(bak) != len(bad):
+                    continue        # partial/other backup — not this corruption
+                with open(bak, "rb") as f:
+                    if f.read() == bad:
+                        _no_overwrite.discard(os.path.abspath(path))
+                        return None
+            except OSError:
+                pass
+    bak = _backup_name(base, ext)
+    try:
+        shutil.copy2(path, bak)
+    except OSError:
+        _no_overwrite.add(os.path.abspath(path))
+        return (f"{os.path.basename(path)} is unreadable AND could not be "
+                f"backed up - NOT saving over it")
+    _no_overwrite.discard(os.path.abspath(path))
+    return (f"{os.path.basename(path)} unreadable - "
+            f"backup saved to {os.path.basename(bak)}")
+
+
+_UNUSABLE = object()      # sentinel: the bytes could not be parsed at all
+
+
 def _read(path: str) -> dict:
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    """The file as a dict, or {} — never anything else, and never a traceback.
+
+    The design invites hand-editing these files (DESIGN.md §7), so every way a
+    hand-edit can go wrong routes to the SAME corrupt-file recovery (backup +
+    note + refuse to overwrite when the backup failed): missing file, bytes
+    that will not parse, bytes that cannot be read, and valid JSON that is not
+    an object (`null`, `[1,2]`, `"x"`, `42` all used to reach callers and
+    raise AttributeError/TypeError several frames later).
+
+    A path that becomes readable-and-valid again — or that is deleted — clears
+    its poison here, so repairing or removing the file un-sticks saving for the
+    rest of the process (the flag used to be cleared only from inside
+    `_corrupt_backup`, which only ran when json.load raised)."""
+    key = os.path.abspath(path)
+    if not os.path.exists(path):
+        _no_overwrite.discard(key)     # nothing left to protect
+        return {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except Exception:
+        raw = _UNUSABLE
+    if not isinstance(raw, dict):
+        note = _corrupt_backup(path)
+        if note:
+            _note(note)
+        return {}
+    _no_overwrite.discard(key)         # readable + valid again
+    return raw
+
+
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce(raw: dict) -> dict:
+    """Shape-tolerate a hand-edited v2 file in memory: a null / wrong-typed
+    sub-object reads as absent instead of raising deeper in the store.
+
+    `looks` and `meta` become empty dicts; `bank` and `setlist` are DROPPED
+    rather than emptied, because "never stored" and "explicitly emptied" are
+    different answers to the caller (see `bank()`), and a hand-edit that
+    scrambled the type is not an explicit emptying. Everything else in the
+    file is preserved untouched."""
+    raw["meta"] = _as_dict(raw.get("meta"))
+    raw["modes"] = modes = _as_dict(raw.get("modes"))
+    for mode_id, entry in list(modes.items()):
+        entry = modes[mode_id] = _as_dict(entry)
+        entry["looks"] = {name: cfg for name, cfg
+                          in _as_dict(entry.get("looks")).items()
+                          if isinstance(cfg, dict)}
+        if "bank" in entry and not isinstance(entry["bank"], dict):
+            del entry["bank"]
+        if "setlist" in entry and not isinstance(entry["setlist"], list):
+            del entry["setlist"]
+    return raw
 
 
 def _write(data: dict, path: str):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomic write: temp file in the same directory, then os.replace — a
+    crash mid-write leaves either the old or the new content, never a
+    truncated file."""
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".",
+                               suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
-def load(path: str = "presets.json") -> Dict[str, dict]:
-    """Built-in presets merged with user presets from `path` (user wins on name clash)."""
-    presets = {k: dict(v) for k, v in BUILTIN.items()}
-    for name, cfg in _read(path).items():
-        presets[name] = {k: cfg[k] for k in KEYS if k in cfg}
+# ----- v1 → v2 migration -----
+
+def is_v1(raw: dict) -> bool:
+    """A non-empty file with no "version" field is a v1 flat-looks file."""
+    return bool(raw) and "version" not in raw
+
+
+def migrate_v1(raw: dict) -> dict:
+    """v1 flat looks → v2, in memory. Filters through the v1 KEYS whitelist —
+    byte-equivalent to what v1 load() returned for the same file."""
+    looks = {name: {k: cfg[k] for k in KEYS if k in cfg}
+             for name, cfg in raw.items() if isinstance(cfg, dict)}
+    return {"version": 2, "meta": {},
+            "modes": {DEFAULT_MODE: {"looks": looks}}}
+
+
+def _empty_v2() -> dict:
+    return {"version": 2, "meta": {}, "modes": {}}
+
+
+def backup_path(path: str) -> str:
+    base, ext = os.path.splitext(path)          # presets.json → presets.v1.bak.json
+    return f"{base}.v1.bak{ext or '.json'}"
+
+
+def load_file(path: str = "presets.json") -> dict:
+    """The whole store as v2 (migrating a v1 file in memory; disk untouched)."""
+    raw = _read(path)
+    if not raw:
+        return _empty_v2()
+    if is_v1(raw):
+        return migrate_v1(raw)
+    return _coerce(raw)
+
+
+def write_file(data: dict, path: str = "presets.json") -> bool:
+    """Persist v2. If the on-disk file is still v1, copy it to
+    presets.v1.bak.json first (once) — the mandatory migration backup.
+
+    Refuses (no-op + note, never an exception — the show must not die) while
+    the path is poisoned: unusable with no backup, so a write would be an
+    unrecoverable overwrite. `_read` retries the backup on every call, so the
+    next save after the disk frees up goes through.
+
+    Returns True when the bytes landed and False when the write was refused —
+    the whole point of the boolean. It used to fall off the end returning None
+    against a docstring promising True, so every caller reported success for a
+    write that never happened."""
+    raw = _read(path)          # also retries a failed corrupt-backup
+    if _is_poisoned(path):
+        _note(f"{os.path.basename(path)} not saved - unreadable and could not "
+              f"be backed up")
+        return False
+    if is_v1(raw):
+        bak = backup_path(path)
+        if not os.path.exists(bak):
+            shutil.copy2(path, bak)
+    _write(data, path)
+    return True
+
+
+def _mode_entry(data: dict, mode: str) -> dict:
+    return data.setdefault("modes", {}).setdefault(mode, {})
+
+
+# ----- looks (flat API, per mode — default mode keeps v1 call sites working) -----
+
+def load(path: str = "presets.json", mode: str = DEFAULT_MODE,
+         builtin: Optional[dict] = None) -> Dict[str, dict]:
+    """Built-in looks merged with the mode's saved looks (user wins on clash)."""
+    builtin = BUILTIN if builtin is None else builtin
+    presets = {k: dict(v) for k, v in builtin.items()}
+    looks = load_file(path).get("modes", {}).get(mode, {}).get("looks", {})
+    for name, cfg in looks.items():
+        presets[name] = dict(cfg)
     return presets
 
 
-def user_names(path: str = "presets.json") -> set:
-    """Names of the user-saved presets (the ones that can be renamed/deleted)."""
-    return set(_read(path).keys())
+def user_names(path: str = "presets.json", mode: str = DEFAULT_MODE) -> set:
+    """Names of the user-saved looks (the ones that can be renamed/deleted)."""
+    return set(load_file(path).get("modes", {}).get(mode, {}).get("looks", {}))
 
 
-def save(name: str, cfg: dict, path: str = "presets.json") -> str:
-    """Write/replace a user preset, preserving other user presets in the file."""
-    existing = _read(path)
-    existing[name] = {k: cfg[k] for k in KEYS if k in cfg}
-    _write(existing, path)
-    return path
+def save(name: str, cfg: dict, path: str = "presets.json",
+         mode: str = DEFAULT_MODE) -> bool:
+    """Write/replace a user look, preserving everything else in the file.
+    Returns whether it reached the disk — a refused write must not be reported
+    to the operator as 'saved' (DESIGN.md §9)."""
+    data = load_file(path)
+    _mode_entry(data, mode).setdefault("looks", {})[name] = dict(cfg)
+    return write_file(data, path)
 
 
-def delete(name: str, path: str = "presets.json") -> bool:
-    """Remove a user preset. Built-ins live in code, so they can't be deleted."""
-    existing = _read(path)
-    if name not in existing:
+def delete(name: str, path: str = "presets.json", mode: str = DEFAULT_MODE) -> bool:
+    """Remove a user look (built-ins live in code, so they can't be deleted).
+    Bank slots pointing at it are cleared (other slots keep their numbers —
+    slot stability, DESIGN.md §7) and it leaves the setlist. False = nothing
+    was removed OR the write was refused; either way the look still exists."""
+    data = load_file(path)
+    entry = data.get("modes", {}).get(mode, {})
+    looks = entry.get("looks", {})
+    if name not in looks:
         return False
-    del existing[name]
-    _write(existing, path)
-    return True
+    del looks[name]
+    if "bank" in entry:
+        entry["bank"] = {s: n for s, n in entry["bank"].items() if n != name}
+    if "setlist" in entry:
+        entry["setlist"] = [n for n in entry["setlist"] if n != name]
+    return write_file(data, path)
 
 
-def rename(old: str, new: str, path: str = "presets.json") -> bool:
-    """Rename a user preset. Refuses built-ins, name clashes, and empty names."""
+def rename(old: str, new: str, path: str = "presets.json",
+           mode: str = DEFAULT_MODE, builtin: Optional[dict] = None) -> bool:
+    """Rename a user look. Refuses built-ins, name clashes, and empty names.
+    Bank slots and setlist entries follow the rename. False = refused OR the
+    write did not land; the old name is still the live one."""
+    builtin = BUILTIN if builtin is None else builtin
     new = new.strip()
-    existing = _read(path)
-    if old not in existing or not new or new == old:
+    data = load_file(path)
+    entry = data.get("modes", {}).get(mode, {})
+    looks = entry.get("looks", {})
+    if old not in looks or not new or new == old:
         return False
-    if new in existing or new in BUILTIN:
+    if new in looks or new in builtin:
         return False
-    existing[new] = existing.pop(old)
-    _write(existing, path)
-    return True
+    looks[new] = looks.pop(old)
+    if "bank" in entry:
+        entry["bank"] = {s: (new if n == old else n)
+                         for s, n in entry["bank"].items()}
+    if "setlist" in entry:
+        entry["setlist"] = [new if n == old else n for n in entry["setlist"]]
+    return write_file(data, path)
+
+
+# ----- bank + setlist (DESIGN.md §7: explicit slot assignments, not positions) -----
+
+def bank(path: str = "presets.json", mode: str = DEFAULT_MODE) -> Optional[dict]:
+    """The stored slot→name dict, or None when this mode never stored one
+    (callers seed a default — an explicit empty dict is respected)."""
+    entry = load_file(path).get("modes", {}).get(mode, {})
+    return dict(entry["bank"]) if "bank" in entry else None
+
+
+def set_bank(bank_dict: dict, path: str = "presets.json",
+             mode: str = DEFAULT_MODE) -> bool:
+    """Persist the slot→name map. Returns whether it reached the disk."""
+    data = load_file(path)
+    _mode_entry(data, mode)["bank"] = {str(k): v for k, v in bank_dict.items()}
+    return write_file(data, path)
+
+
+def setlist(path: str = "presets.json", mode: str = DEFAULT_MODE) -> Optional[list]:
+    """The stored setlist order, or None when this mode never stored one."""
+    entry = load_file(path).get("modes", {}).get(mode, {})
+    return list(entry["setlist"]) if "setlist" in entry else None
+
+
+def set_setlist(names: list, path: str = "presets.json",
+                mode: str = DEFAULT_MODE) -> bool:
+    """Persist the setlist order. Returns whether it reached the disk."""
+    data = load_file(path)
+    _mode_entry(data, mode)["setlist"] = list(names)
+    return write_file(data, path)
+
+
+# ----- autosave state (DESIGN.md §6.4: crash restart resumes the same look) -----
+
+def load_state(path: str = "state.json") -> dict:
+    return _read(path)
+
+
+def save_state(state: dict, path: str = "state.json"):
+    try:
+        _write(state, path)
+    except Exception:
+        pass    # autosave must never take the show down

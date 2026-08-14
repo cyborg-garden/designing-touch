@@ -61,6 +61,36 @@ def test_drag_on_empty_panel_scrolls():
     assert _quit_bottom(ui) < before
 
 
+def test_collapse_button_wins_over_scrolled_row_under_it():
+    """DATA-LOSS guard: the collapse button is fixed chrome floating above
+    scrolled content. When a user preset's row (and its hover delete button)
+    scrolls underneath it, a click must toggle the collapse — never arm the
+    delete (two such clicks would silently destroy a saved look)."""
+    ui = OverlayUI(1280, 720, PRESETS + ["mine"], list(PALETTES), MATTES)
+    ui.user_presets = {"mine"}
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    ui.draw(frame, {"status": ""})
+    collapse = next(r for r, k, _ in ui._hot if k == "collapse")
+    row = next(r for r, k, p in ui._hot
+               if k == "preset" and p == ui.presets.index("mine"))
+    # scroll the panel so the 'mine' row slides under the collapse button
+    ui.scroll = row[1] - collapse[1] + 4
+    ui.mouse = ((collapse[0] + collapse[2]) // 2,
+                (collapse[1] + collapse[3]) // 2)
+    ui.draw(frame, {"status": ""})       # hover draw reveals manage buttons
+    del_rect = next(r for r, k, p in ui._hot if k == "del" and p == "mine")
+    ix0, iy0 = max(del_rect[0], collapse[0]), max(del_rect[1], collapse[1])
+    ix1, iy1 = min(del_rect[2], collapse[2]), min(del_rect[3], collapse[3])
+    assert ix1 > ix0 and iy1 > iy0, "precondition: delete overlaps collapse"
+    cx, cy = (ix0 + ix1) // 2, (iy0 + iy1) // 2
+    ui.mouse = (cx, cy)
+    ui.draw(frame, {"status": ""})
+    ui.on_mouse(cv2.EVENT_LBUTTONDOWN, cx, cy, 0)
+    assert ui.open is False              # the collapse click landed
+    assert ui._del_armed is None         # the delete never armed
+    assert ui.pending_delete is None
+
+
 def test_slider_drag_still_works_with_scrolling():
     ui = _ui()
     payload = next(p for _, k, p in ui._hot if k == "slider" and p[0] == "video_mix")

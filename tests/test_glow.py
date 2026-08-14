@@ -1,8 +1,23 @@
 """Smoke test for the glow renderer (needs a GL context)."""
 import numpy as np
+import pytest
 
 from dtouch.glow import GlowRenderer
 from dtouch.particles import ParticleFlow
+
+
+def _gl_available():
+    try:
+        import moderngl
+        ctx = moderngl.create_standalone_context()
+        ctx.release()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _gl_available(),
+                                reason="no GL context available (CI)")
 
 
 def test_glow_renders_nonblack_and_trails_accumulate():

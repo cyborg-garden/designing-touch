@@ -23,7 +23,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from .dither import bayer_dither, floyd_steinberg
+from .dither import bayer_dither, blue_noise_dither, floyd_steinberg, riemersma_dither
 
 
 class CircuitBent:
@@ -54,10 +54,18 @@ class CircuitBent:
     scanline_strength : float
         Darkening amount for scan lines (0 = invisible, 1 = fully black rows).
     dither_mode : str or None
-        ``'bayer'`` = fast ordered dithering, ``'fs'`` = Floyd-Steinberg,
-        ``None`` = skip dithering.
+        ``'bayer'`` = fast ordered dithering, ``'blue'`` = blue-noise ordered
+        dithering, ``'fs'`` = Floyd-Steinberg, ``'riemersma'`` =
+        Hilbert-curve error diffusion, ``None`` = skip dithering. All modes
+        dither in linear light (sRGB gamma-correct) by default.
     dither_bits : int
         Bit depth used for dithering.
+    dither_gamma : bool
+        Dither in linear light (default). False = the crushed retro look.
+    dither_invert : bool or "auto"
+        Ordered-dither rounding bias (see dtouch.dither): "auto" flips on
+        dark frames; True/False force it. Error diffusion self-corrects and
+        ignores it.
     dither_size : int or None
         If set, dithering is computed at this image height (aspect-preserving)
         then up-scaled with nearest-neighbour — cheaper and adds a block-pixel
@@ -77,6 +85,8 @@ class CircuitBent:
         dither_mode: str | None = "bayer",
         dither_bits: int = 3,
         dither_size: int | None = 72,
+        dither_gamma: bool = True,
+        dither_invert: bool | str = "auto",
     ):
         self._rng = np.random.default_rng(seed)
         self.chroma_shift = chroma_shift
@@ -89,6 +99,8 @@ class CircuitBent:
         self.dither_mode = dither_mode
         self.dither_bits = dither_bits
         self.dither_size = dither_size
+        self.dither_gamma = dither_gamma
+        self.dither_invert = dither_invert
 
         # IIR-smoothed chroma offsets: target is re-sampled each frame then
         # low-pass filtered so the colour bleed drifts slowly, not jittering.
@@ -250,11 +262,20 @@ class CircuitBent:
         return self._dither_array(out)
 
     def _dither_array(self, img: np.ndarray) -> np.ndarray:
+        bits, gamma = self.dither_bits, self.dither_gamma
         if self.dither_mode == "bayer":
-            return bayer_dither(img, bits=self.dither_bits)
+            return bayer_dither(img, bits=bits, invert=self.dither_invert,
+                                gamma=gamma)
+        if self.dither_mode == "blue":
+            return blue_noise_dither(img, bits=bits, invert=self.dither_invert,
+                                     gamma=gamma)
+        if self.dither_mode == "riemersma":
+            # error diffusion self-corrects — no invert parameter
+            return riemersma_dither(img, bits=bits, gamma=gamma)
         if self.dither_mode == "fs":
             result = np.empty_like(img)
             for c in range(img.shape[2]):
-                result[:, :, c] = floyd_steinberg(img[:, :, c], bits=self.dither_bits)
+                result[:, :, c] = floyd_steinberg(img[:, :, c], bits=bits,
+                                                  gamma=gamma)
             return result
         return img

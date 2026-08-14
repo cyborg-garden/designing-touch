@@ -16,7 +16,12 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2.0",
-    "opencv-python>=4.10",
+    # <5 is a real pin, not caution: cv2 5 rasterises Hershey text differently,
+    # which moves every pixel of the drawn control panel (measured up to 5.2
+    # mean-abs-diff over the panel ROI) and fails tests/test_goldens.py on a
+    # fresh install. The panel is drawn entirely with cv2 primitives, so this
+    # is a UI-affecting dependency, not just a decoder.
+    "opencv-python>=4.10,<5",
     "moderngl>=5.12",
     "Pillow>=10.0",
     "imageio>=2.34",
@@ -26,8 +31,19 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.4"]
-person = ["mediapipe>=0.10"]   # person matte (selfie segmentation); not needed for the default
+# person matte (selfie segmentation); not needed for the default.
+# opencv-contrib-python is pinned here, not in `dependencies`, because it only
+# enters the environment through mediapipe — and it is NOT a spare wheel: it
+# ships the SAME `cv2` module as opencv-python, installs after it, and therefore
+# WINS the import. mediapipe requires it unbounded, so without this pin
+# `pip install -e ".[person]"` lands opencv-contrib-python 5 next to the pinned
+# opencv-python 4 and `cv2.__version__` comes back '5.0.0' — the pin above is
+# satisfied on paper and defeated in the environment. Keep both bounds in step.
+person = ["mediapipe>=0.10", "opencv-contrib-python>=4.10,<5"]
 dev = ["pytest>=8.0"]
 
 [tool.setuptools]
-packages = ["dtouch"]
+packages = ["dtouch", "dtouch.modes"]
+
+[tool.setuptools.package-data]
+dtouch = ["assets/*.npy"]

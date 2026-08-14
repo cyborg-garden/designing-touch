@@ -1,8 +1,23 @@
 """Integration smoke test: synthetic source -> field -> GPU render -> non-black frame."""
 import numpy as np
+import pytest
 
 from dtouch import (SyntheticSource, make_grid, displace_z, random_scale,
                     random_euler, pack_instances, Renderer, ShadowRenderer)
+
+
+def _gl_available():
+    try:
+        import moderngl
+        ctx = moderngl.create_standalone_context()
+        ctx.release()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _gl_available(),
+                                reason="no GL context available (CI)")
 
 
 def test_pipeline_renders_nonblack_frame():

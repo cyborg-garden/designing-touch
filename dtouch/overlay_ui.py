@@ -1,481 +1,49 @@
-"""In-frame control panel — a collapsible sidebar drawn onto the render, one window.
+"""In-frame control panel — a generic walker over a panel spec, one window.
 
-Immediate-mode GUI drawn with cv2 primitives (Tk won't paint when launched headless on macOS;
-cv2 windows do). Everything is a drawn, boxed, hover-highlighting control with click feedback,
-and aligned hit-testing via setMouseCallback. Because it's just pixels, it can be rendered
-headless and inspected. ASCII glyphs only — cv2's font can't render •/■/≡/— (they show as ???).
+The widget primitives (rows, sliders, section headers, cycles, rename box,
+manage buttons, tooltip, scrollbar) live in dtouch.imgui; the controls
+themselves are declared as data in a panel spec (dtouch.panelspec, DESIGN.md
+§2.3). OverlayUI walks the spec and draws it with the toolkit — today's spec
+is `build_particles_spec`, reproducing the shipped Particles panel exactly
+(pinned by tests/test_goldens.py); a future `Mode.panel_spec()` returns pieces
+of the same thing.
 
-Every pixel dimension is authored at a 1080p baseline and multiplied by a scale factor derived
-from the output resolution (self._s, set each draw from the frame height). The factor floors at
-1.0 — so 720p/1080p render exactly as authored — and grows to 2x at 4K, keeping the panel the
-same fraction of the frame instead of shrinking to a tiny fixed pixel box (issue #3).
+Immediate-mode GUI drawn with cv2 primitives (Tk won't paint when launched
+headless on macOS; cv2 windows do). Everything is a drawn, boxed,
+hover-highlighting control with click feedback, and aligned hit-testing via
+setMouseCallback. Because it's just pixels, it can be rendered headless and
+inspected.
+
+Every pixel dimension is authored at a 1080p baseline and multiplied by a scale
+factor derived from the output resolution (self._s, set each draw from the
+frame height). The factor floors at 1.0 — so 720p/1080p render exactly as
+authored — and grows to 2x at 4K, keeping the panel the same fraction of the
+frame instead of shrinking to a tiny fixed pixel box (issue #3).
 """
 from __future__ import annotations
 
 import cv2
+import numpy as np
 
-PANEL = (34, 32, 30)
-BTN = (54, 52, 50)
-HOVER = (82, 86, 82)
-INK = (215, 222, 218)
-DIM = (140, 150, 145)
-ACC = (120, 215, 140)
-TRACK = (70, 74, 72)
-HANDLE = (160, 230, 175)
-RED = (70, 70, 235)
-DARK = (20, 22, 20)
+from . import imgui
+from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
+                    in_rect as _in)
+from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
+                        PresetList, Section)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
 # Post-FX dither modes, in cycle order. "off" is a deliberate third choice rather than a
 # disabled state — the glitch chain is still worth having without the dither.
-DITHERS = ["bayer", "fs", "off"]
+DITHERS = ["bayer", "blue", "fs", "riemersma", "off"]
 
+# SIGNAL rack dither-quality bias options (DESIGN.md §4.1): the ordered
+# dithers' rounding direction — auto flips on dark frames, light/dark force it.
+SIGNAL_BIASES = ["auto", "light", "dark"]
+SIGNAL_BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
 
-def _in(rect, p):
-    x0, y0, x1, y1 = rect
-    return x0 <= p[0] <= x1 and y0 <= p[1] <= y1
-
-
-class OverlayUI:
-    def __init__(self, w, h, presets, palettes, mattes,
-                 preset="abstract", matte="auto", palette="ice"):
-        self.w, self.h = w, h
-        self.presets, self.palettes, self.mattes = presets, palettes, mattes
-        self.preset_idx = presets.index(preset) if preset in presets else 0
-        self.matte_idx = mattes.index(matte) if matte in mattes else 0
-        self.palette_idx = palettes.index(palette) if palette in palettes else 0
-        self.fade, self.exposure, self.spark, self.curl, self.dot = 0.90, 1.4, 0.35, 0.5, 0.011
-        self.damp, self.pull, self.reseed = 0.90, 22.0, 0.06   # motion physics (sigil knobs)
-        self.count = 0.75   # fraction of the allocated particles to render
-        self.mirror, self.audio, self.sens, self.record = True, False, 1.0, False
-        self.video_bg, self.video_mix = False, 0.5   # raw footage behind the particles
-        # MOTION — boids steering on the particle cloud (dtouch.flock). Off by default:
-        # every gain at 0 short-circuits the solver, so the existing look is untouched.
-        self.flock = False
-        self.cohere, self.align, self.separate = 0.35, 0.45, 0.30
-        # SIGNAL — circuit-bent post-processing on the rendered frame (dtouch.circuit_bent).
-        # `dither_idx` indexes DITHERS; "off" is a real choice, not a disabled state.
-        self.glitch = False
-        self.chroma, self.drift, self.crush = 10.0, 8.0, 0.0
-        self.dither_idx = 0
-        self.scanlines = True
-        self.res_options = [("720p", 1280, 720), ("1080p", 1920, 1080),
-                            ("1440p", 2560, 1440), ("4K", 3840, 2160)]
-        self.res_idx = next((i for i, (_, rw, rh) in enumerate(self.res_options)
-                             if (rw, rh) == (w, h)), 1)
-        self.open = True
-        # Collapsible sections. The panel grew past the 1080p window when MOTION and SIGNAL
-        # were added, breaking the "everything reachable without scrolling at 1080p" contract
-        # (tests/test_overlay_scroll.py). Collapsing is the fix that keeps scaling: each new
-        # family of effects costs one header row until you open it. The two new sections start
-        # closed so the panel opens looking like it always did.
-        self.sections = {"TEMPLATES": True, "SOURCE": True, "LOOK": True,
-                         "MOTION": False, "SIGNAL": False}
-        self.quit = False
-        self.scroll = 0          # panel scroll offset (px) — content taller than the window
-        self._content_h = 0      # measured column height from the last draw
-        self._scroll_drag = None
-        self._tooltip = None
-        self.pending_preset = None
-        self.pending_save = False
-        self.user_presets = set()    # names that can be renamed/deleted (saved looks)
-        self.pending_delete = None   # name confirmed for deletion (live loop applies)
-        self.pending_rename = None   # (old, new) committed via Enter (live loop applies)
-        self.renaming = None         # name currently being renamed (typing mode)
-        self.rename_buf = ""
-        self._del_armed = None       # first x-click arms; second confirms
-        self._blink = 0
-        self.panel_w = 290           # base (1080p) panel width; scaled by self._s when drawn
-        self._s = 1.0                # current UI scale (set each draw from the frame height)
-        self._panel_px = 290         # actual drawn panel width in frame px (panel_w * self._s)
-        self.mouse = (-1, -1)
-        self._hot = []
-        self._drag = None
-        self._flash = 0
-        self._flash_rect = None
-
-    @property
-    def typing(self): return self.renaming is not None
-    @property
-    def res_name(self): return self.res_options[self.res_idx][0]
-    @property
-    def res_wh(self): return self.res_options[self.res_idx][1:3]
-    @property
-    def matte_name(self): return self.mattes[self.matte_idx]
-    @property
-    def palette_name(self): return self.palettes[self.palette_idx]
-
-    @property
-    def dither_name(self): return DITHERS[self.dither_idx]
-    @property
-    def preset_name(self): return self.presets[self.preset_idx]
-
-    def sync_from(self, pf, glow, matte):
-        """Reflect engine state into the sliders (after a preset is applied)."""
-        self.fade, self.exposure = glow.fade, glow.exposure
-        self.spark, self.curl, self.dot = pf.spark, pf.curl_amp, pf.base_size
-        self.damp, self.pull, self.reseed = pf.damp, pf.pull_falloff, pf.reseed_frac
-        if matte in self.mattes: self.matte_idx = self.mattes.index(matte)
-        if pf.palette in self.palettes: self.palette_idx = self.palettes.index(pf.palette)
-
-    # ----- scaling -----
-    def _S(self, n):
-        """Scale a baseline pixel value by the current resolution factor (int for cv2)."""
-        return int(round(n * self._s))
-
-    # ----- primitives -----
-    def _text(self, img, s, x, y, color=INK, scale=0.46, thick=1):
-        cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale * self._s, color,
-                    max(1, int(round(thick * self._s))), cv2.LINE_AA)
-
-    def _box(self, img, rect, fill, border=TRACK):
-        x0, y0, x1, y1 = rect
-        cv2.rectangle(img, (x0, y0), (x1, y1), fill, -1)
-        cv2.rectangle(img, (x0, y0), (x1, y1), border, max(1, self._S(1)), cv2.LINE_AA)
-
-    def _row(self, img, label, key, x, y, w, h=None, active=False, payload=None):
-        if h is None:
-            h = self._S(24)
-        rect = (x, y, x + w, y + h)
-        hovered = _in(rect, self.mouse)
-        fill = ACC if active else (HOVER if hovered else BTN)
-        self._box(img, rect, fill)
-        self._text(img, label, x + self._S(10), y + h - self._S(8), DARK if active else INK, 0.46)
-        self._hot.append(((x, y, x + w, y + h), key, payload))
-        return rect
-
-    def _slider(self, img, label, attr, x, y, w, info=None):
-        lo, hi = _RANGES[attr]
-        val = getattr(self, attr)
-        rect = (x, y, x + w, y + self._S(26))
-        hovered = _in(rect, self.mouse)
-        self._box(img, rect, HOVER if hovered else BTN)
-        # info badge
-        ic = (x + self._S(14), y + self._S(13))
-        irect = (x + self._S(4), y + self._S(3), x + self._S(24), y + self._S(23))
-        cv2.circle(img, ic, self._S(8), (90, 110, 150), -1, cv2.LINE_AA)
-        self._text(img, "i", ic[0] - self._S(2), ic[1] + self._S(5), (235, 240, 245), 0.42, 1)
-        if info and _in(irect, self.mouse):
-            self._tooltip = (info, x, y)
-        self._text(img, label, x + self._S(30), y + self._S(17), DIM, 0.42)
-        tx0, tx1 = x + self._S(96), x + w - self._S(44)
-        cv2.line(img, (tx0, y + self._S(13)), (tx1, y + self._S(13)), TRACK, max(1, self._S(3)), cv2.LINE_AA)
-        hx = int(tx0 + (val - lo) / (hi - lo) * (tx1 - tx0))
-        cv2.circle(img, (hx, y + self._S(13)), self._S(6), HANDLE, -1, cv2.LINE_AA)
-        self._text(img, f"{val:.2f}", x + w - self._S(38), y + self._S(17), INK, 0.42)
-        self._hot.append(((tx0 - self._S(8), y, tx1 + self._S(8), y + self._S(26)),
-                          "slider", (attr, tx0, tx1, lo, hi)))
-        return y + self._S(30)
-
-    def _section(self, img, title, x, y, w):
-        """Clickable section header. Returns (next_y, is_open).
-
-        ASCII markers only: cv2's Hershey font renders no glyph for the usual disclosure
-        triangles, so they come out as '???' (see the module docstring).
-        """
-        is_open = self.sections.get(title, True)
-        rect = (x - self._S(4), y - self._S(4), x + w, y + self._S(14))
-        if _in(rect, self.mouse):
-            self._box(img, rect, HOVER)
-        self._text(img, ("- " if is_open else "+ ") + title, x, y + self._S(8),
-                   INK if is_open else DIM, 0.4)
-        self._hot.append((rect, "section", title))
-        return y + self._S(16), is_open
-
-    def _cycle(self, img, label, value, key, x, y, w):
-        self._text(img, label, x, y + self._S(10), DIM, 0.42)
-        ry = y + self._S(16)
-        bw, bh = self._S(28), self._S(24)
-        lb = (x, ry, x + bw, ry + bh)
-        rb = (x + w - bw, ry, x + w, ry + bh)
-        self._box(img, lb, HOVER if _in(lb, self.mouse) else BTN)
-        self._box(img, rb, HOVER if _in(rb, self.mouse) else BTN)
-        self._text(img, "<", x + self._S(9), ry + self._S(17), INK, 0.5, 2)
-        self._text(img, ">", x + w - self._S(19), ry + self._S(17), INK, 0.5, 2)
-        self._text(img, str(value), x + self._S(40), ry + self._S(17), ACC, 0.5)
-        self._hot.append((lb, "cycle", (key, -1)))
-        self._hot.append((rb, "cycle", (key, +1)))
-        return ry + self._S(32)
-
-    def _manage_buttons(self, frame, name, x, y, cw):
-        """Hover-revealed rename (~) and delete (x) buttons on a saved look's row.
-        Their hit rects go to the FRONT of _hot so they win over the full-row rect."""
-        db = (x + cw - self._S(26), y + self._S(2), x + cw - self._S(4), y + self._S(22))
-        rb = (x + cw - self._S(52), y + self._S(2), x + cw - self._S(30), y + self._S(22))
-        armed = self._del_armed == name
-        self._box(frame, rb, HOVER if _in(rb, self.mouse) else BTN)
-        self._text(frame, "~", rb[0] + self._S(6), rb[3] - self._S(7), INK, 0.45)
-        self._box(frame, db, RED if armed else (HOVER if _in(db, self.mouse) else BTN))
-        self._text(frame, "x", db[0] + self._S(7), db[3] - self._S(7), INK, 0.45, 2 if armed else 1)
-        if armed:
-            self._text(frame, "sure? x again", x - self._S(118), y + self._S(16), RED, 0.42, 1)
-        self._hot.insert(0, (db, "del", name))
-        self._hot.insert(0, (rb, "ren", name))
-
-    def _rename_box(self, frame, x, y, cw, px):
-        """The row being renamed becomes a text input (Enter saves, Esc cancels)."""
-        rect = (x, y, x + cw, y + self._S(24))
-        self._box(frame, rect, DARK, border=ACC)
-        cur = "_" if (self._blink // 12) % 2 == 0 else ""
-        self._text(frame, self.rename_buf + cur, x + self._S(10), y + self._S(16), ACC, 0.46)
-        self._text(frame, "type name: enter=save esc=cancel", px - self._S(240), y + self._S(16), ACC, 0.42)
-
-    # ----- keyboard (rename typing) -----
-    def on_key(self, key):
-        """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
-        so the caller knows not to treat 'q' as quit while the user is typing."""
-        if self.renaming is None:
-            return False
-        if key in (13, 10):              # enter — commit
-            new = self.rename_buf.strip()
-            if new and new != self.renaming:
-                self.pending_rename = (self.renaming, new)
-            self.renaming = None
-        elif key == 27:                  # esc — cancel
-            self.renaming = None
-        elif key in (8, 127):            # backspace / delete
-            self.rename_buf = self.rename_buf[:-1]
-        elif 32 <= key <= 126 and len(self.rename_buf) < 22:
-            self.rename_buf += chr(key)
-        return True
-
-    # ----- layout -----
-    def draw(self, frame, info):
-        self._hot = []
-        self._tooltip = None
-        h, w = frame.shape[:2]
-        # scale the whole panel by the output resolution, floored at the 1080p baseline so
-        # 720p/1080p are unchanged and 4K renders at 2x (same fraction of the frame).
-        self._s = max(1.0, h / BASE_H)
-        pw = self._S(self.panel_w)
-        self._panel_px = pw
-        if not self.open:
-            r = (w - self._S(48), self._S(12), w - self._S(12), self._S(42))
-            self._box(frame, r, HOVER if _in(r, self.mouse) else PANEL)
-            for yy in (self._S(21), self._S(27), self._S(33)):
-                cv2.line(frame, (w - self._S(40), yy), (w - self._S(20), yy), INK,
-                         max(1, self._S(2)), cv2.LINE_AA)
-            self._hot.append((r, "collapse", None))
-            self._draw_status(frame, info)
-            return frame
-
-        px = w - pw
-        ov = frame.copy()
-        cv2.rectangle(ov, (px, 0), (w, h), PANEL, -1)
-        cv2.addWeighted(ov, 0.86, frame, 0.14, 0, frame)
-        # the column can be taller than the window (e.g. 720p) — scroll, clamped so it's
-        # a no-op when everything fits. content height comes from the previous draw.
-        self.scroll = min(max(self.scroll, 0), max(0, self._content_h - h))
-        x, cw, y = px + self._S(16), pw - self._S(32), self._S(30) - self.scroll
-        self._text(frame, "dtouch", x, y, ACC, 0.62, 2)
-        y += self._S(16)
-
-        y, sec_open = self._section(frame, "TEMPLATES", x, y, cw)
-        self._blink += 1
-        for i, name in enumerate(self.presets if sec_open else []):
-            if name == self.renaming:
-                self._rename_box(frame, x, y, cw, px)
-                y += self._S(28)
-                continue
-            r = self._row(frame, name, "preset", x, y, cw,
-                          active=(i == self.preset_idx), payload=i)
-            if name in self.user_presets and (_in(r, self.mouse) or name == self._del_armed):
-                self._manage_buttons(frame, name, x, y, cw)
-            y += self._S(28)
-        if sec_open:
-            self._row(frame, "+ Save current look", "save", x, y, cw); y += self._S(30)
-        y += self._S(4)
-
-        y, sec_open = self._section(frame, "SOURCE", x, y, cw)
-        if sec_open:
-            y = self._cycle(frame, "matte", self.matte_name, "matte", x, y, cw) + self._S(2)
-            y = self._cycle(frame, "output", self.res_name, "res", x, y, cw) + self._S(2)
-            self._row(frame, "Video bg: " + ("ON" if self.video_bg else "off"),
-                      "video_bg", x, y, cw, active=self.video_bg); y += self._S(28)
-            y = self._slider(frame, "Vid mix", "video_mix", x, y, cw,
-                             "How visible the raw camera footage is behind the particles.")
-        y += self._S(4)
-
-        y, sec_open = self._section(frame, "LOOK", x, y, cw)
-        if sec_open:
-            y = self._cycle(frame, "color", self.palette_name, "color", x, y, cw) + self._S(4)
-            for label, attr, tip in _SLIDERS:
-                y = self._slider(frame, label, attr, x, y, cw, tip)
-        y += self._S(4)
-
-        # MOTION — boids steering (dtouch.flock). The sliders stay visible while off so the
-        # section reads as a thing you can turn on, not a thing that appears from nowhere.
-        y, sec_open = self._section(frame, "MOTION", x, y, cw)
-        if sec_open:
-            self._row(frame, "Flock: " + ("ON" if self.flock else "off"),
-                      "flock", x, y, cw, active=self.flock); y += self._S(28)
-            y = self._slider(frame, "Cohere", "cohere", x, y, cw,
-                             "Steer toward the local centre. Pulls the cloud into shoals.")
-            y = self._slider(frame, "Align", "align", x, y, cw,
-                             "Match neighbours' direction. This is what makes it move as one.")
-            y = self._slider(frame, "Separate", "separate", x, y, cw,
-                             "Push apart when crowded. Stops the shoal collapsing to a dot.")
-        y += self._S(4)
-
-        # SIGNAL — circuit-bent post-processing (dtouch.circuit_bent), applied to the rendered
-        # frame after the particles, before the panel is drawn (so the panel stays readable).
-        y, sec_open = self._section(frame, "SIGNAL", x, y, cw)
-        if sec_open:
-            self._row(frame, "Glitch: " + ("ON" if self.glitch else "off"),
-                      "glitch", x, y, cw, active=self.glitch); y += self._S(28)
-            y = self._cycle(frame, "dither", self.dither_name, "dither", x, y, cw) + self._S(2)
-            y = self._slider(frame, "Chroma", "chroma", x, y, cw,
-                             "Colour bleed: red and blue drift apart, slowly.")
-            y = self._slider(frame, "Drift", "drift", x, y, cw,
-                             "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears.")
-            y = self._slider(frame, "Crush", "crush", x, y, cw,
-                             "Hard bit-depth reduction. 0 = off.")
-            self._row(frame, "Scanlines: " + ("on" if self.scanlines else "off"),
-                      "scanlines", x, y, cw, active=self.scanlines); y += self._S(28)
-        y += self._S(6)
-        self._row(frame, "Sound react: " + ("ON" if self.audio else "off"),
-                  "audio", x, y, cw, active=self.audio); y += self._S(28)
-        y = self._slider(frame, "Sens", "sens", x, y, cw,
-                         "How strongly sound drives the visuals.") + self._S(4)
-        self._row(frame, ("Stop recording" if self.record else "Record"),
-                  "record", x, y, cw, active=self.record); y += self._S(28)
-        self._row(frame, "Mirror: " + ("on" if self.mirror else "off"),
-                  "mirror", x, y, cw, active=self.mirror); y += self._S(32)
-        self._row(frame, "Quit", "quit", x, y, cw)
-        self._content_h = y + self.scroll + self._S(36)   # column bottom incl. margin, unscrolled
-
-        # collapse button drawn last so it stays fixed and clickable above scrolled content
-        cr = (w - self._S(40), self._S(12), w - self._S(12), self._S(36))
-        self._box(frame, cr, HOVER if _in(cr, self.mouse) else BTN)
-        self._text(frame, ">", w - self._S(33), self._S(30), INK, 0.55, 2)
-        self._hot.append((cr, "collapse", None))
-        if self._content_h > h:   # slim scrollbar on the panel's left edge
-            bar_h = max(int(h * h / self._content_h), self._S(30))
-            by = int((h - bar_h) * (self.scroll / max(self._content_h - h, 1)))
-            cv2.rectangle(frame, (px + self._S(2), by), (px + self._S(5), by + bar_h), TRACK, -1)
-
-        # click feedback: flash the last-clicked control
-        if self._flash > 0 and self._flash_rect is not None:
-            self._box(frame, self._flash_rect, BTN, border=(255, 255, 255))
-            self._flash -= 1
-        self._draw_tooltip(frame)
-        self._draw_status(frame, info)
-        return frame
-
-    def _draw_tooltip(self, frame):
-        if not self._tooltip:
-            return
-        text, sx, sy = self._tooltip
-        words, lines, cur = text.split(), [], ""
-        for wd in words:
-            if len(cur) + len(wd) + 1 > 30:
-                lines.append(cur); cur = wd
-            else:
-                cur = (cur + " " + wd).strip()
-        if cur:
-            lines.append(cur)
-        bw, bh = self._S(250), self._S(16) * len(lines) + self._S(16)
-        bx = max(sx - bw - self._S(14), self._S(10))
-        by = max(min(sy, self.h - bh - self._S(10)), self._S(10))
-        self._box(frame, (bx, by, bx + bw, by + bh), (44, 48, 56), border=(120, 140, 170))
-        for i, ln in enumerate(lines):
-            self._text(frame, ln, bx + self._S(10), by + self._S(20) + i * self._S(16), INK, 0.42)
-
-    def _draw_status(self, frame, info):
-        self._text(frame, info.get("status", ""), self._S(12), self._S(24), ACC, 0.5)
-        if info.get("black"):
-            h, w = frame.shape[:2]
-            self._text(frame, "CAMERA IS BLACK - disable iPhone Continuity Camera",
-                       self._S(12), h // 2, RED, 0.8, 2)
-            self._text(frame, "iPhone: Settings > General > AirPlay & Handoff > Continuity Camera > Off",
-                       self._S(12), h // 2 + self._S(28), (140, 140, 240), 0.5)
-        if self.record:
-            h, w = frame.shape[:2]
-            off = (self._panel_px + self._S(22)) if self.open else self._S(70)
-            cv2.circle(frame, (w - off, self._S(24)), self._S(7), RED, -1)
-
-    # ----- mouse -----
-    def on_mouse(self, event, x, y, flags, param=None):
-        self.mouse = (x, y)
-        if event == cv2.EVENT_LBUTTONDOWN:
-            for rect, kind, payload in self._hot:
-                if _in(rect, (x, y)):
-                    self._flash_rect, self._flash = rect, 4
-                    self._activate(kind, payload, x)
-                    return
-            if self.open and x >= self.w - self._panel_px:
-                self._scroll_drag = (y, self.scroll)   # empty panel area: drag to scroll
-        elif event == cv2.EVENT_MOUSEWHEEL and self.open:
-            step = self._S(40)
-            self.scroll += -step if flags > 0 else step   # flags>0 = wheel up (clamped in draw)
-        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
-            if self._drag:
-                attr, x0, x1, lo, hi = self._drag
-                t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-                setattr(self, attr, lo + t * (hi - lo))
-            elif self._scroll_drag:
-                y0, s0 = self._scroll_drag
-                self.scroll = s0 + (y0 - y)
-        elif event == cv2.EVENT_LBUTTONUP:
-            self._drag = None
-            self._scroll_drag = None
-
-    def _activate(self, kind, payload, x):
-        if kind != "del" and self._del_armed:
-            self._del_armed = None       # any other click disarms a pending delete
-        if kind == "del":
-            if self._del_armed == payload:
-                self.pending_delete = payload
-                self._del_armed = None
-            else:
-                self._del_armed = payload
-            return
-        if kind == "ren":
-            self.renaming = payload
-            self.rename_buf = payload    # prefill with the current name
-            return
-        if kind == "collapse":
-            self.open = not self.open
-        elif kind == "preset":
-            self.preset_idx = payload
-            self.pending_preset = self.presets[payload]
-        elif kind == "cycle":
-            key, d = payload
-            if key == "matte":
-                self.matte_idx = (self.matte_idx + d) % len(self.mattes)
-            elif key == "color":
-                self.palette_idx = (self.palette_idx + d) % len(self.palettes)
-            elif key == "res":
-                self.res_idx = (self.res_idx + d) % len(self.res_options)
-            elif key == "dither":
-                self.dither_idx = (self.dither_idx + d) % len(DITHERS)
-        elif kind == "slider":
-            attr, x0, x1, lo, hi = payload
-            self._drag = payload
-            t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-            setattr(self, attr, lo + t * (hi - lo))
-        elif kind == "audio":
-            self.audio = not self.audio
-        elif kind == "record":
-            self.record = not self.record
-        elif kind == "mirror":
-            self.mirror = not self.mirror
-        elif kind == "video_bg":
-            self.video_bg = not self.video_bg
-        elif kind == "section":
-            self.sections[payload] = not self.sections.get(payload, True)
-        elif kind == "flock":
-            self.flock = not self.flock
-        elif kind == "glitch":
-            self.glitch = not self.glitch
-        elif kind == "scanlines":
-            self.scanlines = not self.scanlines
-        elif kind == "save":
-            self.pending_save = True
-        elif kind == "quit":
-            self.quit = True
-
+RES_OPTIONS = [("720p", 1280, 720), ("1080p", 1920, 1080),
+               ("1440p", 2560, 1440), ("4K", 3840, 2160)]
 
 _RANGES = {
     "fade": (0.50, 0.985), "exposure": (0.3, 4.0), "spark": (0.0, 1.0),
@@ -501,3 +69,515 @@ _SLIDERS = [
     ("Reseed", "reseed", "How fast particles respawn. Low = they persist and trace flowing "
                          "lines; high = a constantly refreshing spray."),
 ]
+
+
+# UI attr -> serialized preset key, where they differ (the v1 names — so a
+# migrated look and a fresh capture are byte-compatible; DESIGN.md §7).
+_SAVE_KEYS = {"curl": "curl_amp", "dot": "base_size", "reseed": "reseed_frac",
+              "pull": "pull_falloff"}
+
+
+def _slider_spec(label, attr, tip, **kw):
+    lo, hi = _RANGES[attr]
+    kw.setdefault("save_key", _SAVE_KEYS.get(attr))
+    return Slider(label, attr, lo, hi, tip=tip, **kw)
+
+
+def build_particles_sections(palettes, mattes):
+    """The Particles mode's own panel sections (DESIGN.md §4.1) — what
+    ParticlesMode.panel_spec() returns. The shell appends the SIGNAL rack and
+    the global rows below these (DESIGN.md §2.4)."""
+    look_sliders = [_slider_spec(label, attr, tip) for label, attr, tip in _SLIDERS]
+    return [
+        Section("TEMPLATES", [PresetList()]),
+        Section("SOURCE", [
+            Cycle("matte", "matte_idx", list(mattes), save_key="matte",
+                  status="matte {}"),
+            Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
+                  key="res", save=False),
+            Toggle("Video bg", "video_bg"),
+            _slider_spec("Vid mix", "video_mix",
+                         "How visible the raw camera footage is behind the particles.",
+                         apply="keep"),
+        ]),
+        Section("LOOK", [
+            Cycle("color", "palette_idx", list(palettes), gap=4,
+                  save_key="palette", status="{}"),
+        ] + look_sliders + [
+            # captured-but-undrawn: saved since v1, no panel control yet
+            Param("attract_speed"),
+        ]),
+        # MOTION — boids steering (dtouch.flock). The sliders stay visible while off so the
+        # section reads as a thing you can turn on, not a thing that appears from nowhere.
+        Section("MOTION", key_hint="F", widgets=[
+            Toggle("Flock", "flock"),
+            _slider_spec("Cohere", "cohere",
+                         "Steer toward the local centre. Pulls the cloud into shoals."),
+            _slider_spec("Align", "align",
+                         "Match neighbours' direction. This is what makes it move as one."),
+            _slider_spec("Separate", "separate",
+                         "Push apart when crowded. Stops the shoal collapsing to a dot."),
+        ], open=False),
+    ]
+
+
+def build_signal_section():
+    """The shell's SIGNAL rack (DESIGN.md §2.4) — circuit-bent post-processing
+    (dtouch.circuit_bent) applied to every mode's output after render + video
+    composite, before recorder and panel (so the panel stays readable). Its
+    state serializes under "signal" inside each mode's looks."""
+    return Section("SIGNAL", key_hint="G", widgets=[
+            Toggle("Glitch", "glitch"),
+            Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
+            # dither-quality controls (DESIGN.md §2.4/§4.1: the audit's
+            # quality controls grow the rack; a mode that claims them —
+            # Dither Girl owns ALL dither quality — hides them)
+            Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
+                   tip="Dither bit depth. 1 = pure two-tone; higher keeps "
+                       "more shades."),
+            Toggle("Gamma", "sig_gamma", save_key="gamma",
+                   tip="Dither in linear light so mid-tones keep their "
+                       "perceived brightness. Off = the crushed retro look."),
+            Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias"),
+            _slider_spec("Chroma", "chroma",
+                         "Colour bleed: red and blue drift apart, slowly."),
+            _slider_spec("Drift", "drift",
+                         "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears."),
+            _slider_spec("Crush", "crush",
+                         "Hard bit-depth reduction. 0 = off."),
+            Toggle("Scanlines", "scanlines", on_text="on"),
+        ], open=False, gap=6, store="signal")
+
+
+def build_global_rows():
+    """The shell's global rows (below every mode's sections) — the §4.1
+    sketch: Sound react (A) - Sens - Record (R) - Mirror - Menu (M) - Quit.
+    Key hints live in the labels; the Menu row is an Action posting the
+    `menu.open` command through the walker's pending_commands mailbox."""
+    return [
+        Toggle("Sound react (A)", "audio"),
+        _slider_spec("Sens", "sens", "How strongly sound drives the visuals.",
+                     apply="keep", gap=4),
+        Toggle("Record (R)", "record", save=False,
+               label_fn=lambda v: "Stop recording (R)" if v else "Record (R)"),
+        Toggle("Mirror", "mirror", on_text="on", save=False, gap=4),
+        Action("Menu (M)", "menu.open"),
+        Action("Quit", "quit"),
+    ]
+
+
+def build_particles_spec(presets, palettes, mattes):
+    """Today's Particles panel as data — the exact shipped section order,
+    names, labels, and vertical rhythm (goldens hold). Composed the same way
+    the shell composes any mode's panel: mode sections + SIGNAL rack + global
+    rows (DESIGN.md §2.4). `presets` is unused (PresetList reads the walker's
+    live list) but kept for signature stability."""
+    return (build_particles_sections(palettes, mattes)
+            + [build_signal_section()] + build_global_rows())
+
+
+class OverlayUI:
+    def __init__(self, w, h, presets, palettes, mattes,
+                 preset="abstract", matte="auto", palette="ice"):
+        self.w, self.h = w, h
+        self.presets, self.palettes, self.mattes = presets, palettes, mattes
+        self.preset_idx = presets.index(preset) if preset in presets else 0
+        self.matte_idx = mattes.index(matte) if matte in mattes else 0
+        self.palette_idx = palettes.index(palette) if palette in palettes else 0
+        self.fade, self.exposure, self.spark, self.curl, self.dot = 0.90, 1.4, 0.35, 0.5, 0.011
+        self.damp, self.pull, self.reseed = 0.90, 22.0, 0.06   # motion physics (sigil knobs)
+        self.count = 0.75   # fraction of the allocated particles to render
+        self.mirror, self.audio, self.sens, self.record = True, False, 1.0, False
+        self.video_bg, self.video_mix = False, 0.5   # raw footage behind the particles
+        # MOTION — boids steering on the particle cloud (dtouch.flock). Off by default:
+        # every gain at 0 short-circuits the solver, so the existing look is untouched.
+        self.flock = False
+        self.cohere, self.align, self.separate = 0.35, 0.45, 0.30
+        # SIGNAL — circuit-bent post-processing on the rendered frame (dtouch.circuit_bent).
+        # `dither_idx` indexes DITHERS; "off" is a real choice, not a disabled state.
+        self.glitch = False
+        self.chroma, self.drift, self.crush = 10.0, 8.0, 0.0
+        self.dither_idx = 0
+        # dither-quality controls (DESIGN.md §4.1): defaults match CircuitBent's
+        # shipped behaviour (3-bit, gamma-correct, auto bias)
+        self.sig_bits, self.sig_gamma, self.sig_bias_idx = 3.0, True, 0
+        self.scanlines = True
+        self.attract_speed = 4.5   # captured Param — no panel control yet
+        self.res_options = list(RES_OPTIONS)
+        self.res_idx = next((i for i, (_, rw, rh) in enumerate(self.res_options)
+                             if (rw, rh) == (w, h)), None)
+        if self.res_idx is None:
+            # non-standard boot res (tests, custom rigs): a real option, so the
+            # shell's res sync doesn't silently "correct" the output to 1080p
+            self.res_options.insert(0, (f"{w}x{h}", w, h))
+            self.res_idx = 0
+        self.open = True
+        self.quit = False
+        self.scroll = 0          # panel scroll offset (px) — content taller than the window
+        self._content_h = 0      # measured column height from the last draw
+        self._scroll_drag = None
+        self._tooltip = None
+        self.pending_preset = None
+        self.pending_save = False
+        # per-mode perform state (DESIGN.md §7): explicit slot assignments and
+        # setlist order for the ACTIVE mode, seeded by the shell. An empty
+        # setlist means "all looks, load order".
+        self.bank = {}               # {"1": name, ...} — digits 1-9 recall these
+        self.setlist = []            # [ / ] walk this order
+        self.pending_slot = None     # preset name whose slot badge was clicked
+        self.pending_commands = []   # Action commands with no dedicated mailbox
+        self.user_presets = set()    # names that can be renamed/deleted (saved looks)
+        self.pending_delete = None   # name confirmed for deletion (live loop applies)
+        self.pending_rename = None   # (old, new) committed via Enter (live loop applies)
+        self.renaming = None         # name currently being renamed (typing mode)
+        self.rename_buf = ""
+        self._del_armed = None       # first x-click arms; second confirms
+        self._blink = 0
+        self.panel_w = 290           # base (1080p) panel width; scaled by self._s when drawn
+        self._s = 1.0                # current UI scale (set each draw from the frame height)
+        self._panel_px = 290         # actual drawn panel width in frame px (panel_w * self._s)
+        self.mouse = (-1, -1)
+        self._hot = []
+        self._drag = None
+        self._flash = 0          # frames of click feedback left
+        self._flash_key = None   # (kind, payload-identity) — re-located each draw
+        self._scrim = None       # cached PANEL-colored blend buffer (perf)
+        # per-mode accent (DESIGN.md §5): exactly one accent on screen, owned by
+        # the active mode. Default ACC green = the shipped Particles chrome, so
+        # a bare OverlayUI (goldens, tests) renders identical pixels.
+        self.accent = ACC
+        # panel title (DESIGN.md §4.1/§4.2 sketch: 'dtouch - MODE TITLE',
+        # ASCII hyphen). The shell sets it per mode; the bare default matches
+        # the goldens' Particles panel.
+        self.panel_title = "dtouch - PARTICLES"
+        # still-image mailbox (DESIGN.md §2.1: the shell owns still sources) —
+        # a path posted here is loaded by the shell's mailbox pump.
+        self.pending_still_path = None
+        self._gui = imgui.Gui()
+        self.set_spec(build_particles_spec(presets, palettes, mattes))
+
+    def set_spec(self, spec):
+        """Bind a panel spec: build the sections state (collapsible headers keep
+        their defaults from the spec — the two new families start closed so the
+        panel opens looking like it always did, and the default column still
+        fits a 1080p window; tests/test_overlay_scroll.py) and the activation
+        maps the generic _activate routes through."""
+        self.spec = spec
+        self.sections = {s.title: s.open for s in spec if isinstance(s, Section)}
+        # keyboard param-nudge selection (DESIGN.md §6.2): an index into the
+        # spec-order list of nudgeable widgets (Sliders + Cycles). Rebinding
+        # the spec (mode switch) resets it to the first control.
+        self.nudge_idx = 0
+        self._toggles = {}    # hit key -> Toggle
+        self._cycles = {}     # hit key -> Cycle
+        self._sliders = {}    # attr -> Slider
+        for wdg in self.iter_widgets():
+            if isinstance(wdg, Toggle):
+                self._toggles[wdg.attr] = wdg
+            elif isinstance(wdg, Cycle):
+                if wdg.attr == "res_idx":
+                    # the instance may carry a custom boot resolution option
+                    wdg.options = [n for n, _, _ in self.res_options]
+                self._cycles[wdg.hit_key] = wdg
+            elif isinstance(wdg, Slider):
+                self._sliders[wdg.attr] = wdg
+
+    def iter_widgets(self):
+        """Every widget in the spec, sections flattened (spec order)."""
+        for item in self.spec:
+            if isinstance(item, Section):
+                yield from item.widgets
+            else:
+                yield item
+
+    @property
+    def typing(self): return self.renaming is not None
+    @property
+    def res_name(self): return self.res_options[self.res_idx][0]
+    @property
+    def res_wh(self): return self.res_options[self.res_idx][1:3]
+    @property
+    def matte_name(self): return self.mattes[self.matte_idx]
+    @property
+    def palette_name(self): return self.palettes[self.palette_idx]
+
+    @property
+    def dither_name(self): return DITHERS[self.dither_idx]
+    @property
+    def preset_name(self): return self.presets[self.preset_idx]
+
+    def sync_from(self, pf, glow, matte):
+        """Reflect engine state into the sliders (after a preset is applied)."""
+        self.fade, self.exposure = glow.fade, glow.exposure
+        self.spark, self.curl, self.dot = pf.spark, pf.curl_amp, pf.base_size
+        self.damp, self.pull, self.reseed = pf.damp, pf.pull_falloff, pf.reseed_frac
+        self.attract_speed = pf.attract_speed
+        if matte in self.mattes: self.matte_idx = self.mattes.index(matte)
+        if pf.palette in self.palettes: self.palette_idx = self.palettes.index(pf.palette)
+
+    # ----- scaling -----
+    def _S(self, n):
+        """Scale a baseline pixel value by the current resolution factor (int for cv2)."""
+        return self._gui.S(n)
+
+    # ----- keyboard (rename typing) -----
+    def on_key(self, key):
+        """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
+        so the caller knows not to treat 'q' as quit while the user is typing.
+
+        Contract (DESIGN.md §6.2): rename-typing consumes EVERY key — while
+        renaming, no global keys fire. Esc is consumed too, and cancels the
+        rename only (it must not also step the overlay state or anything else);
+        `Esc` then `0` is the two-press panic escape hatch."""
+        if self.renaming is None:
+            return False
+        if key in (13, 10):              # enter — commit
+            new = self.rename_buf.strip()
+            if new and new != self.renaming:
+                self.pending_rename = (self.renaming, new)
+            self.renaming = None
+        elif key == 27:                  # esc — cancel
+            self.renaming = None
+        elif key in (8, 127):            # backspace / delete
+            self.rename_buf = self.rename_buf[:-1]
+        elif 32 <= key <= 126 and len(self.rename_buf) < 22:
+            self.rename_buf += chr(key)
+        return True
+
+    # ----- layout -----
+    def draw(self, frame, info):
+        g = self._gui
+        self._tooltip = None
+        h, w = frame.shape[:2]
+        # scale the whole panel by the output resolution, floored at the 1080p baseline so
+        # 720p/1080p are unchanged and 4K renders at 2x (same fraction of the frame).
+        self._s = max(1.0, h / BASE_H)
+        self._hot = g.begin(self._s, self.mouse, self.accent)
+        pw = g.S(self.panel_w)
+        self._panel_px = pw
+        if not self.open:
+            r = (w - g.S(48), g.S(12), w - g.S(12), g.S(42))
+            g.box(frame, r, HOVER if _in(r, self.mouse) else PANEL)
+            for yy in (g.S(21), g.S(27), g.S(33)):
+                cv2.line(frame, (w - g.S(40), yy), (w - g.S(20), yy), INK,
+                         max(1, g.S(2)), cv2.LINE_AA)
+            self._hot.append((r, "collapse", None))
+            self._draw_status(frame, info)
+            return frame
+
+        px = w - pw
+        # panel scrim restricted to the panel ROI (perf: the full-frame
+        # copy+addWeighted was an identity op outside the panel — pixels
+        # elsewhere are untouched, so the result is unchanged). The blend
+        # runs on a contiguous copy of the ROI (cv2 on a column-sliced view
+        # is slower than copying), against a cached PANEL-colored buffer.
+        sx = max(px, 0)                # a frame narrower than the panel clamps
+        roi = np.ascontiguousarray(frame[:, sx:])
+        if self._scrim is None or self._scrim.shape != roi.shape:
+            self._scrim = np.empty_like(roi)
+            self._scrim[:] = PANEL
+        cv2.addWeighted(self._scrim, 0.86, roi, 0.14, 0, dst=roi)
+        frame[:, sx:] = roi
+        # the column can be taller than the window (e.g. 720p) — scroll, clamped so it's
+        # a no-op when everything fits. content height comes from the previous draw.
+        self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
+        x, cw, y = px + g.S(16), pw - g.S(32), g.S(30) - self.scroll
+        g.text(frame, self.panel_title, x, y, self.accent, 0.62, 2)
+        y += g.S(16)
+        self._blink += 1
+
+        # ----- the generic walk: sections, then the shell's global rows -----
+        for item in self.spec:
+            if isinstance(item, Section):
+                y, sec_open = g.section(frame, item.title,
+                                        self.sections.get(item.title, True), x, y, cw,
+                                        key_hint=item.key_hint)
+                if sec_open:
+                    for wdg in item.widgets:
+                        y = self._draw_widget(frame, wdg, x, y, cw, px)
+                y += g.S(item.gap)
+            else:
+                y = self._draw_widget(frame, item, x, y, cw, px)
+        self._content_h = y + self.scroll + g.S(8)   # column bottom incl. margin, unscrolled
+
+        # collapse button drawn last so it stays fixed and clickable above scrolled content
+        cr = (w - g.S(40), g.S(12), w - g.S(12), g.S(36))
+        g.box(frame, cr, HOVER if _in(cr, self.mouse) else BTN)
+        g.text(frame, ">", w - g.S(33), g.S(30), INK, 0.55, 2)
+        self._hot.append((cr, "collapse", None))
+        g.scrollbar(frame, px, h, self._content_h, self.scroll)
+
+        # click feedback: flash the last-clicked control — border-only (a fill
+        # would hide the row's own content, e.g. the armed delete's 'sure?'),
+        # re-located against THIS draw's hit rects so a res change, section
+        # reflow, or scroll never leaves the flash on a stale rectangle. A
+        # control that left the screen simply loses its flash.
+        if self._flash > 0:
+            rect = next((r for r, k, p in self._hot
+                         if self._flash_id(k, p) == self._flash_key), None)
+            if rect is not None:
+                x0, y0, x1, y1 = rect
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (255, 255, 255),
+                              max(1, g.S(1)))   # crisp non-AA flash border
+            self._flash -= 1
+        self._tooltip = g.tooltip
+        g.draw_tooltip(frame, self.h)
+        self._draw_status(frame, info)
+        return frame
+
+    def _draw_widget(self, frame, wdg, x, y, cw, px):
+        """Draw one spec widget at y; return the next y (the shipped rhythm:
+        rows advance S(28+gap) in one rounding, sliders/cycles advance their own
+        height then add S(gap) — exactly the shipped two-step literals)."""
+        g = self._gui
+        if isinstance(wdg, Slider):
+            val = getattr(self, wdg.attr)
+            y = g.slider(frame, wdg.label, wdg.attr, val, wdg.lo, wdg.hi, x, y, cw,
+                         info=wdg.tip or None, fmt=wdg.fmt)
+            return y + g.S(wdg.gap) if wdg.gap else y
+        if isinstance(wdg, Toggle):
+            val = bool(getattr(self, wdg.attr))
+            label = (wdg.label_fn(val) if wdg.label_fn else
+                     f"{wdg.label}: {wdg.on_text if val else wdg.off_text}")
+            g.row(frame, label, wdg.attr, x, y, cw, active=val)
+            return y + g.S(28 + wdg.gap)
+        if isinstance(wdg, Cycle):
+            idx = getattr(self, wdg.attr) % len(wdg.options)
+            y = g.cycle(frame, wdg.label, wdg.options[idx], wdg.hit_key, x, y, cw)
+            return y + g.S(wdg.gap) if wdg.gap else y
+        if isinstance(wdg, Action):
+            g.row(frame, wdg.label, wdg.command, x, y, cw)
+            return y + g.S(28 + wdg.gap)
+        if isinstance(wdg, PresetList):
+            return self._draw_preset_list(frame, x, y, cw, px)
+        if isinstance(wdg, Readout):
+            return wdg.render(frame, g, x, y, cw)
+        if isinstance(wdg, Param):
+            return y                # captured, never drawn (no row, no pixels)
+        raise TypeError(f"unknown panel-spec widget {wdg!r}")
+
+    def _draw_preset_list(self, frame, x, y, cw, px):
+        """TEMPLATES rows (slot badges, rename box, hover manage buttons) +
+        Save current look. Badge hits go to the FRONT of `hot` (like the manage
+        buttons) so they win over the full-row rect they sit on."""
+        g = self._gui
+        slots = {n: s for s, n in (self.bank or {}).items()}
+        for i, name in enumerate(self.presets):
+            if name == self.renaming:
+                g.rename_box(frame, self.rename_buf, self._blink, x, y, cw, px)
+                y += g.S(28)
+                continue
+            r = g.row(frame, name, "preset", x, y, cw,
+                      active=(i == self.preset_idx), payload=i)
+            br = g.slot_badge(frame, slots.get(name), x, y, cw)
+            self._hot.insert(0, (br, "slot", name))
+            if name in self.user_presets and (_in(r, self.mouse) or name == self._del_armed):
+                g.manage_buttons(frame, name, x, y, cw, self._del_armed == name)
+            y += g.S(28)
+        g.row(frame, "+ Save current look", "save", x, y, cw)
+        return y + g.S(30)
+
+    def _draw_status(self, frame, info):
+        g = self._gui
+        g.text(frame, info.get("status", ""), g.S(12), g.S(24), self.accent, 0.5)
+        if info.get("black"):
+            h, w = frame.shape[:2]
+            g.text(frame, "CAMERA IS BLACK - disable iPhone Continuity Camera",
+                   g.S(12), h // 2, RED, 0.8, 2)
+            g.text(frame, "iPhone: Settings > General > AirPlay & Handoff > Continuity Camera > Off",
+                   g.S(12), h // 2 + g.S(28), (140, 140, 240), 0.5)
+        if self.record:
+            h, w = frame.shape[:2]
+            off = (self._panel_px + g.S(22)) if self.open else g.S(70)
+            cv2.circle(frame, (w - off, g.S(24)), g.S(7), RED, -1)
+
+    # ----- mouse -----
+    @staticmethod
+    def _flash_id(kind, payload):
+        """Stable identity for the click-flash relocation: a slider's payload
+        carries track geometry that changes with res/reflow, so key on its
+        attr; everything else's payload is already stable."""
+        if kind == "slider":
+            return (kind, payload[0])
+        return (kind, payload)
+
+    def on_mouse(self, event, x, y, flags, param=None):
+        self.mouse = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Fixed chrome first: the collapse button floats ABOVE scrolled
+            # content, so a row that scrolled underneath it (including a
+            # hovered preset's delete button, which front-inserts its hit)
+            # must never steal its click — that click-theft could arm and
+            # confirm a preset delete in two presses (data loss).
+            for rect, kind, payload in self._hot:
+                if kind == "collapse" and _in(rect, (x, y)):
+                    self._flash_key, self._flash = self._flash_id(kind, payload), 4
+                    self._activate(kind, payload, x)
+                    return
+            for rect, kind, payload in self._hot:
+                if kind == "collapse":
+                    continue
+                if _in(rect, (x, y)):
+                    self._flash_key, self._flash = self._flash_id(kind, payload), 4
+                    self._activate(kind, payload, x)
+                    return
+            if self.open and x >= self.w - self._panel_px:
+                self._scroll_drag = (y, self.scroll)   # empty panel area: drag to scroll
+        elif event == cv2.EVENT_MOUSEWHEEL and self.open:
+            # flags>0 = wheel up (clamped in draw)
+            self.scroll = imgui.wheel_scroll(self.scroll, self._S(40), flags)
+        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+            if self._drag:
+                attr, x0, x1, lo, hi = self._drag
+                t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
+                setattr(self, attr, lo + t * (hi - lo))
+            elif self._scroll_drag:
+                y0, s0 = self._scroll_drag
+                self.scroll = imgui.drag_scroll(s0, y0, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            self._drag = None
+            self._scroll_drag = None
+
+    def _activate(self, kind, payload, x):
+        """Generic activation: toggles flip their attr, cycles rotate through
+        their options, sliders set their attr from the track position, actions
+        post to their mailbox. Routing comes from the spec (set_spec's maps)."""
+        if kind != "del" and self._del_armed:
+            self._del_armed = None       # any other click disarms a pending delete
+        if kind == "del":
+            self._del_armed, confirmed = imgui.arm_delete(self._del_armed, payload)
+            if confirmed:
+                self.pending_delete = confirmed
+            return
+        if kind == "ren":
+            self.renaming = payload
+            self.rename_buf = payload    # prefill with the current name
+            return
+        if kind == "slot":
+            self.pending_slot = payload  # the shell assigns/clears + persists
+            return
+        if kind == "collapse":
+            self.open = not self.open
+        elif kind == "preset":
+            self.preset_idx = payload
+            self.pending_preset = self.presets[payload]
+        elif kind == "cycle":
+            key, d = payload
+            wdg = self._cycles[key]
+            setattr(self, wdg.attr, (getattr(self, wdg.attr) + d) % len(wdg.options))
+        elif kind == "slider":
+            attr, x0, x1, lo, hi = payload
+            self._drag = payload
+            t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
+            setattr(self, attr, lo + t * (hi - lo))
+        elif kind == "section":
+            self.sections[payload] = not self.sections.get(payload, True)
+        elif kind in self._toggles:
+            attr = self._toggles[kind].attr
+            setattr(self, attr, not getattr(self, attr))
+        elif kind == "save":
+            self.pending_save = True
+        elif kind == "quit":
+            self.quit = True
+        else:
+            self.pending_commands.append(kind)   # Action with no dedicated mailbox
