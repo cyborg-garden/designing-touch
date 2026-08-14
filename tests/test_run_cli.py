@@ -124,3 +124,117 @@ def test_explicit_dithergirl_mode_warns_about_dropped_engine_flags(launch,
                                                                   capsys):
     launch("--mode", "dithergirl", "--matte", "person")
     assert "ignored" in capsys.readouterr().out
+
+
+# ---------- --preset resolves against a mode's real looks ----------
+# `python run.py --mode dithergirl` once, quit, then `python run.py --preset
+# embers` used to boot Dither Girl on `classic` and say nothing: the flag was
+# swallowed by the state.json resume path, forever, for that install. On main
+# --preset always worked.
+
+
+@pytest.fixture
+def empty_store(tmp_path, monkeypatch):
+    """Resolve against the built-ins only, not whatever the repo's own
+    presets.json happens to hold."""
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_preset_boots_the_mode_that_owns_the_look(launch, empty_store):
+    """No mode-implying flag: the NAME is the request. `embers` is a Particles
+    built-in, so Particles boots — regardless of what state.json remembers."""
+    host = launch("--preset", "embers")
+    assert host.mode is not None                    # not the state.json resume
+    assert "matte" in host.mode.kw                  # ParticlesMode's signature
+    assert host.kw["preset"] == "embers"
+
+
+def test_preset_boots_dither_girl_for_a_dither_girl_look(launch, empty_store):
+    host = launch("--preset", "newsprint")
+    assert host.mode.kw == {"still": False}         # DitherGirlMode
+    assert host.kw["preset"] == "newsprint"
+
+
+def test_a_mode_flag_still_wins_but_an_alien_preset_is_called_out(
+        launch, empty_store, capsys):
+    """Precedence is unchanged (--mode > --still > engine flags > --preset).
+    What changes is that the preset is not silently dropped onto index 0."""
+    host = launch("--mode", "dithergirl", "--preset", "embers")
+    out = capsys.readouterr().out
+    assert 'preset "embers" is not a Dither Girl look' in out
+    assert "booting classic" in out
+    assert host.kw["preset"] == "classic"           # the mode's safe look
+
+
+def test_a_preset_the_booted_mode_owns_passes_through_quietly(
+        launch, empty_store, capsys):
+    host = launch("--mode", "dithergirl", "--preset", "phosphor")
+    assert host.kw["preset"] == "phosphor"
+    assert "not a" not in capsys.readouterr().out
+
+
+def test_an_unknown_preset_says_so_instead_of_booting_index_zero(
+        launch, empty_store, capsys):
+    host = launch("--preset", "nope-not-a-look")
+    assert 'no preset named "nope-not-a-look"' in capsys.readouterr().out
+    assert host.kw["preset"] is None                # normal resume, not index 0
+    assert host.mode is None
+
+
+def test_a_name_both_modes_own_names_the_one_it_picked(launch, empty_store,
+                                                       capsys):
+    """A look name can legitimately belong to either mode — the reason
+    --preset cannot just be bolted onto ENGINE_DEFAULTS."""
+    from dtouch import presets
+
+    presets.save("twin", {"fade": 0.9}, path="presets.json", mode="particles")
+    presets.save("twin", {"scale": 90.0}, path="presets.json",
+                 mode="dithergirl")
+    host = launch("--preset", "twin")
+    out = capsys.readouterr().out
+    assert "Particles and Dither Girl" in out and "booting Particles" in out
+    assert host.kw["preset"] == "twin"
+
+
+def test_preset_owners_reads_builtins_and_saved_looks(empty_store):
+    from dtouch import presets
+
+    assert run.preset_owners("embers") == ["particles"]
+    assert run.preset_owners("newsprint") == ["dithergirl"]
+    assert run.preset_owners("nothing-here") == []
+    presets.save("mine", {"fade": 0.9}, path="presets.json", mode="dithergirl")
+    assert run.preset_owners("mine") == ["dithergirl"]
+
+
+def test_grid_mode_says_the_preset_is_ignored(launch, empty_store, capsys):
+    launch("--mode", "grid", "--preset", "embers")
+    assert "--preset embers ignored" in capsys.readouterr().out
+
+
+# ---------- --no-mirror reaches the shell ----------
+
+def test_no_mirror_reaches_the_host(launch):
+    assert launch("--no-mirror").kw["mirror"] is False
+    assert launch().kw["mirror"] is True
+
+
+def test_no_mirror_reaches_the_legacy_grid_path(launch, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(run, "live", lambda **kw: seen.update(kw))
+    launch("--mode", "grid", "--no-mirror")
+    assert seen["mirror"] is False
+
+
+# ---------- the module docstring advertises the keys that exist ----------
+
+def test_docstring_does_not_advertise_retired_keys():
+    """It used to promise "space freeze". `space` is output.blackout, and
+    blackout is written INTO the recording — a user following the docstring
+    mid-take records black."""
+    doc = run.__doc__
+    assert "space freeze" not in doc
+    assert "n cycle matte" not in doc
+    assert "m mirror" not in doc                    # `m` is the menu
+    assert "?" in doc and "BLACKOUT" in doc
+    assert "recorded" in doc                        # the dangerous part, named

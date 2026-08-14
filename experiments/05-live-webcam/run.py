@@ -17,7 +17,16 @@ Mode 'grid' is the older luminance-displaced grid.
     python run.py --mode dithergirl     # boot into Dither Girl (live dithering)
     python run.py --still photo.jpg     # load a still and imply dithergirl
 
-Controls (flow): q quit · n cycle matte · m mirror · [ ] trail length · -/= glow · space freeze
+Controls: press `?` for the live key map — it is generated from the command
+registry, so it is the only listing that cannot go stale.
+
+    TAB overlay (hidden / HUD / panel)   Esc step back toward hidden
+    q q quit (twice)                     m menu        ? keys
+    space BLACKOUT (hard black, and it IS recorded)    0 panic reset
+    r record        a sound react        g glitch      i debug readout
+    1-9 recall a bank slot               [ ] walk the setlist
+    , . select a control                 - = nudge it  (_ + nudge x5)
+    s save the current look (panel only)
 
 The control panel groups everything into collapsible sections: TEMPLATES, SOURCE, LOOK,
 MOTION (flocking) and SIGNAL (glitch + dithering). Click a header to open it.
@@ -26,8 +35,10 @@ from __future__ import annotations
 
 import argparse
 
+from dtouch import presets as _presets
 from dtouch.camera import list_cameras
 from dtouch.live import live
+from dtouch.modes import REGISTRY, mode_by_id
 from dtouch.modes.dithergirl import DitherGirlMode
 from dtouch.modes.particles import ParticlesMode
 from dtouch.shell import Host
@@ -66,6 +77,66 @@ def boot_mode_name(mode_arg, still_arg, particles_flags=False):
     if still_arg:
         return "dithergirl"
     return "flow" if particles_flags else None
+
+
+# run.py's --mode spellings vs Mode.id — the launcher predates the registry,
+# so 'flow' is the CLI name for the particles mode ('grid' is the legacy
+# non-shell path and owns no looks).
+MODE_ARG = {"particles": "flow", "dithergirl": "dithergirl"}
+MODE_ID = {v: k for k, v in MODE_ARG.items()}
+
+
+def preset_owners(name, path="presets.json"):
+    """Mode ids whose look set contains `name`, in REGISTRY order — built-ins
+    plus that mode's saved looks, exactly what the shell would resolve."""
+    return [cls.id for cls in REGISTRY
+            if name in _presets.load(path, mode=cls.id,
+                                     builtin=getattr(cls, "BUILTIN", {}))]
+
+
+def resolve_preset(name, boot, path="presets.json"):
+    """Resolve `--preset NAME` against a real mode's looks. Returns
+    (boot_mode_arg, preset) and prints the note when it had to choose.
+
+    `--preset` is NOT an entry in ENGINE_DEFAULTS on purpose. That rule is
+    "any non-default value boots flow", and a preset name can legitimately
+    belong to either mode — it would send every Dither Girl look to Particles.
+    The name is resolved against the modes' actual look sets instead:
+
+    - No higher-precedence mode flag: the mode that OWNS the look boots. The
+      name IS the request. (Previously the flag was dropped entirely once
+      state.json remembered another mode — `run.py --mode dithergirl`, quit,
+      `run.py --preset embers` booted Dither Girl on `classic` and said
+      nothing. On main `--preset` always worked.)
+    - One already chosen (--mode / --still / an engine flag): that wins, per
+      the documented precedence. A look it does not own is called out and we
+      land on that mode's safe_look, rather than silently starting on
+      whatever index 0 happens to be.
+    - A name no mode owns is called out, and the normal resume happens.
+    """
+    if not name:
+        return boot, name
+    owners = preset_owners(name, path)
+    if boot is None:
+        if not owners:
+            print('note: no preset named "%s" - booting the last-used look'
+                  % name)
+            return None, None
+        if len(owners) > 1:
+            print('note: "%s" is a look in %s - booting %s'
+                  % (name, " and ".join(mode_by_id(m).title for m in owners),
+                     mode_by_id(owners[0]).title))
+        return MODE_ARG[owners[0]], name
+    cls = mode_by_id(MODE_ID.get(boot))
+    if cls is None:                       # 'grid': the legacy path has no looks
+        print('note: --preset %s ignored - %s has no looks' % (name, boot))
+        return boot, None
+    if cls.id in owners:
+        return boot, name
+    safe = cls().safe_look()
+    print('note: preset "%s" is not a %s look - booting %s'
+          % (name, cls.title, safe))
+    return boot, safe
 
 
 def main():
@@ -110,11 +181,13 @@ def main():
     if given and boot != "flow":
         # a higher-precedence flag won; say so instead of dropping the flag
         print("note: %s ignored - booting %s" % (", ".join(given), boot))
+    # --preset resolves against a mode's real looks; with no mode-implying
+    # flag, the mode that owns the named look is the one that boots
+    boot, preset = resolve_preset(args.preset, boot)
     if boot == "grid":
         live(device=device, res=parse_wh(args.res), mirror=not args.no_mirror)
         return
     # thin launcher: shell + mode (DESIGN.md §8 step 6)
-    preset = args.preset
     if boot is None:
         mode = None      # shell resumes the last-used mode from state.json (§3)
     elif boot == "dithergirl":
