@@ -216,4 +216,19 @@ def test_state_round_trip(tmp_path):
 
 
 def test_state_save_failure_is_silent(tmp_path):
-    presets.save_state({"x": 1}, path=str(tmp_path / "no" / "dir" / "s.json"))
+    """Autosave must never take the show down — a failing save raises
+    nothing, writes nothing, and leaves the existing state intact."""
+    # failure mode 1: unwritable path — no raise, no file appears
+    bad = tmp_path / "no" / "dir" / "s.json"
+    presets.save_state({"x": 1}, path=str(bad))
+    assert not bad.exists() and not bad.parent.exists()
+    # failure mode 2: unserializable payload over a GOOD existing file —
+    # no raise, and the prior state survives byte-for-byte (atomic _write)
+    path = str(tmp_path / "s.json")
+    presets.save_state({"mode": "particles", "preset": "embers"}, path=path)
+    before = open(path, "rb").read()
+    presets.save_state({"bad": object()}, path=path)     # json.dump raises inside
+    assert open(path, "rb").read() == before
+    assert presets.load_state(path)["preset"] == "embers"
+    # ...and no stray temp files were left behind
+    assert {p.name for p in tmp_path.iterdir()} == {"s.json"}

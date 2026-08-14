@@ -353,9 +353,20 @@ def test_swatch_invalidates_on_each_relevant_control(tmp_path, attr, value):
 def test_swatch_blit_is_clipped_when_scrolled_off_frame(tmp_path):
     host = _booted(tmp_path)
     m, g = host.mode, _gui()
+    hpx = g.S(16)
     frame = np.zeros((100, 400, 3), np.uint8)
     m._draw_swatch(frame, g, 10, -8, 200)                # partially above the top
-    m._draw_swatch(frame, g, 10, 95, 200)                # partially below the bottom
+    cache = m._swatch_cache
+    # the visible slice landed (rows 0..hpx-8 = cache rows 8..hpx)...
+    assert np.array_equal(frame[0:hpx - 8, 10:210], cache[8:hpx])
+    # ...and nothing leaked outside the swatch's rows/columns
+    assert not frame[hpx - 8:].any()
+    assert not frame[:, :10].any() and not frame[:, 210:].any()
+
+    frame2 = np.zeros((100, 400, 3), np.uint8)
+    m._draw_swatch(frame2, g, 10, 95, 200)               # partially below the bottom
+    assert np.array_equal(frame2[95:100, 10:210], cache[0:5])
+    assert not frame2[:95].any()
 
 
 # ---------- perf honesty (DESIGN.md §4.2) ----------
@@ -539,6 +550,9 @@ def test_still_cycle_without_a_still_snaps_back_with_hint(tmp_path):
     host.run()
     assert host.ui.input_idx == 0                        # snapped back to camera
     assert host.still is None
+    # ...and the snap-back is TOLD, not silent (DESIGN.md principle 4)
+    hints = [t.text for t in host.hud.toasts._hints]
+    assert any("no still loaded" in t for t in hints)
 
 
 def test_pending_still_path_mailbox_loads_the_image(tmp_path):

@@ -30,8 +30,30 @@ def _gl_available():
         return False
 
 
-pytestmark = pytest.mark.skipif(not _gl_available(),
-                                reason="no GL context available (CI)")
+# GL skip is scoped to the tests that actually build engines (ParticlesMode
+# start / live_flow / soaks). Bank, autosave, slot, and switch-bookkeeping
+# tests drive the same Host paths with a GL-free ParticlesMode stand-in so
+# they run everywhere (the DitherGirl-driven pattern from test_shell_fixes).
+_gl = pytest.mark.skipif(not _gl_available(),
+                         reason="no GL context available (CI)")
+
+
+class GlFreeParticles(ParticlesMode):
+    """ParticlesMode's identity (id, BUILTIN, DEFAULTS, safe_look, panel
+    spec) without the GL engines — for bookkeeping tests."""
+
+    def start(self, host):
+        self.host = host
+
+    def stop(self):
+        pass
+
+    def on_resize(self, w, h):
+        pass
+
+    def step(self, frame_bgr, audio_levels, dt):
+        w, h = self.host.res
+        return np.zeros((h, w, 3), np.uint8)
 
 
 class SyntheticSource:
@@ -65,6 +87,13 @@ def _mode(**kw):
     return ParticlesMode(**kw)
 
 
+def _gl_free_mode(**kw):
+    kw.setdefault("grid", GRID)
+    kw.setdefault("n", N)
+    kw.setdefault("seed", 0)
+    return GlFreeParticles(**kw)
+
+
 def _paths(tmp_path):
     """Isolated preset/state files so tests never touch the launch dir's."""
     return dict(presets_path=str(tmp_path / "presets.json"),
@@ -72,14 +101,17 @@ def _paths(tmp_path):
 
 
 def _host(tmp_path, mode=None, src=None, **kw):
+    """Default boot mode is the GL-FREE ParticlesMode stand-in — pass an
+    explicit mode=_mode() when the test needs the real engines."""
     kw.setdefault("res", RES)
     kw.setdefault("show", False)
-    return Host(mode or _mode(), source=src or SyntheticSource(),
+    return Host(mode or _gl_free_mode(), source=src or SyntheticSource(),
                 **_paths(tmp_path), **kw)
 
 
 # ---------- the headless loop ----------
 
+@_gl
 def test_headless_loop_runs_max_frames_and_releases(tmp_path):
     src = SyntheticSource()
     count, out = live_flow(source=src, res=RES, grid=GRID, n=N,
@@ -89,6 +121,7 @@ def test_headless_loop_runs_max_frames_and_releases(tmp_path):
     assert src.released, "the shell owns the source's lifecycle"
 
 
+@_gl
 def test_modes_never_see_none_frames_on_camera_loss(tmp_path):
     """DESIGN.md §2.2: on camera loss the host passes the last good frame."""
     seen = []
@@ -109,6 +142,7 @@ def test_modes_never_see_none_frames_on_camera_loss(tmp_path):
     assert np.array_equal(seen[5], seen[1])
 
 
+@_gl
 def test_loss_with_no_good_frame_ends_bounded_run(tmp_path):
     src = SyntheticSource(fail_after=0)     # never yields a frame
     count, out = live_flow(source=src, res=RES, grid=GRID, n=N,
@@ -118,6 +152,7 @@ def test_loss_with_no_good_frame_ends_bounded_run(tmp_path):
 
 # ---------- mode lifecycle ----------
 
+@_gl
 def test_stop_is_idempotent(tmp_path):
     host = _host(tmp_path)
     m = _mode()
@@ -127,6 +162,7 @@ def test_stop_is_idempotent(tmp_path):
     assert m.glow is None and m.pf is None
 
 
+@_gl
 def test_set_mode_start_failure_reinstates_previous(tmp_path):
     """DESIGN.md §2.2: start() may raise — the shell catches, toasts, and
     reinstates the previous mode."""
@@ -236,6 +272,7 @@ def test_slot_badge_click_assigns_next_free_then_clears(tmp_path):
 
 # ---------- GL lifecycle soak (DESIGN.md §8 step 6 / §9) ----------
 
+@_gl
 def test_gl_soak_start_stop_25_cycles(tmp_path):
     """Start/stop the mode 30 times at a tiny res: no leak of usable state, no
     crash, and the engines still render after the churn."""
@@ -254,6 +291,7 @@ def test_gl_soak_start_stop_25_cycles(tmp_path):
     m.stop()
 
 
+@_gl
 def test_gl_soak_alternating_particles_dithergirl_25_cycles(tmp_path):
     """DESIGN.md §8 step 8: the GL context lifecycle survives alternating
     particles <-> dithergirl swaps (26 cycles), and both still render after."""
@@ -356,6 +394,7 @@ def test_switch_to_dithergirl_mid_loop_preserves_perform_state(tmp_path):
     assert len(writer.frames) > 1                        # recording never stopped
 
 
+@_gl
 def test_switch_back_to_particles_restores_its_panel(tmp_path):
     from dtouch.modes.dithergirl import DitherGirlMode
 
