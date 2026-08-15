@@ -12,9 +12,10 @@ import time
 import numpy as np
 import pytest
 
-from dtouch.ascii_art import (MIN_CELL_H, AsciiRenderer, build_pos_lut,
-                              build_ramp, clear_caches, coverage_table,
-                              grid_for)
+from dtouch.ascii_art import (MIN_CELL_H, WEIGHTS, AsciiRenderer,
+                              build_pos_lut, build_ramp, clear_caches,
+                              coverage_table, grid_for, render_alpha,
+                              weights_for)
 from dtouch.dither import srgb_to_linear
 
 WOB = ((0, 0, 0), (255, 255, 255))
@@ -77,6 +78,36 @@ def test_stroke_weight_is_part_of_the_ramp():
     assert joint > 0.6
     # and the ramp must actually spend the extra range
     assert build_ramp(16, 8, 16)[-1][1] > 0.6
+
+
+@pytest.mark.parametrize("n,searched", [(2, 1), (4, 1), (8, 2), (12, 3),
+                                        (16, 4)])
+def test_a_short_ramp_does_not_spend_the_heavy_strokes(n, searched):
+    """A heavy stroke buys REACH, and reach is only worth having when there
+    are enough steps to travel there gradually. Spent on a short ramp it is a
+    cell-filling blob: ASCII's first impression is Bits 1, which shipped as
+    `' s'` and rendered as a coarse dot halftone with no glyph structure at
+    all, and Bits 2 (`' :*#'`) drew its top steps at 3 px stroke in an 8 px
+    cell and merged them into solid white rows. Both were rendered and looked
+    at beside the capped versions."""
+    assert weights_for(n) == WEIGHTS[:searched]
+    for cell in ((8, 16), (12, 24), (24, 48)):
+        ramp = build_ramp(n, *cell)
+        used = {w for (_c, w), _v in ramp}
+        assert used <= set(WEIGHTS[:searched])
+
+
+@pytest.mark.parametrize("n", [2, 4, 8])
+def test_every_bits_setting_draws_glyphs_rather_than_blobs(n):
+    """The claim behind the cap, measured on the mark it actually changes: the
+    densest step of a short ramp must still leave most of its cell unlit — a
+    letter you can read, not a filled block. Uncapped, Bits 1 topped out at
+    's' at 3.0 (52% unlit) and Bits 2 at '#' at 3.0 (34%)."""
+    for cell in ((8, 16), (12, 24), (24, 48)):
+        (ch, weight), _cov = build_ramp(n, *cell)[-1]
+        alpha = render_alpha(ch, cell[0], cell[1], weight)
+        assert float((alpha < 0.5).mean()) >= 0.50, (
+            "n=%d at %s tops out on %r at %s, a blob" % (n, cell, ch, weight))
 
 
 def test_the_folklore_ramp_is_not_monotonic_but_ours_is():

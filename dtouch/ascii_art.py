@@ -24,7 +24,10 @@ thickness the densest glyph covers only ~0.38 of the cell, which caps the
 picture at 38% of the ink colour's luminance and clips every highlight above
 sRGB ~0.65 onto a single glyph. Searching (glyph x weight) jointly reaches
 ~0.70 coverage, moving the clip point to sRGB ~0.87 — only true speculars. It
-also reads better: the ramp gets *bolder* as it gets denser.
+also reads better: the ramp gets *bolder* as it gets denser. The search is
+narrowed for a SHORT ramp, though (see :func:`weights_for`): reach is only
+worth having when there are enough steps to travel there gradually, and spent
+on two or four steps a heavy stroke is a cell-filling blob rather than a glyph.
 
 **Tone is normalised to the INK colour, not to the ramp's range.** Stretching
 the ramp over the input range maps sRGB mid-grey to ~0.42 apparent instead of
@@ -76,6 +79,28 @@ PREF = list(" .,:;-~=+*ox<>c\"'v^snuazerwt?/\\!ijfyCLOQUJXY0ZSGEAPDNHKRVMW&%#B8@
 
 # Stroke weights searched jointly with the glyph (see module docstring).
 WEIGHTS = (1.0, 1.6, 2.2, 3.0)
+
+
+def weights_for(n: int, weights=WEIGHTS):
+    """The stroke weights a ramp of *n* steps is allowed to search.
+
+    A heavy stroke buys REACH — it is what takes the densest glyph from ~0.38
+    to ~0.70 coverage and moves the highlight clip from sRGB 0.65 to 0.87 — and
+    reach is only worth having when there are enough steps to travel there
+    gradually. Spend it on a short ramp and the top steps are all cell-filling
+    blobs: at n=2 the whole ramp was `' s'` and rendered as a coarse dot
+    halftone with no glyph structure at all; at n=4 (`' :*#'`) the top two
+    steps drew at 3 px stroke in an 8 px cell and merged into solid white rows.
+    Both were looked at, beside the capped versions, on a lit subject.
+
+    So the weight set scales with the ramp: 1 weight below 8 steps, 2 below 12,
+    the full search at 16. Capped, the same settings measure `' R'`, `';e$'`
+    and `'.;=sQ#$'` — recognisably letters, at every Bits setting the panel can
+    reach, which is what the feature is for. The cost is a lower ceiling on a
+    short ramp (0.25 / 0.38 / 0.48 coverage), and a short ramp is not where
+    highlight range was ever going to come from.
+    """
+    return tuple(weights[:max(1, min(len(weights), int(n) // 4))])
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +206,10 @@ def build_ramp(n: int, cell_w: int, cell_h: int, pool=PREF, weights=WEIGHTS,
     every step of the ramp is a visibly different character. Returned sorted by
     measured coverage, i.e. monotonic by construction.
 
+    The searched weight set is narrowed for a short ramp (:func:`weights_for`),
+    because a heavy stroke on a short ramp is a cell-filling blob rather than a
+    glyph.
+
     Returns [((glyph, weight), coverage), ...], length n.
     """
     n = max(int(n), 1)
@@ -190,7 +219,9 @@ def build_ramp(n: int, cell_w: int, cell_h: int, pool=PREF, weights=WEIGHTS,
         return cached
 
     table = coverage_table(cell_w, cell_h, pool, weights, font)
-    items = sorted(table.items(), key=lambda kv: kv[1])
+    keep = set(weights_for(n, weights))
+    items = sorted(((k, v) for k, v in table.items() if k[1] in keep),
+                   key=lambda kv: kv[1])
     lo, hi = items[0][1], items[-1][1]
     step = (hi - lo) / max(n - 1, 1)
     rank = {c: i for i, c in enumerate(pool)}
