@@ -12,6 +12,14 @@ Navigation (DESIGN.md §3): the mode's letter or digit selects-and-enters,
 untouched, mouse clicks a card. `Menu` is pure state (unit-testable without a
 window); `draw_menu` renders and returns the click rects.
 
+BOOT menu (DESIGN.md §3, amended 2026-08-15 — the user's call): the app now
+opens on this menu, so a menu can be showing before any mode has been *entered*.
+`show(active_id, boot=True)` marks that state, and it changes exactly one thing:
+the dismiss keys (Esc, `m`) commit the selection instead of "returning to the
+running mode", because at boot there is no running mode to return to — a
+dismiss that left the menu open, or dropped you behind it, would be the dead
+end principle 5 forbids. Everything else about the menu is identical.
+
 Mode switches draw a static boot card first (mode glyph + name in the mode's
 accent, one frame, no animation — the cv2 loop is single-threaded, so nothing
 can animate during GL teardown). The recorder captures the card, not a gray
@@ -62,17 +70,22 @@ class Menu:
     menu and asks the shell to arm the quit confirm (DESIGN.md §3),
     ("unknown", None) for keys the menu doesn't know (the shell hints —
     silence-on-input is a bug there too), and (None, None) otherwise. Commit
-    and dismiss both close the menu; the shell routes the switch."""
+    and dismiss both close the menu; the shell routes the switch.
+
+    In the BOOT menu (`show(..., boot=True)`) the dismiss keys commit instead,
+    so Esc/`m` return ("switch", mode_id) too — see the module docstring."""
 
     def __init__(self, cards=None):
         self.cards = list(cards) if cards is not None else registry_cards()
         self.open = False
+        self.boot = False        # opened at launch, before any mode was entered
         self.sel = 0
         self.rects = []          # (rect, card) from the last draw — click targets
 
     # ----- lifecycle -----
-    def show(self, active_id=None):
+    def show(self, active_id=None, boot=False):
         self.open = True
+        self.boot = bool(boot)
         self.sel = next((i for i, c in enumerate(self.cards)
                          if c.enabled and c.id == active_id), self.sel)
         if not self._enabled(self.sel):
@@ -80,6 +93,7 @@ class Menu:
 
     def close(self):
         self.open = False
+        self.boot = False
 
     def toggle(self, active_id=None):
         if self.open:
@@ -109,6 +123,10 @@ class Menu:
     def key(self, code):
         """Route one cv2.waitKey code. See class docstring for returns."""
         if code == 27 or code in (ord("m"), ord("M")):   # Esc / m: back untouched
+            if self.boot and self._enabled(self.sel):
+                # boot menu: there is nothing behind to go back TO, so the
+                # dismiss keys enter the selected mode (DESIGN.md §3, amended)
+                return self._commit(self.sel)
             self.close()
             return "close", None
         if code in (ord("q"), ord("Q")):
@@ -162,7 +180,39 @@ def _dashed_rect(img, x0, y0, x1, y1, color, thickness=1, dash=8, gap=6):
         _seg((x1, y), (x1, min(y + dash, y1)))
 
 
-def draw_menu(img, cam_bgr, cards, sel):
+HINT_TOAST_ROWS = 3     # hud.Toasts keeps at most 3 hints, stacked upward
+
+
+def menu_hint(boot=False):
+    """The menu's bottom line. At boot Esc does not go 'back' (there is nothing
+    behind it) — it enters the selection, so listing it would be a lie; the
+    other door, `q`, is named instead."""
+    if boot:
+        return ", . move - enter select - q quit"
+    return ", . move - enter select - esc back"
+
+
+def hint_baseline(h):
+    """Baseline y for the menu's bottom hint line — issue #18.
+
+    The HUD's hint toasts stack UPWARD from `h - title-safe inset`
+    (hud.Toasts.draw), which is exactly where this line used to sit: at boot,
+    the 4 s doors hint and the menu's own hint were drawn centered on one
+    baseline and rendered as a single unreadable smear — two messages, neither
+    readable, on the first frame the user ever sees.
+
+    The menu's line is layout and the toasts are transient, so the layout moves
+    up and leaves the stack its full room. The offset is FIXED (the whole
+    stack, not the current occupancy) so the line never jumps around as toasts
+    come and go — a hint line that moves while you are reading it is its own
+    small bug."""
+    uu = u(h)
+    hp = int(0.75 * uu)                       # same size hud.Toasts uses
+    row = int(1.5 * hp)                       # ...and the same row pitch
+    return h - int(h * TITLE_SAFE) - HINT_TOAST_ROWS * row - hp // 2
+
+
+def draw_menu(img, cam_bgr, cards, sel, boot=False):
     """Render the menu over `img` (BGR, in place): 1-bit blue-noise-dithered
     live camera under a 65% scrim, 'dtouch' top-left, a centered row of mode
     cards. Returns the click rects [(rect, card), ...]."""
@@ -229,11 +279,11 @@ def draw_menu(img, cam_bgr, cards, sel):
         rects.append((rect, c))
 
     # bottom hint line (DESIGN.md §3): part of the layout — 0.75u, DIM,
-    # bottom-center, title-safe
-    hint = ", . move - enter select - esc back"
+    # bottom-center, title-safe, and clear of the HUD's toast stack (issue #18)
+    hint = menu_hint(boot)
     hp = int(0.75 * uu)
     hw = text_size(hint, hp)[0]
-    put_outlined(img, hint, ((w - hw) // 2, h - iy), hp, DIM)
+    put_outlined(img, hint, ((w - hw) // 2, hint_baseline(h)), hp, DIM)
     return rects
 
 

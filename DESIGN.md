@@ -29,7 +29,11 @@ the code-first tinkerer, the workshop teacher.
    exactly what the audience sees, minus panel/HUD (today's invariant, kept).
 3. **Perform/Edit Split.** Two surfaces, one engine: PANEL is the edit surface
    (mouse-friendly, full controls); HIDDEN/HUD is the perform surface (keys +
-   big transient feedback). The instrument boots into perform, already playing.
+   big transient feedback). The instrument boots to the home **menu** with the
+   last-used mode already running behind it and pre-selected — one key (Enter,
+   or Esc) is on stage. *(Amended 2026-08-15 — the user's call: "it should boot
+   into the menu not straight into particle." The rig is still playing at boot,
+   it just asks which instrument first; see §3.)*
 4. **Feedback Is Momentary, State Is Legible.** Every keystroke echoes as a
    large auto-fading toast; a compact always-current status line (derived from
    the panel spec, so it can never drift) answers "what is running" at a glance.
@@ -174,11 +178,32 @@ shell changes. The rationale goes on issue #7 for sign-off.
 **Form: in-app switcher screen, not a launcher.** One window; the menu is a
 shell overlay state, not a Mode.
 
-**Boot behavior (ships playing):** launch goes straight into the last-used mode
-(first run: Particles) with its look moving — no menu, no blank canvas. A HUD
-hint fades in for 4 s: `M menu · TAB panel · ? keys`. CLI flags mean "boot
-into": `--mode dithergirl`, `--flock`/`--glitch` as today. `start.command`
-unchanged.
+**Boot behavior (opens on the menu, still playing).** *(Amended 2026-08-15 —
+the user's call, and the doc previously said the opposite: "launch goes
+straight into the last-used mode … no menu".)*
+
+Launch with no mode-implying flag opens the **home menu**. It is not a blank
+canvas and not a launcher screen: the last-used mode (first run: Particles) has
+already been started and is stepping live behind it, the camera runs through the
+1-bit blue-noise backdrop, and that mode's card is **pre-selected**, so `Enter`
+is a one-key resume. `Esc` at boot **enters the selection** rather than
+"returning to the running mode" — at boot there is nothing behind the menu to
+return to, and a dismiss that dropped you onto a mode you never chose is the
+dead end principle 5 forbids. `q` still closes the menu and arms the quit
+confirm.
+
+CLI flags still mean "boot into" and **skip the menu entirely**: `--mode
+dithergirl`, `--still PATH`, `--flock`/`--glitch`. A flag that had to wait
+through a menu would be a worse launch than we had. `start.command` unchanged.
+
+The 4 s boot hint follows where the launch landed, because the menu already
+prints its own key line: in the menu it names the resume (`enter resumes
+PARTICLES`), and the three-doors hint (`m menu - TAB panel - ? keys`) is posted
+as the menu is left — on the mode, where it is true. It is never posted *under*
+the menu (issue #18: the menu's hint line and the HUD's hint toasts were drawn
+centered on the same baseline and rendered as one unreadable smear; the menu's
+line now sits clear of the whole 3-deep toast stack, at a fixed offset so it
+does not jump as toasts come and go).
 
 **Layout:** live camera behind the menu, rendered through 1-bit blue-noise
 dither and dimmed under a 65% scrim (graft from Cartridges: the menu proves the
@@ -196,8 +221,10 @@ its mode's accent:
 ```
 
 **Navigation:** the mode's letter or digit selects-and-enters; `,`/`.` move
-selection, `Enter` commits, `Esc` returns to the running mode untouched. Mouse:
-click a card.
+selection, `Enter` commits, `Esc` returns to the running mode untouched (at
+boot, where there is no running mode, `Esc` commits the selection instead).
+Mouse: click a card. Committing the card that is *already* running is an entry,
+not a switch — it gets the mode-title flash, never the `already in X` scold.
 
 **Mode switch:** shell draws a **static boot card** (mode glyph + name in the
 mode's accent, one frame, no animation — graft from Cartridges, feasibility-
@@ -210,8 +237,9 @@ While blackout is armed, the boot card is NOT shown bright — the switch happen
 under black (tick stays); the card is only for un-blacked-out switches. Inside
 the menu, unknown keys get the `? for keys` hint (silence-on-input is a bug
 there too) and `q` closes the menu and arms the quit confirm. The menu's bottom
-hint line (`, . move - enter select - esc back`) is part of the layout, and the
-real mode cards render their titles in CAPS per the sketch.
+hint line is part of the layout — `, . move - enter select - esc back`, or
+`, . move - enter select - q quit` at boot, where `esc back` would be a lie —
+and the real mode cards render their titles in CAPS per the sketch.
 
 Saving a look (`+ Save current look` row, or the `s` key): creates an
 auto-named look and immediately opens its rename box — naming is one flow —

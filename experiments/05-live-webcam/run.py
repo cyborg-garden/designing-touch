@@ -5,7 +5,8 @@ Default mode 'flow': camera -> subject-agnostic matte (whatever moves/stands out
 flowing cloud of glowing particles. Works for a dancer, a crowd, a boat — not person-only.
 Mode 'grid' is the older luminance-displaced grid.
 
-    python run.py                       # flow, built-in laptop camera, auto matte
+    python run.py                       # the HOME MENU, last-used mode selected
+    python run.py --mode flow           # skip the menu: straight into flow
     python run.py --matte motion        # key on motion only (great for a dancer)
     python run.py --matte person        # multi-person segmentation
     python run.py --device 1            # a specific camera index
@@ -16,6 +17,10 @@ Mode 'grid' is the older luminance-displaced grid.
 
     python run.py --mode dithergirl     # boot into Dither Girl (live dithering)
     python run.py --still photo.jpg     # load a still and imply dithergirl
+
+Launching with no mode-implying flag opens the home menu with the live camera
+behind it and the last-used mode already selected — Enter (or Esc) starts it.
+Any mode-implying flag skips the menu entirely.
 
 Controls: press `?` for the live key map — it is generated from the command
 registry, so it is the only listing that cannot go stale.
@@ -70,8 +75,9 @@ def boot_mode_name(mode_arg, still_arg, particles_flags=False):
     flags mean 'boot into'). Any particles-implying engine flag set to a
     non-default value (--matte/--grid/--particles/--flock/--glitch) boots flow
     WITH those args. With no mode-implying flag at all, returns None — the
-    shell resumes the last-used mode from state.json (§3: launch goes straight
-    into the last-used mode; first run: Particles)."""
+    shell opens the HOME MENU with the last-used mode from state.json running
+    behind it and selected (§3, amended: launch opens on the menu; first run:
+    Particles is the selection)."""
     if mode_arg:
         return mode_arg
     if still_arg:
@@ -189,7 +195,7 @@ def main():
         return
     # thin launcher: shell + mode (DESIGN.md §8 step 6)
     if boot is None:
-        mode = None      # shell resumes the last-used mode from state.json (§3)
+        mode = None      # shell opens the home menu over the last-used mode (§3)
     elif boot == "dithergirl":
         mode = DitherGirlMode(still=bool(args.still))
     else:
