@@ -1722,3 +1722,119 @@ def test_a_look_that_raises_cannot_re_raise_every_frame(tmp_path, monkeypatch):
     assert len(calls) == 1                           # applied once, not forever
     assert host.ui.pending_preset is None            # mailbox disarmed
     assert host.hud.toasts._center.text == "look not loaded - classic"
+
+
+# ---------- F1: an invisible rename box must not eat the keyboard ----------
+
+def _present(host, key=255):
+    """One loop iteration's present half: compose the frame, then route one key.
+
+    Exactly the order run() uses — _compose_frame, then the waitKey code — so
+    what these tests exercise is the shipped per-frame contract, not a helper.
+    """
+    out = np.zeros((RES[1], RES[0], 3), np.uint8)
+    frame = np.zeros((36, 64, 3), np.uint8)
+    host._compose_frame(out, frame)
+    host._route_key(key)
+
+
+def _click(host, kind):
+    """Click the centre of the panel's published hit rect for `kind`."""
+    rect = next(r for r, k, _p in host.ui._hot if k == kind)
+    x0, y0, x1, y1 = rect
+    host._on_mouse(cv2.EVENT_LBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2, 0)
+
+
+def _renaming_host(tmp_path):
+    """A booted host in PANEL with a saved look's rename box open."""
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.overlay = OverlayState.PANEL
+    host.reg.dispatch(ord("s"))                      # save opens the rename box
+    host._pump_preset_mailboxes()
+    assert host.ui.renaming is not None
+    return host
+
+
+def test_collapsing_the_panel_cancels_the_rename_that_would_eat_every_key(tmp_path):
+    """Two clicks reached a stuck state: rename pencil, then collapse chevron.
+
+    The sidebar collapsed, `renaming` stayed set, and `OverlayUI.on_key`
+    consumes EVERY key while renaming (correctly — `q` must not quit
+    mid-typing, DESIGN.md §6.2). So the screen showed a completely normal
+    instrument, bottom hint and all, while TAB, `m`, `?`, space, `0` and both
+    presses of `q` were typed into a box nobody could see. The measured buffer
+    for that exact sequence was `"classicm? 0qq"` with quit still False; only
+    Esc got out, and nothing on screen said so.
+    """
+    host = _renaming_host(tmp_path)
+    _present(host)                                   # a frame that DRAWS the box
+    assert host.ui.renaming is not None, "a visible box keeps the keyboard"
+
+    _click(host, "collapse")                         # the second of the two clicks
+    assert host.ui.open is False
+    _present(host)                                   # the box is no longer drawn
+
+    assert host.ui.renaming is None
+    assert host.ui.rename_buf == ""
+    # ...and the keyboard is answering again: the three keys the on-screen
+    # hint names, then the quit it refused.
+    _present(host, 9)                                # TAB
+    assert host.overlay is not OverlayState.PANEL
+    _present(host, ord("m"))
+    assert host.menu.open is True
+    _present(host, 27)                               # Esc closes the menu
+    _present(host, ord("?"))
+    assert host.ps.help_open is True
+    _present(host, ord("?"))                         # any key closes help
+    _present(host, ord("q"))
+    _present(host, ord("q"))
+    assert host.ps.quit is True, "q must quit once the box is gone"
+
+
+def test_hiding_the_overlay_cancels_the_rename(tmp_path):
+    """Same cause, second route: a provably clean output frame with a hidden
+    text field swallowing everything (measured buffer `"m?qqq"`, quit False)."""
+    host = _renaming_host(tmp_path)
+    _present(host)
+    assert host.ui.renaming is not None
+
+    host.overlay = OverlayState.HIDDEN               # the panel stops drawing
+    _present(host)
+
+    assert host.ui.renaming is None
+    _present(host, ord("q"))
+    _present(host, ord("q"))
+    assert host.ps.quit is True
+
+
+def test_opening_the_menu_cancels_the_rename(tmp_path):
+    """Third route: the panel's own `Menu (M)` row. The menu routes keys first
+    so the menu itself worked — but `renaming` stayed set underneath, and the
+    keyboard went deaf again the moment a card was picked."""
+    host = _renaming_host(tmp_path)
+    _present(host)
+    assert host.ui.renaming is not None
+
+    host.menu.show(host.mode.id)
+    _present(host)                                   # menu frame: no panel drawn
+
+    assert host.ui.renaming is None
+    host.menu.close()
+    _present(host, ord("q"))
+    _present(host, ord("q"))
+    assert host.ps.quit is True
+
+
+def test_a_visible_rename_box_still_owns_the_keyboard(tmp_path):
+    """The fix must not weaken the contract it protects: while the box IS on
+    screen, every key is still typed into it — `q` included (DESIGN.md §6.2)."""
+    host = _renaming_host(tmp_path)
+    start = host.ui.rename_buf
+    for _ in range(6):
+        _present(host, ord("q"))
+
+    assert host.ui.renaming is not None
+    assert host.ui.rename_buf == start + "qqqqqq"
+    assert host.ps.quit is False
+    assert host.overlay is OverlayState.PANEL        # TAB never fired either

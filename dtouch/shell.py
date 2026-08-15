@@ -1264,6 +1264,13 @@ class Host:
             raise
         except Exception as e:                       # noqa: BLE001 — §6.4
             self._frame_error(e, internal=True)
+        # Only what is on screen may hold the keyboard. Every branch above is
+        # a way to take the rename box off it — the menu, a non-PANEL overlay,
+        # a collapsed sidebar inside ui.draw, a mode switch that retired the
+        # name — and one that draws it is the only one that keeps it. Runs
+        # after the draw and before the waitKey that routes the next key, so
+        # no key can land in a box the frame just stopped showing.
+        ui.expire_offscreen_rename()
         return bgr
 
     # ----- the loop -----

@@ -498,6 +498,18 @@ system setting" and not `save=False` — `Mirror` and `input` are unsaved and
 stay reachable, because pressing the key again undoes them. Resolution lives
 on the edit surface, where changing it is a deliberate decision.
 
+**A rename box holds the keyboard only while it is on screen** (amended
+2026-08-15). The consumption rule below is right and stays, but it was not
+tied to visibility, and three routes left `renaming` set with nothing drawn:
+collapse the sidebar with the chevron, open the menu from the panel's own
+`Menu (M)` row, or hide the overlay. Two clicks were enough. The screen then
+showed a completely normal instrument — bottom hint still reading
+`m menu - TAB panel - ? keys`, all three dead — while TAB, `m`, `?`, space,
+`0` and both presses of `q` were typed into a field nobody could see. Only
+`Esc` got out, and nothing said so. The shell now cancels any rename box that
+was not painted on the frame just composed: visibility is the rule, not a list
+of routes, so any future way to take the panel off screen is covered.
+
 **Rename typing consumes every key except `Esc`** (which cancels the rename and
 nothing else). This is the explicit carve-out rule (judge finding: "panic works
 mid-rename" contradicted the consumption contract — resolved: while typing, you

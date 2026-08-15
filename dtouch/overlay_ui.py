@@ -267,6 +267,7 @@ class OverlayUI:
         self.pending_rename = None   # (old, new) committed via Enter (live loop applies)
         self.renaming = None         # name currently being renamed (typing mode)
         self.rename_buf = ""
+        self._rename_drawn = False   # the box reached the screen on the last draw
         self._del_armed = None       # first x-click arms; second confirms
         self._blink = 0
         self.panel_w = 290           # base (1080p) panel width; scaled by self._s when drawn
@@ -388,6 +389,46 @@ class OverlayUI:
         return self._gui.S(n)
 
     # ----- keyboard (rename typing) -----
+    def cancel_rename(self):
+        """Drop the rename without committing it — what Esc does."""
+        self.renaming = None
+        self.rename_buf = ""
+
+    def expire_offscreen_rename(self):
+        """A rename box that did not reach the screen loses the keyboard.
+
+        `on_key` below gives the box EVERY key by design — `q` must not quit
+        mid-typing (DESIGN.md §6.2) — and that contract is only safe while the
+        box is visible. It was not. Three routes left `renaming` set with
+        nothing drawn: collapse the sidebar with the chevron, open the menu
+        from the panel's own `Menu (M)` row, or hide the overlay. The screen
+        then looked like a completely normal instrument, bottom hint and all
+        (`m menu - TAB panel - ? keys` — three dead keys), while TAB, `m`, `?`,
+        space, `0` and both presses of `q` were typed into a field nobody could
+        see. Measured buffer for exactly that sequence: `"classicm? 0qq"`, with
+        quit still False. Only Esc got out, and nothing on screen said so.
+
+        The rule is visibility, not a list of routes: **the box may hold the
+        keyboard only for as long as it is being painted.** The shell calls
+        this once per composed frame, right after the draw, so `_rename_drawn`
+        is the just-rendered truth — a collapsed sidebar, an open menu, a
+        hidden overlay, or a mode switch that retired the name all cancel it
+        for the same reason and without being enumerated here. Any future way
+        to take the panel off screen is covered the day it is written.
+
+        Cancelling is silent on purpose: the click that hid the box is its own
+        feedback (the panel visibly collapsed / the menu opened), so a toast
+        would be noise, and the rename was never committed — the look keeps
+        the name it already had.
+        """
+        if self.renaming is not None and not self._rename_drawn:
+            self.cancel_rename()
+        # consumed, not merely read: on the frames where the panel is not drawn
+        # at all — menu open, overlay HIDDEN or HUD — `draw()` never runs, so
+        # this is the only place the flag can go stale, and a stale True is
+        # exactly the deaf keyboard this exists to prevent.
+        self._rename_drawn = False
+
     def on_key(self, key):
         """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
         so the caller knows not to treat 'q' as quit while the user is typing.
@@ -419,6 +460,9 @@ class OverlayUI:
         # scale the whole panel by the output resolution, floored at the 1080p baseline so
         # 720p/1080p are unchanged and 4K renders at 2x (same fraction of the frame).
         self._s = max(1.0, h / BASE_H)
+        # cleared here and set again only if the rename box actually gets
+        # painted below — see expire_offscreen_rename()
+        self._rename_drawn = False
         self._hot = g.begin(self._s, self.mouse, self.accent)
         pw = g.S(self.panel_w)
         self._panel_px = pw
@@ -533,7 +577,8 @@ class OverlayUI:
         for i, name in enumerate(self.presets):
             if name == self.renaming:
                 g.rename_box(frame, self.rename_buf, self._blink, x, y, cw, px)
-                y += g.S(28)
+                self._rename_drawn = True    # it is on screen: it may keep the
+                y += g.S(28)                 # keyboard (expire_offscreen_rename)
                 continue
             r = g.row(frame, name, "preset", x, y, cw,
                       active=(i == self.preset_idx), payload=i)
