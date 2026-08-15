@@ -116,7 +116,7 @@ def build_particles_sections(palettes, mattes):
             Cycle("matte", "matte_idx", list(mattes), save_key="matte",
                   status="matte {}"),
             Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
-                  key="res", save=False),
+                  key="res", save=False, nudge=False),
             Toggle("Video bg", "video_bg"),
             _slider_spec("Vid mix", "video_mix",
                          "How visible the raw camera footage is behind the particles.",

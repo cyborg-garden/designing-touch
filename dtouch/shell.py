@@ -36,7 +36,8 @@ from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
                          build_signal_section, build_global_rows)
-from .panelspec import Cycle, Section, Slider, apply_look, capture_look
+from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
+                        nudgeable)
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
@@ -196,7 +197,9 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     # ','/'.' move card selection instead — the menu consumes keys before the
     # registry (Host._route_key), so priority is already right.
     def _nudgeables():
-        return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+        # `nudgeable`, not "every Slider and Cycle": output resolution opts out
+        # (see its docstring — one key must not resize the show).
+        return [w for w in ui.iter_widgets() if nudgeable(w)]
 
     def _osd_show(w):
         val = getattr(ui, w.attr)

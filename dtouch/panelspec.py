@@ -54,6 +54,7 @@ class Slider:
     # already-saved fractional Crush keeps the exact bit depth it rendered at.
     step: Optional[float] = None
     snap: str = "round"              # "round" | "floor"
+    nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
 
     @property
     def store_key(self):
@@ -99,6 +100,7 @@ class Cycle:
     # this is the one user-data-loss surface (DESIGN.md §9), and a Cycle
     # silently ignores a value it does not recognise.
     legacy: Optional[dict] = None
+    nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
 
     @property
     def hit_key(self):
@@ -169,6 +171,29 @@ def walk_spec(spec):
                 yield item, w
         else:
             yield None, item
+
+
+def nudgeable(w):
+    """Can `,`/`.` select this widget, and `-`/`=` move it (DESIGN.md §6.2)?
+
+    Every Slider and Cycle, minus the ones that declare `nudge=False`.
+
+    The rule for opting out is NOT "this widget is a system setting" and it is
+    not `save=False` either — `Mirror` and `input` are both unsaved and both
+    stay reachable, because pressing the key again undoes them and the picture
+    is the only thing that moved. The rule is narrower: **a control the perform
+    layer cannot take back does not belong on a bare key.**
+
+    Output resolution is the one that fails it. It was the 3rd of 15 stops in
+    Dither Girl and the 2nd of 23 in Particles — `.` `.` `=`, with no panel
+    open — and one press recreated the window at 4K, dropped the frame rate
+    through the floor, and left `0` (panic) with no answer, because panic
+    restores the mode's look and the window is not in the look. So the show
+    goes slow, the escape hatch does nothing, and the only way back is to find
+    the control on the edit surface. That is where it belongs: a deliberate
+    two-second decision, not two keys from the default selection mid-set.
+    """
+    return isinstance(w, (Slider, Cycle)) and w.nudge
 
 
 # ----- quantised sliders (the whole-number sliders) -----

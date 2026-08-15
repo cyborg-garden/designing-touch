@@ -488,6 +488,16 @@ order (OSD shows name + value + bar), `-`/`=` nudge by 1/40 of range
 (`_`/`+` = ×5). Works in every overlay state. Arrow keys are deliberately not
 load-bearing (`waitKey` platform codes).
 
+The walk skips any control the perform layer cannot take back (amended
+2026-08-15). Today that is exactly one: **output resolution**. It is a `Cycle`,
+so it was simply the 2nd of 23 stops in Particles and the 3rd of 15 in Dither
+Girl — `.` `.` `=` with no panel open recreated the window at 4K, took the
+frame rate with it, and left `0` with no answer, because panic restores the
+mode's *look* and the window is not in the look. The test is not "is this a
+system setting" and not `save=False` — `Mirror` and `input` are unsaved and
+stay reachable, because pressing the key again undoes them. Resolution lives
+on the edit surface, where changing it is a deliberate decision.
+
 **Rename typing consumes every key except `Esc`** (which cancels the rename and
 nothing else). This is the explicit carve-out rule (judge finding: "panic works
 mid-rename" contradicted the consumption contract — resolved: while typing, you

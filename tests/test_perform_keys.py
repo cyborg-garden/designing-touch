@@ -335,8 +335,35 @@ def test_unknown_key_hints_question_mark():
 # ---------- param nudging + OSD (DESIGN.md §6.2) ----------
 
 def _nudgeables(ui):
-    from dtouch.panelspec import Cycle, Slider
-    return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+    from dtouch.panelspec import nudgeable
+    return [w for w in ui.iter_widgets() if nudgeable(w)]
+
+
+def test_the_nudge_keys_cannot_reach_the_output_resolution():
+    """`.` `.` `=` used to resize the live window (DESIGN.md §6.2 nudging).
+
+    `output` is a Cycle, so it was simply the 2nd of 23 stops in Particles and
+    the 3rd of 15 in Dither Girl — two keys from the default selection, with no
+    panel open. One `=` there recreated the window at 4K and took the frame
+    rate with it, and `0` (panic) could not put it back: panic restores the
+    mode's look, and the window size is not in the look. Nothing else the nudge
+    keys can reach is unrecoverable like that, so nothing else opts out."""
+    from dtouch.panelspec import Cycle, nudgeable, walk_spec
+    from dtouch.modes.dithergirl import DitherGirlMode
+
+    both = (("particles", list(Rig().ui.iter_widgets())),
+            ("dithergirl", [w for _s, w in
+                            walk_spec(DitherGirlMode().panel_spec())]))
+    for label, widgets in both:
+        cycles = [w for w in widgets if isinstance(w, Cycle)]
+        assert "res_idx" in [w.attr for w in cycles], \
+            f"{label}: the control must still exist on the edit surface"
+        assert "res_idx" not in [w.attr for w in widgets if nudgeable(w)], \
+            f"{label}: a bare key still resizes the window"
+        # ...and it is the ONLY opt-out: everything else a bare key can reach,
+        # a bare key can also take back.
+        assert [w.attr for w in cycles if not nudgeable(w)] == ["res_idx"], \
+            f"{label}: something else quietly left the nudge walk"
 
 
 def test_nudge_selection_walks_the_spec_order_and_wraps():

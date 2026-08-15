@@ -419,7 +419,7 @@ class DitherGirlMode:
                        tip="With a matte on: black outside the subject instead "
                            "of the raw camera picture."),
                 Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
-                      key="res", save=False),
+                      key="res", save=False, nudge=False),
                 Toggle("Mirror", "mirror", on_text="on", save=False),
             ]),
             Section("ALGORITHM", [
