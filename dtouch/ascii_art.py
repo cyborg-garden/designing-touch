@@ -1,0 +1,469 @@
+"""ASCII as a quantiser — the fifth entry in Dither Girl's ALGORITHM cycle.
+
+ASCII art is not a separate engine; it answers the same question the four
+dithers answer: *given an output alphabet smaller than the input's tonal
+range, how do I spend it to fake continuous tone?* Bayer spends 2-16 grey
+levels through a threshold matrix; ASCII spends 2-16 glyphs through the same
+threshold matrix. So this module reuses ``dtouch.dither``'s blue-noise texture,
+its sRGB transfer functions and its ``invert``/bias semantics — on the glyph
+index instead of the grey level — and ``dither.py`` stays a pure-array module
+with no font, atlas or cache state in it.
+
+Three things here are load-bearing and were each arrived at by rendering the
+alternative and looking at it:
+
+**The ramp is measured, not folklore.** Every candidate glyph is rasterised by
+the font that will draw it, at the cell size it will be drawn at, and its ink
+coverage is the mean alpha of that render. The folkloric `" .:-=+*#%@"` is not
+monotonic under measurement (`-` is lighter than `:`, `%` and `@` are lighter
+than `#`): four of its nine steps go backwards, so its upper mid-tones collapse
+onto one mark and faces read flat.
+
+**Hershey is a stroke font, so stroke weight is part of the ramp.** At a fixed
+thickness the densest glyph covers only ~0.38 of the cell, which caps the
+picture at 38% of the ink colour's luminance and clips every highlight above
+sRGB ~0.65 onto a single glyph. Searching (glyph x weight) jointly reaches
+~0.70 coverage, moving the clip point to sRGB ~0.87 — only true speculars. It
+also reads better: the ramp gets *bolder* as it gets denser.
+
+**Tone is normalised to the INK colour, not to the ramp's range.** Stretching
+the ramp over the input range maps sRGB mid-grey to ~0.42 apparent instead of
+0.50 and halves the picture's apparent brightness — which is why
+"gamma-correct ASCII looks bad" is folklore too. The 256-entry position LUT
+inverts the ramp's *measured composited luminance* curve, which also makes
+dark-ink palettes (black-on-white) invert for free: the measured luminances run
+downwards, the interpolation follows, and a bright input correctly picks a
+sparse glyph. No ``if palette ==`` anywhere.
+
+Cost (measured, M-series, cv2 4.13): 0.61-1.17 ms/frame at 720p and 1.29-1.79
+ms at 1080p for the whole step — the ordered-dither class, and 3-5x cheaper
+than the Floyd-Steinberg default it sits beside. The naive one-``cv2.putText``
+-per-cell path measures 20.7 ms at 720p and scales with *ink* rather than with
+pixels (a bright frame costs more than a dark one), so the glyph atlas is not
+an optimisation, it is the only viable shape.
+
+ASCII text only (the pool, and every panel string built from it): Hershey
+renders non-ASCII as '?'.
+"""
+from __future__ import annotations
+
+from collections import OrderedDict
+
+import cv2
+import numpy as np
+
+from .dither import _MID_GREY_LINEAR, _blue_noise_matrix, srgb_to_linear
+
+# ---------------------------------------------------------------------------
+# Geometry + rasterisation constants
+# ---------------------------------------------------------------------------
+
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+SS = 4                 # supersample factor for the coverage/atlas raster
+FILL = 0.82            # glyph box height as a fraction of the cell
+MIN_CELL_H = 8         # legibility floor: below this a glyph is a smudge
+ASPECT = 0.5           # cell_w / cell_h — a character cell is ~2:1 tall
+
+# Rec.709 luminance weights (the frame is RGB here, as step() returns RGB).
+_LUMA = np.float32([0.2126, 0.7152, 0.0722])
+
+# Candidate pool, in *preference* order — used only to break ties between
+# glyphs whose measured coverage is within tol of the same target, so the ramp
+# reads as ASCII art rather than as "whichever glyph measured closest".
+# Bars are deliberately absent: at 4-8 px cell widths `| l I 1` align
+# column-to-column and read as scan bars, not as texture.
+PREF = list(" .,:;-~=+*ox<>c\"'v^snuazerwt?/\\!ijfyCLOQUJXY0ZSGEAPDNHKRVMW&%#B8@$")
+
+# Stroke weights searched jointly with the glyph (see module docstring).
+WEIGHTS = (1.0, 1.6, 2.2, 3.0)
+
+
+# ---------------------------------------------------------------------------
+# Per-cell-size cache
+# ---------------------------------------------------------------------------
+#
+# A coverage scan is 272 rasters and costs 3.9 ms at 8x16 / 7.1 ms at 24x48,
+# so it must be cached — but it must not be cached *forever*: dragging Scale at
+# 4K walks ~40 distinct cell heights, and the alpha rasters alone would reach
+# tens of MB. Keep the last few cell sizes, evict oldest.
+
+_CELL_CACHE_MAX = 6
+_CELLS: "OrderedDict[tuple, dict]" = OrderedDict()
+
+
+def _cell_entry(cell_w: int, cell_h: int, font: int) -> dict:
+    key = (cell_w, cell_h, font)
+    entry = _CELLS.get(key)
+    if entry is None:
+        entry = {"alpha": {}, "coverage": None, "ramps": {}}
+        _CELLS[key] = entry
+        while len(_CELLS) > _CELL_CACHE_MAX:
+            _CELLS.popitem(last=False)
+    else:
+        _CELLS.move_to_end(key)
+    return entry
+
+
+def clear_caches() -> None:
+    """Drop every cached raster/coverage/ramp (tests, and cell-size churn)."""
+    _CELLS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Rasterisation + coverage measurement
+# ---------------------------------------------------------------------------
+
+def render_alpha(ch: str, cell_w: int, cell_h: int, weight: float = 1.5,
+                 font: int = FONT, fill: float = FILL) -> np.ndarray:
+    """Rasterise one glyph at one stroke weight into a (cell_h, cell_w) alpha
+    plane, float32 in [0, 1].
+
+    Drawn into an SSx supersampled cell with LINE_AA and box-filtered down, so
+    the alpha carries the glyph's real partial coverage rather than a jagged
+    1-bit stamp. The glyph box is scaled to *fill* of the cell height, clamped
+    to 0.95 of the cell width, and centred. Cached per cell size.
+    """
+    entry = _cell_entry(cell_w, cell_h, font)
+    cache = entry["alpha"]
+    key = (ch, weight, fill)
+    got = cache.get(key)
+    if got is not None:
+        return got
+
+    W, H = cell_w * SS, cell_h * SS
+    big = np.zeros((H, W), np.uint8)
+    if ch != " ":
+        (tw, th), _ = cv2.getTextSize(ch, font, 1.0, 1)
+        scale = (H * fill) / float(max(th, 1))
+        (tw, th), _ = cv2.getTextSize(ch, font, scale, 1)
+        if tw > W * 0.95 and tw > 0:
+            scale *= (W * 0.95) / tw
+            (tw, th), _ = cv2.getTextSize(ch, font, scale, 1)
+        # thickness scales with the cell so a ramp authored at 8x16 keeps its
+        # relative weight at 24x48 (4K) — "authored once, legible 720p->4K"
+        thick = max(1, int(round(weight * SS * cell_h / 16.0)))
+        cv2.putText(big, ch, ((W - tw) // 2, (H + th) // 2), font, scale,
+                    255, thick, cv2.LINE_AA)
+    alpha = (cv2.resize(big, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
+             .astype(np.float32) / 255.0)
+    cache[key] = alpha
+    return alpha
+
+
+def coverage_table(cell_w: int, cell_h: int, pool=PREF, weights=WEIGHTS,
+                   font: int = FONT) -> dict:
+    """{(glyph, weight): mean alpha} for the whole pool at this cell size.
+
+    Coverage — the mean alpha of the rendered cell — is the number the eye
+    integrates over a cell, and it is a property of (glyph, weight, cell size,
+    font), never of the character's code point. Cached per cell size; the
+    table is palette- and ramp-length-independent.
+    """
+    entry = _cell_entry(cell_w, cell_h, font)
+    table = entry["coverage"]
+    if table is None:
+        table = {
+            (c, w): float(render_alpha(c, cell_w, cell_h, w, font).mean())
+            # the blank cell is the same blank cell at every weight
+            for c in pool for w in (weights if c != " " else weights[:1])
+        }
+        entry["coverage"] = table
+    return table
+
+
+def build_ramp(n: int, cell_w: int, cell_h: int, pool=PREF, weights=WEIGHTS,
+               font: int = FONT, tol: float = 0.35):
+    """Pick *n* (glyph, weight) pairs spanning the achievable coverage range.
+
+    Walk n evenly spaced coverage targets and take, for each, the candidate
+    nearest the target — ties inside *tol* of one step broken by the pool's
+    preference order. One glyph may appear at most once (at any weight), so
+    every step of the ramp is a visibly different character. Returned sorted by
+    measured coverage, i.e. monotonic by construction.
+
+    Returns [((glyph, weight), coverage), ...], length n.
+    """
+    n = max(int(n), 1)
+    entry = _cell_entry(cell_w, cell_h, font)
+    cached = entry["ramps"].get((n, tol))
+    if cached is not None:
+        return cached
+
+    table = coverage_table(cell_w, cell_h, pool, weights, font)
+    items = sorted(table.items(), key=lambda kv: kv[1])
+    lo, hi = items[0][1], items[-1][1]
+    step = (hi - lo) / max(n - 1, 1)
+    rank = {c: i for i, c in enumerate(pool)}
+
+    chosen: dict = {}
+    for k in range(n):
+        target = lo + step * k
+        used = {c for c, _ in chosen}
+        rest = [kv for kv in items if kv[0][0] not in used]
+        if not rest:
+            break
+        best = min(abs(v - target) for _, v in rest)
+        band = [kv for kv in rest if abs(kv[1] - target) <= max(best, step * tol)]
+        key, val = min(band, key=lambda kv: (rank[kv[0][0]], kv[0][1]))
+        chosen[key] = val
+
+    ramp = sorted(chosen.items(), key=lambda kv: kv[1])
+    entry["ramps"][(n, tol)] = ramp
+    return ramp
+
+
+# ---------------------------------------------------------------------------
+# Atlas + tone LUT
+# ---------------------------------------------------------------------------
+
+def build_atlas(ramp, cell_w: int, cell_h: int, off_rgb, on_rgb,
+                font: int = FONT):
+    """Pre-colour every ramp step into a (N, cell_h, cell_w, 3) uint8 atlas.
+
+    Also returns each tile's mean **linear** luminance as actually composited
+    under this palette — including the anti-aliased edge pixels, honestly. That
+    curve, not the raw coverage, is what :func:`build_pos_lut` inverts.
+    """
+    off, on = np.float32(off_rgb), np.float32(on_rgb)
+    tiles = np.empty((len(ramp), cell_h, cell_w, 3), np.uint8)
+    lum = np.empty(len(ramp), np.float32)
+    for i, ((ch, weight), _cov) in enumerate(ramp):
+        a = render_alpha(ch, cell_w, cell_h, weight, font)[:, :, None]
+        rgb = off[None, None, :] + a * (on - off)[None, None, :]
+        tiles[i] = np.clip(rgb, 0, 255).astype(np.uint8)
+        lum[i] = float((srgb_to_linear(rgb / 255.0) * _LUMA).sum(-1).mean())
+    return tiles, lum
+
+
+def build_pos_lut(lum: np.ndarray, off_rgb, on_rgb,
+                  gamma: bool = True) -> np.ndarray:
+    """256-entry uint8 LUT: source code value -> ramp POSITION (0..255 spans
+    glyph 0..N-1).
+
+    Built by inverting the ramp's measured luminance curve against a tone
+    target interpolated between the palette's two luminances — so the target
+    is normalised to the INK colour, not to the ramp's achievable range (the
+    difference is a whole stop of apparent brightness; see the module
+    docstring). A non-uniform ramp therefore still reproduces tone correctly,
+    and the quantiser downstream stays a plain uniform ordered dither.
+    """
+    v = np.arange(256, dtype=np.float32) / 255.0
+    t = srgb_to_linear(v) if gamma else v
+    l_bg = float((srgb_to_linear(np.float32(off_rgb) / 255.0) * _LUMA).sum())
+    l_ink = float((srgb_to_linear(np.float32(on_rgb) / 255.0) * _LUMA).sum())
+    target = l_bg + t * (l_ink - l_bg)
+    idx = np.arange(len(lum), dtype=np.float32)
+    ascending = lum[0] <= lum[-1]
+    # np.interp needs an increasing x; a dark-ink palette measures downwards,
+    # so feed it reversed and the position curve inverts itself.
+    pos = np.interp(target, lum if ascending else lum[::-1],
+                    idx if ascending else idx[::-1])
+    span = max(len(lum) - 1, 1)
+    return np.clip(pos / span * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Grid geometry
+# ---------------------------------------------------------------------------
+
+def grid_for(frame_w: int, frame_h: int, rows_req: float):
+    """(cell_w, cell_h, cols, rows, clamped) for a requested row count.
+
+    ``cell_w = cell_h / 2`` and ``cols`` derives from ``cell_w``, so the
+    character grid carries the frame's aspect ratio and the subject is not
+    stretched 2x vertically (sampling on a square grid and drawing 2:1 cells
+    is the classic ASCII-art mistake). At 45 rows that is a 160x45 grid at
+    720p, 1080p, 1440p and 4K alike — one authored look, every output res.
+
+    ``clamped`` is True when the requested row count hit ``MIN_CELL_H`` and the
+    grid stopped getting finer; the panel says so rather than pretending the
+    slider still does something.
+    """
+    frame_w, frame_h = max(int(frame_w), 1), max(int(frame_h), 1)
+    rows_req = max(float(rows_req), 1.0)
+    raw = frame_h / rows_req
+    # the floor first, the frame second: a cell can never exceed the frame it
+    # is tiled into (the panel's 16 px swatch strip renders through this too)
+    cell_h = min(max(int(round(raw)), MIN_CELL_H), frame_h)
+    cell_w = min(max(3, int(round(cell_h * ASPECT))), frame_w)
+    rows = max(1, frame_h // cell_h)
+    cols = max(1, frame_w // cell_w)
+    return cell_w, cell_h, cols, rows, raw < MIN_CELL_H - 0.5
+
+
+# ---------------------------------------------------------------------------
+# The renderer
+# ---------------------------------------------------------------------------
+
+class AsciiRenderer:
+    """A configured ASCII quantiser: grid + ramp + atlas + tone LUT.
+
+    Construction does all the expensive work (coverage scan on a cold cell
+    size, ramp search, atlas raster, LUT build); :meth:`render` is a
+    downsample, a LUT, an integer ordered dither and one gather-blit.
+    Rebuild — do not mutate — when the grid, ramp length, palette or gamma
+    changes; :meth:`key` is the identity to compare against.
+    """
+
+    def __init__(self, frame_w: int, frame_h: int, rows_req: float = 45.0,
+                 n: int = 16, palette=((0, 0, 0), (255, 255, 255)),
+                 gamma: bool = True, bias: str = "auto", grain: bool = True,
+                 pool=PREF, weights=WEIGHTS, font: int = FONT):
+        self.frame_w, self.frame_h = int(frame_w), int(frame_h)
+        self.rows_req = float(rows_req)
+        (self.cell_w, self.cell_h, self.cols, self.rows,
+         self.clamped) = grid_for(self.frame_w, self.frame_h, rows_req)
+        self.palette = (tuple(palette[0]), tuple(palette[1]))
+        self.gamma, self.bias, self.grain = bool(gamma), str(bias), bool(grain)
+
+        self.ramp = build_ramp(n, self.cell_w, self.cell_h, pool, weights, font)
+        self.n = len(self.ramp)
+        self.atlas, self.lum = build_atlas(self.ramp, self.cell_w, self.cell_h,
+                                           self.palette[0], self.palette[1],
+                                           font)
+        self.pos_lut = build_pos_lut(self.lum, self.palette[0],
+                                     self.palette[1], self.gamma)
+
+        # ramp-position dither: the project's own 64x64 blue-noise texture,
+        # tiled over the CHARACTER grid (not the pixel grid) — same asset, same
+        # code shape and same bias semantics as _ordered_dither, one level up.
+        bn = _blue_noise_matrix()
+        ty = int(np.ceil(self.rows / bn.shape[0]))
+        tx = int(np.ceil(self.cols / bn.shape[1]))
+        self.noise = (np.tile(bn, (ty, tx))[:self.rows, :self.cols]
+                      * 255.0).astype(np.uint16)
+
+        # Output buffer + a strided (rows, cols, cell_h, cell_w, 3) view of the
+        # centred character grid, so the blit is one contiguous `view[:] =
+        # atlas[idx]` (0.44 ms at 720p — the fastest of five strategies
+        # measured, and 30x faster than per-cell putText).
+        gh, gw = self.rows * self.cell_h, self.cols * self.cell_w
+        self.grid_h, self.grid_w = gh, gw
+        self.x0, self.y0 = (self.frame_w - gw) // 2, (self.frame_h - gh) // 2
+        self.out = np.empty((self.frame_h, self.frame_w, 3), np.uint8)
+        self.out[:] = np.uint8(self.palette[0])
+        self.view = (self.out[self.y0:self.y0 + gh, self.x0:self.x0 + gw]
+                     .reshape(self.rows, self.cell_h, self.cols, self.cell_w, 3)
+                     .transpose(0, 2, 1, 3, 4))
+
+    # ----- identity -----
+    @staticmethod
+    def make_key(frame_w, frame_h, rows_req, n, palette, gamma, bias, grain):
+        cw, ch, cols, rows, _ = grid_for(frame_w, frame_h, rows_req)
+        return (frame_w, frame_h, cw, ch, cols, rows, int(n),
+                (tuple(palette[0]), tuple(palette[1])), bool(gamma), str(bias),
+                bool(grain))
+
+    def key(self):
+        return (self.frame_w, self.frame_h, self.cell_w, self.cell_h,
+                self.cols, self.rows, self.n, self.palette, self.gamma,
+                self.bias, self.grain)
+
+    # ----- per-frame -----
+    def render(self, gray_u8: np.ndarray, contrast: float = 1.0) -> np.ndarray:
+        """One grayscale uint8 frame (any size) -> the full RGB output frame.
+
+        The returned array is this renderer's own buffer, and every pixel of it
+        is rewritten on every call (grid *and* the sub-cell border) — so a
+        caller that blacks it out or glitches it in place cannot leave a stale
+        edge behind.
+        """
+        small = self._sample(gray_u8)
+        if contrast != 1.0:
+            small = cv2.convertScaleAbs(small, alpha=contrast,
+                                        beta=127.5 * (1.0 - contrast))
+        p = cv2.LUT(small, self.pos_lut).astype(np.uint16)   # position 0..255
+        m = self.n - 1
+        if self.grain and m > 0:
+            invert = self.bias == "dark" or (self.bias == "auto"
+                                             and self._is_dark(small))
+            if invert:
+                # dither the negative and invert back: mirrored pattern,
+                # upward-rounding density, dim detail preserved (dither.py's
+                # _ordered_dither docstring, applied to the glyph index)
+                np.subtract(np.uint16(255), p, out=p)
+            idx = ((p * m + self.noise) >> 8).astype(np.uint8)
+            if invert:
+                np.subtract(np.uint8(m), idx, out=idx)
+        else:
+            idx = ((p * m + 128) >> 8).astype(np.uint8)
+        self.view[:] = self.atlas[idx]
+        self._paint_border()
+        return self.out
+
+    def _sample(self, gray_u8: np.ndarray) -> np.ndarray:
+        """Area-average the source down to (cols, rows).
+
+        Sampled from a centred ROI carrying the character grid's aspect ratio,
+        with the ROI trimmed to an exact integer multiple of the grid whenever
+        that costs under 2% of the picture: cv2's INTER_AREA has a fast integer
+        path and a 17x slower general one (measured 0.19 ms vs 3.36 ms at
+        720p), and this is the whole ballgame for the frame budget.
+        """
+        sh, sw = gray_u8.shape[:2]
+        want = self.grid_w / float(self.grid_h)
+        if sw / float(sh) > want:
+            rw_roi, rh_roi = int(round(sh * want)), sh
+        else:
+            rw_roi, rh_roi = sw, int(round(sw / want))
+        rw_roi = max(min(rw_roi, sw), self.cols)
+        rh_roi = max(min(rh_roi, sh), self.rows)
+        trim_w = rw_roi - rw_roi % self.cols
+        if trim_w >= rw_roi * 0.98:
+            rw_roi = trim_w
+        trim_h = rh_roi - rh_roi % self.rows
+        if trim_h >= rh_roi * 0.98:
+            rh_roi = trim_h
+        x0, y0 = (sw - rw_roi) // 2, (sh - rh_roi) // 2
+        roi = gray_u8[y0:y0 + rh_roi, x0:x0 + rw_roi]
+        return cv2.resize(roi, (self.cols, self.rows),
+                          interpolation=cv2.INTER_AREA)
+
+    def _paint_border(self):
+        """Repaint the sub-cell margin around the centred grid. Cheap (it is
+        under one cell wide) and unconditional, so the buffer is wholly
+        rewritten every frame."""
+        bg = np.uint8(self.palette[0])
+        y1, x1 = self.y0 + self.grid_h, self.x0 + self.grid_w
+        if self.y0:
+            self.out[:self.y0] = bg
+        if y1 < self.frame_h:
+            self.out[y1:] = bg
+        if self.x0:
+            self.out[self.y0:y1, :self.x0] = bg
+        if x1 < self.frame_w:
+            self.out[self.y0:y1, x1:] = bg
+
+    def _is_dark(self, small: np.ndarray) -> bool:
+        mean = float(small.mean()) / 255.0
+        if self.gamma:
+            return float(srgb_to_linear(np.float32(mean))) < _MID_GREY_LINEAR
+        return mean < 0.5
+
+    def snap_matte(self, m: np.ndarray) -> np.ndarray:
+        """Quantise a float matte to the character grid.
+
+        The matte gate cuts through glyphs, so an unsnapped edge eats half a
+        `$` and the subject's outline reads as torn pixels — the one place
+        ASCII's cell structure is visible as damage rather than as texture.
+        Averaging the matte per cell and expanding it back makes whole
+        characters survive the cut, so the subject reads as text-shaped.
+        """
+        cell = cv2.resize(m, (self.cols, self.rows),
+                          interpolation=cv2.INTER_AREA)
+        big = cv2.resize(cell, (self.grid_w, self.grid_h),
+                         interpolation=cv2.INTER_NEAREST)
+        out = np.zeros((self.frame_h, self.frame_w), np.float32)
+        out[self.y0:self.y0 + self.grid_h,
+            self.x0:self.x0 + self.grid_w] = big
+        return out
+
+    # ----- introspection (panel copy, tests) -----
+    def ramp_str(self) -> str:
+        """The ramp as a string, sparse -> dense."""
+        return "".join(ch for (ch, _w), _c in self.ramp)
+
+    def grid_note(self) -> str:
+        """The TONE readout line: 'grid 160 x 45 chars - cell 8x16'."""
+        return (f"grid {self.cols} x {self.rows} chars - "
+                f"cell {self.cell_w}x{self.cell_h}")
