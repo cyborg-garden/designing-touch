@@ -34,9 +34,14 @@ the ramp over the input range maps sRGB mid-grey to ~0.42 apparent instead of
 0.50 and halves the picture's apparent brightness — which is why
 "gamma-correct ASCII looks bad" is folklore too. The 256-entry position LUT
 inverts the ramp's *measured composited luminance* curve, which also makes
-dark-ink palettes (black-on-white) invert for free: the measured luminances run
-downwards, the interpolation follows, and a bright input correctly picks a
-sparse glyph. No ``if palette ==`` anywhere.
+dark-ink palettes (black-on-white) work for free: their measured luminances run
+*downwards*, and the tone target — interpolated between the same two palette
+luminances — runs downwards with them, so the two inversions cancel. The LUT
+stays monotone increasing and a bright input still picks the DENSEST glyph,
+i.e. the most ink. That is exactly the shipped ``_palette_map`` semantic, where
+a white input lands on the palette's ``on`` colour whichever end that is (so
+`black-on-white` draws a bright subject in heavy black ink, as its name says).
+No ``if palette ==`` anywhere.
 
 Cost (measured, M-series, cv2 4.13): 0.61-1.17 ms/frame at 720p and 1.29-1.79
 ms at 1080p for the whole step — the ordered-dither class, and 3-5x cheaper
@@ -251,11 +256,24 @@ def build_atlas(ramp, cell_w: int, cell_h: int, off_rgb, on_rgb,
                 font: int = FONT):
     """Pre-colour every ramp step into a (N, cell_h, cell_w, 3) uint8 atlas.
 
-    Also returns each tile's mean **linear** luminance as actually composited
-    under this palette — including the anti-aliased edge pixels, honestly. That
-    curve, not the raw coverage, is what :func:`build_pos_lut` inverts.
+    Returns ``(ramp, tiles, lum)`` — each tile's mean **linear** luminance as
+    actually composited under this palette, including the anti-aliased edge
+    pixels, honestly. That curve, not the raw coverage, is what
+    :func:`build_pos_lut` inverts.
+
+    The ramp is monotonic in *coverage* by construction, but composited
+    luminance is not quite the same number: it is computed through sRGB
+    encode/decode on 8-bit tiles, and measured over (resolution x rows x n x
+    palette) it goes backwards by one step in some combinations — including 4K
+    at the default 45 rows for ten of the eleven shipped palettes. The
+    magnitude is small and ``pos_lut`` still came out monotone, but np.interp
+    requires an increasing x and a silent violation costs a tone somewhere in
+    the ramp. So the ramp is re-sorted here, tiles and luminances together, and
+    the returned ramp is the authoritative order — a swap only ever exchanges
+    two steps the measurement cannot separate.
     """
     off, on = np.float32(off_rgb), np.float32(on_rgb)
+    ramp = list(ramp)
     tiles = np.empty((len(ramp), cell_h, cell_w, 3), np.uint8)
     lum = np.empty(len(ramp), np.float32)
     for i, ((ch, weight), _cov) in enumerate(ramp):
@@ -263,7 +281,15 @@ def build_atlas(ramp, cell_w: int, cell_h: int, off_rgb, on_rgb,
         rgb = off[None, None, :] + a * (on - off)[None, None, :]
         tiles[i] = np.clip(rgb, 0, 255).astype(np.uint8)
         lum[i] = float((srgb_to_linear(rgb / 255.0) * _LUMA).sum(-1).mean())
-    return tiles, lum
+    # ascending for a light-ink palette, descending for a dark-ink one; the
+    # direction is the ramp's own, read off its ends
+    order = np.argsort(lum, kind="stable")
+    if len(lum) > 1 and lum[0] > lum[-1]:
+        order = order[::-1]
+    if not np.array_equal(order, np.arange(len(lum))):
+        ramp = [ramp[i] for i in order]
+        tiles, lum = tiles[order], lum[order]
+    return ramp, tiles, lum
 
 
 def build_pos_lut(lum: np.ndarray, off_rgb, on_rgb,
@@ -306,9 +332,17 @@ def grid_for(frame_w: int, frame_h: int, rows_req: float):
     is the classic ASCII-art mistake). At 45 rows that is a 160x45 grid at
     720p, 1080p, 1440p and 4K alike — one authored look, every output res.
 
-    ``clamped`` is True when the requested row count hit ``MIN_CELL_H`` and the
-    grid stopped getting finer; the panel says so rather than pretending the
-    slider still does something.
+    ``clamped`` is True once the legibility floor is what is holding the cell
+    size, so the panel can say the slider has run out of room rather than
+    pretending it still does something.
+
+    That is a question about the CONTROL, not about which branch of a min/max
+    fired, and it was answered with ``raw < MIN_CELL_H - 0.5`` — the point past
+    which the floor visibly clamps. But the cell rounds to an integer, so the
+    grid actually stops changing half a pixel earlier: at 720p every request
+    from ~85 rows up delivers the same 8 px cell, and the old test left that
+    whole 85-96 span reading as live travel. The honest predicate is "the cell
+    has rounded down onto the floor and further requests cannot move it".
     """
     frame_w, frame_h = max(int(frame_w), 1), max(int(frame_h), 1)
     rows_req = max(float(rows_req), 1.0)
@@ -319,7 +353,8 @@ def grid_for(frame_w: int, frame_h: int, rows_req: float):
     cell_w = min(max(3, int(round(cell_h * ASPECT))), frame_w)
     rows = max(1, frame_h // cell_h)
     cols = max(1, frame_w // cell_w)
-    return cell_w, cell_h, cols, rows, raw < MIN_CELL_H - 0.5
+    clamped = cell_h == MIN_CELL_H and raw < MIN_CELL_H + 0.5
+    return cell_w, cell_h, cols, rows, clamped
 
 
 # ---------------------------------------------------------------------------
@@ -387,8 +422,11 @@ class AsciiRenderer:
             self._ramp_key = (grid, n)
             self._atlas_key = self._lut_key = None
         if (self._ramp_key, palette) != self._atlas_key:
-            self.atlas, self.lum = build_atlas(self.ramp, cw, ch, palette[0],
-                                               palette[1], self._font)
+            # build_atlas may re-sort the ramp onto its measured luminance, so
+            # `self.ramp` is written back from it — ramp_str() must describe
+            # the atlas the picture is actually built from
+            self.ramp, self.atlas, self.lum = build_atlas(
+                self.ramp, cw, ch, palette[0], palette[1], self._font)
             self._atlas_key = (self._ramp_key, palette)
             self._lut_key = None
         if (self._atlas_key, gamma) != self._lut_key:
@@ -530,10 +568,24 @@ class AsciiRenderer:
             self.out[self.y0:y1, x1:] = bg
 
     def _is_dark(self, small: np.ndarray) -> bool:
-        mean = float(small.mean()) / 255.0
+        """`bias auto`'s per-frame decision — the same one ``_ordered_dither``
+        makes, on the same domain.
+
+        It used to linearize the MEAN; ``dither.py`` means the LINEARIZED
+        plane, and by Jensen those are different numbers on any frame that is
+        not flat — most on a high-contrast one, which is this app's own use
+        case (a lit subject on a dark ground). Worse, linearizing the mean made
+        the two branches below the same predicate: srgb_to_linear is monotone
+        and ``_MID_GREY_LINEAR`` is srgb_to_linear(0.5), so
+        ``srgb_to_linear(m) < _MID_GREY_LINEAR`` IS ``m < 0.5`` — verified
+        identical over 1001 sample means. The Gamma toggle provably could not
+        move it. Taking the mean after linearizing fixes both at once, and
+        costs nothing: `small` is the character grid, 160x45 at the default.
+        """
+        v = small.astype(np.float32) / 255.0
         if self.gamma:
-            return float(srgb_to_linear(np.float32(mean))) < _MID_GREY_LINEAR
-        return mean < 0.5
+            return float(srgb_to_linear(v).mean()) < _MID_GREY_LINEAR
+        return float(v.mean()) < 0.5
 
     # ----- introspection (panel copy, tests) -----
     def ramp_str(self) -> str:

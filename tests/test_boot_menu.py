@@ -165,6 +165,20 @@ def test_leaving_the_boot_menu_posts_the_doors_hint(tmp_path):
     assert DOORS_HINT in _hints(host)
 
 
+def test_leaving_the_boot_menu_retires_the_resume_hint(tmp_path):
+    """A hint is a pointer, and 'enter resumes X' points at Enter. It carries
+    a 4 s ttl and Enter usually lands inside one, so it used to survive the
+    commit and stack ABOVE the hint that replaces it — two sentences, one of
+    them about a menu the operator has already left."""
+    from dtouch.shell import RESUME_HINT
+
+    host = _booted(tmp_path)
+    assert any(t.startswith(RESUME_HINT) for t in _hints(host))
+    host._route_key(13)                       # Enter
+    assert not any(t.startswith(RESUME_HINT) for t in _hints(host))
+    assert _hints(host) == [DOORS_HINT]
+
+
 # ---------- Esc at boot enters the selection ----------
 
 def test_esc_at_boot_enters_the_selected_mode(tmp_path):

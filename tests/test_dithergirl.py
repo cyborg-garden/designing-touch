@@ -977,7 +977,7 @@ def test_ascii_rebuilds_only_what_a_change_invalidates(tmp_path):
     assert m._ascii is rend
     assert m._ascii.out is buf, "a palette change reallocated the frame buffer"
     assert m._ascii.view is view
-    assert m._ascii.ramp is ramp
+    assert m._ascii.ramp == ramp          # the ramp SEARCH did not re-run
     assert m._ascii.atlas is not atlas and m._ascii.pos_lut is not lut
 
     # gamma only: the LUT inverts the atlas's measured curve, the atlas stands
@@ -1092,7 +1092,7 @@ def test_grid_note_says_when_scale_has_run_out_of_room(tmp_path):
     ui, m, g = host.ui, host.mode, _gui()
     ui.dg_algo_idx = ALGOS.index("ASCII")
     frame = np.zeros((400, 400, 3), np.uint8)
-    ui.dg_scale = 45.0
+    ui.dg_scale = 30.0            # 12 px cells at 360p: still room to move
     m.step(_white(360, 640), None, 1 / 30)
     short = m._draw_grid_note(frame, g, 10, 10, 200)
     assert m._ascii.clamped is False
@@ -1110,6 +1110,11 @@ def test_the_ascii_perf_note_is_measured_and_reported(tmp_path):
     4K frame at the cell floor measures ~8.7 ms, and an operator is owed the
     number rather than a quietly halved frame rate."""
     from dtouch.modes.dithergirl import ASCII_SLOW_MS
+
+    # pinned against the LITERAL: every assertion below compares a measured
+    # cost against ASCII_SLOW_MS, so they all pass vacuously if the threshold
+    # is raised, and the threshold IS the claim the panel makes
+    assert ASCII_SLOW_MS == 8.0
 
     host = _booted(tmp_path)
     ui, m, g = host.ui, host.mode, _gui()

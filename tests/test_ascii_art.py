@@ -12,7 +12,7 @@ import time
 import numpy as np
 import pytest
 
-from dtouch.ascii_art import (MIN_CELL_H, WEIGHTS, AsciiRenderer,
+from dtouch.ascii_art import (MIN_CELL_H, WEIGHTS, AsciiRenderer, build_atlas,
                               build_pos_lut, build_ramp, clear_caches,
                               coverage_table, grid_for, render_alpha,
                               weights_for)
@@ -145,10 +145,20 @@ def test_grid_aspect_tracks_the_frame_aspect(w, h, req):
 
 
 def test_cell_floor_clamps_and_says_so():
-    lo = grid_for(1280, 720, 90)
-    hi = grid_for(1280, 720, 720)
-    assert lo[1] == MIN_CELL_H and not lo[4]        # exactly on the floor
-    assert hi[:4] == lo[:4] and hi[4]               # past it, and it reports
+    """`clamped` answers "does pushing this slider further do anything", not
+    "did max() fire". The cell rounds to an integer, so at 720p every request
+    from ~85 rows up already delivers the same 8 px cell — the old predicate
+    (`raw < MIN_CELL_H - 0.5`) did not report until 97, leaving a twelve-row
+    dead span that the panel called live travel."""
+    live = grid_for(1280, 720, 80)                  # 9 px cells, still moving
+    edge = grid_for(1280, 720, 85)                  # rounds onto the floor
+    floor = grid_for(1280, 720, 90)                 # exactly on it
+    past = grid_for(1280, 720, 720)
+    assert live[1] == 9 and not live[4]
+    assert edge[1] == MIN_CELL_H and edge[4]
+    assert floor[1] == MIN_CELL_H and floor[4]
+    assert past[:4] == floor[:4] and past[4]        # and nothing moved
+    assert edge[:4] == floor[:4]
     assert not grid_for(1280, 720, 45)[4]
 
 
@@ -202,6 +212,59 @@ def test_a_dark_ink_palette_inverts_the_lut_with_no_special_case():
     # ...and the two palettes disagree about which is darker, as they must
     assert _lin_luma(WOB[1]) > _lin_luma(WOB[0])
     assert _lin_luma(BOW[1]) < _lin_luma(BOW[0])
+
+
+def test_the_atlas_luminance_curve_cannot_go_backwards():
+    """`build_pos_lut` feeds this curve to np.interp, which needs a monotone
+    x. The ramp is monotone in COVERAGE by construction, but composited
+    luminance is a different number (sRGB encode/decode on 8-bit tiles) and it
+    goes backwards by a step in some (res x rows x n x palette) combos — nine
+    of the eleven shipped palettes at 4K and the default 45 rows. The
+    magnitude is small and pos_lut still came out monotone, but a silent
+    violation costs a tone, so build_atlas sorts instead of hoping."""
+    from dtouch.modes.dithergirl import PALETTES
+
+    reordered = 0
+    for res in ((1280, 720), (1920, 1080), (3840, 2160)):
+        for rows in (30, 45, 72):
+            cw, ch, _cols, _rows, _c = grid_for(res[0], res[1], rows)
+            for n in (2, 4, 8, 16):
+                ramp = build_ramp(n, cw, ch)
+                for name, (off, on) in PALETTES.items():
+                    out, tiles, lum = build_atlas(list(ramp), cw, ch, off, on)
+                    d = np.diff(lum.astype(np.float64))
+                    assert (d >= 0).all() or (d <= 0).all(), (
+                        "%s at %s / %s rows / n=%d" % (name, res, rows, n))
+                    assert len(out) == len(ramp) == len(tiles) == len(lum)
+                    assert sorted(k for k, _v in out) == sorted(
+                        k for k, _v in ramp)          # same steps, reordered
+                    if [k for k, _v in out] != [k for k, _v in ramp]:
+                        reordered += 1
+    assert reordered, "if this stops firing the sort has become dead code"
+
+
+def test_bias_auto_means_on_the_same_domain_as_the_pixel_dithers():
+    """`_ordered_dither` means the LINEARIZED plane; ASCII used to linearize
+    the MEAN. By Jensen those differ on any frame that is not flat — most on a
+    high-contrast one, which is this app's own use case. And because
+    srgb_to_linear is monotone and _MID_GREY_LINEAR is srgb_to_linear(0.5),
+    linearizing the mean made the gamma-on and gamma-off branches the SAME
+    predicate: the Gamma toggle provably could not move the decision."""
+    from dtouch.dither import _MID_GREY_LINEAR
+
+    small = np.zeros((10, 10), np.uint8)
+    small[:3] = 255                       # 30% of a dark frame is lit
+    plane = small.astype(np.float32) / 255.0
+
+    rend = AsciiRenderer(640, 360, 45, 16, WOB, gamma=True)
+    want = float(srgb_to_linear(plane).mean()) < _MID_GREY_LINEAR
+    assert rend._is_dark(small) is want
+    assert want is False                  # in linear light this frame is LIT
+    assert float(plane.mean()) < 0.5      # ...and the old rule called it dark
+
+    # so Gamma now moves it, which is the whole point of the toggle
+    plain = AsciiRenderer(640, 360, 45, 16, WOB, gamma=False)
+    assert plain._is_dark(small) is True
 
 
 @pytest.mark.parametrize("palette", [WOB, BOW])
@@ -315,7 +378,7 @@ def test_the_request_is_re_read_without_a_rebuild():
     """Past the floor the grid stops changing, so nothing rebuilds — but
     `clamped` is a property of the REQUEST, and the panel has to be able to
     say the slider has run out of room."""
-    rend = AsciiRenderer(640, 360, 45, 16, WOB)
+    rend = AsciiRenderer(1280, 720, 45, 16, WOB)
     assert not rend.clamped
     before = rend.atlas
     rend.set_rows_req(720)
@@ -330,9 +393,13 @@ def test_the_cell_cache_is_bounded():
     clear_caches()
     from dtouch import ascii_art
 
+    # against the LITERAL, not against the constant: `len(cache) <= the
+    # constant that sets len(cache)` passes for any value of the constant,
+    # including one that puts tens of MB of alpha rasters back
+    assert ascii_art._CELL_CACHE_MAX == 6
     for h in range(9, 40):
         build_ramp(4, max(3, h // 2), h)
-    assert len(ascii_art._CELLS) <= ascii_art._CELL_CACHE_MAX
+    assert len(ascii_art._CELLS) <= 6
 
 
 # ---------- cost ----------

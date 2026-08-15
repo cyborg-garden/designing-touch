@@ -40,6 +40,7 @@ from .panelspec import Cycle, Section, Slider, apply_look, capture_look
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
+RESUME_HINT = "enter resumes"    # boot-menu hint prefix; retired when Enter lands
 ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
 ERR_TOAST_MAX = 3      # ...and at most this many DISTINCT errors per window
 ERR_PRINT_MAX = 20     # ...and at most this many stdout lines per window
@@ -541,6 +542,11 @@ class Host:
         hint is posted HERE rather than at boot, so it lands on the mode
         instead of on top of the menu's own hint line."""
         if from_boot:
+            # the resume hint is a pointer at Enter, and Enter has just been
+            # pressed. Its 4 s ttl outlives that by ~3 s, so without this it
+            # stacks above the doors hint and the operator reads two
+            # sentences, one of them about a menu they have already left.
+            self.hud.toasts.retire(RESUME_HINT)
             self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
             if self.mode is not None and mode_id == self.mode.id:
                 self.hud.toasts.flash(self.mode.title, self.mode.accent)
@@ -1346,8 +1352,8 @@ class Host:
         # the menu is left (_menu_commit).
         if self._boot_menu:
             self.menu.show(self.mode.id, boot=True)
-            self.hud.toasts.hint("enter resumes %s" % self.mode.title.upper(),
-                                 ttl=4.0)
+            self.hud.toasts.hint("%s %s" % (RESUME_HINT,
+                                            self.mode.title.upper()), ttl=4.0)
         else:
             self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
 

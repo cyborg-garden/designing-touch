@@ -347,7 +347,13 @@ class Gui:
         content fits — in which case nothing draws and nothing is clickable.
 
         Everything lives in the S(16) gutter between the panel's left edge and
-        the controls' left edge, so the scrollbar can never cover a control.
+        the controls' left edge, so no control is DRAWN under it — with one
+        exception that matters for hit-testing rather than for pixels: a
+        section header's rect starts S(4) into the gutter, so the two overlap
+        by a quarter of its width. `scrollbar` front-inserts its hits for
+        exactly this reason (fixed chrome above scrolled content), which is
+        what makes the overlap harmless instead of a header that eats arrow
+        clicks near the top and bottom of the panel.
 
         The arrow BUTTONS are drawn at the shipped chrome's button scale (the
         cycle `<` `>` buttons are S(28)xS(24), the manage buttons S(22)xS(20)).
@@ -391,7 +397,7 @@ class Gui:
                 "track_y0": ty0, "track_h": track_h,
                 "thumb_h": thumb_h, "travel": track_h - thumb_h, "span": span}
 
-    def scrollbar(self, img, px, view_h, content_h, scroll, step=None):
+    def scrollbar(self, img, px, view_h, content_h, scroll, step):
         """Scrollbar in the panel's left gutter — only when content overflows.
 
         Up arrow, thumb, down arrow. The arrows are real hit targets so the
@@ -407,7 +413,6 @@ class Gui:
         geom = self.scrollbar_geom(px, view_h, content_h, scroll)
         if geom is None:
             return None
-        step = self.S(SCROLL_STEP) if step is None else step
         if geom["thumb"]:
             x0, y0, x1, y1 = geom["thumb"]
             hot = in_rect(geom["track"], self.mouse)
