@@ -35,10 +35,15 @@ the person matte, `portrait` and `sigil`, fall back to another matte.
 
 ## The live instrument
 
-One window, and it opens already playing — the mode you used last, its look moving, and a
-hint that fades after four seconds: `m menu - TAB panel - ? keys`. Those three doors go with
-the hint. A fourth one doesn't: there's a small chevron in the top-right corner, and clicking
-it opens the panel. It's there for as long as the HUD is, so the mouse is never a dead end.
+One window, and it opens on the **home menu** — with the mode you used last already running
+live behind it and already selected, so `Enter` is a one-key resume. A hint says so
+(`enter resumes DITHER GIRL`), and once you're in, a second one names the three doors:
+`m menu - TAB panel - ? keys`. A fourth door isn't in the hint: there's a small chevron in
+the top-right corner, and clicking it opens the panel. It's there for as long as the HUD is,
+so the mouse is never a dead end.
+
+A launch flag means *boot into*, so `--mode`, `--still`, `--flock` and `--glitch` skip the
+menu entirely.
 
 **`TAB` cycles what's drawn over the render:**
 
@@ -59,11 +64,13 @@ Two instruments share the window, the presets, the keys and the recorder:
 - **Particles** (`p`) — camera → matte → a flowing cloud of glowing particles. The original.
 - **Dither Girl** (`d`) — the dither pipeline as the picture itself (see below).
 
-`m` opens the **home menu**: your camera behind a scrim, rendered through 1-bit blue-noise
-dither, with a card per mode. `,`/`.` move, `Enter` commits, `Esc` leaves the running mode
-alone — or just click a card. You never need the menu mid-set: `p` and `d` switch directly
-from any state. Switching draws a still boot card rather than a gray flash, and coming back
-to a mode you've already used finds it exactly as you left it.
+`m` opens the **home menu** — the same one you booted into: your camera behind a scrim,
+rendered through 1-bit blue-noise dither, with a card per mode. `,`/`.` move, `Enter`
+commits, or just click a card. `Esc` leaves the running mode alone — except at boot, where
+there's nothing behind the menu to go back to, so it commits the selection instead of
+dropping you into a mode you never chose. You never need the menu mid-set: `p` and `d`
+switch directly from any state. Switching draws a still boot card rather than a gray flash,
+and coming back to a mode you've already used finds it exactly as you left it.
 
 From the command line, `--mode dithergirl` boots into Dither Girl and `--still photo.jpg`
 loads a still image and implies it; `--flock` and `--glitch` boot Particles with those layers
@@ -72,7 +79,10 @@ already on.
 ## The Particles panel
 
 `TAB` to the panel. It's grouped into **collapsible sections** — click a header to open one.
-`MOTION` and `SIGNAL` start closed, so the panel opens at the size it always did.
+`MOTION` and `SIGNAL` start closed, so the panel opens at the size it always did. When there's
+more panel than window, a scrollbar appears in its left gutter with **arrow buttons** at the
+top and bottom: a cv2 window's scroll wheel is the least portable input there is (on macOS it
+never scrolled up at all), and the mouse is meant to be a fallback that can reach everything.
 
 - **Templates** — one-click looks: `abstract` (glowing cloud), `portrait`/`textured`
   (recognizable, painted with your real colors), `embers`, `aurora`, and **`sigil`** (sharp
@@ -133,13 +143,36 @@ The same camera (or a still, via `--still photo.jpg`) run through the dither pip
 
 - **Source** — camera or the loaded still, plus an optional matte so only the subject gets
   dithered.
-- **Algorithm** — Bayer, blue noise, Floyd-Steinberg or Riemersma, with a live/slow badge and
-  a swatch strip showing a grey ramp through your current settings.
+- **Algorithm** — Bayer, blue noise, Floyd-Steinberg, Riemersma, or **ASCII**, with a
+  live/slow badge and a swatch strip showing a grey ramp through your current settings.
 - **Tone** — Bits, Gamma, Bias, Contrast, and **Scale**: the working height the dither runs at
-  (45–720 px, default 72). Big cells are the look; they're also what survives streaming
+  (30–720 px, default 72). Big cells are the look; they're also what survives streaming
   compression. Drag Scale up with an error-diffusion algorithm active and it says so in amber
   rather than quietly dropping frames.
-- **Palette** — white-on-black, black-on-white, amber, or green phosphor.
+- **Palette** — eleven two-colour pairs: white-on-black, black-on-white, amber, green
+  phosphor, cyan, magenta, ice, blood, gameboy, sepia and hi-vis. Every one was measured for
+  contrast between its own two ends and none ships under 4.5:1, because this is aimed at a
+  projector rather than a monitor. Plus **Hue** and **Tint** — a direction and an amount, so
+  you can dial a palette during a set instead of hunting a longer list. At Tint 0 every
+  palette is exactly as named; turn Tint up and both ends steer toward Hue together, so a
+  duotone stays a duotone and a black ground stays black.
+
+### ASCII
+
+The fifth entry in the algorithm cycle isn't a filter bolted on the side — it's the same
+question the four dithers answer (*a smaller alphabet than the picture needs; how do you
+spend it?*) answered with glyphs. It costs about the same as an ordered dither, so the badge
+says `live`.
+
+- The ramp is **measured, not folklore**. Every candidate character is rasterised by the font
+  that will draw it, at the size it will be drawn at, and sorted by its actual ink coverage.
+  The familiar `" .:-=+*#%@"` isn't monotonic under measurement — four of its nine steps go
+  backwards — which is why so much ASCII art has flat, muddy mid-tones.
+- **Bits** becomes how many characters are in the ramp (2 / 4 / 8 / 16).
+- **Scale** becomes character **rows**, not pixels — 45 rows is a 160×45 grid whether you're
+  outputting 720p or 4K, so a look you author once stays the same look at any resolution. The
+  panel prints the live grid under the slider, and tells you when the slider has run out of
+  room rather than pretending it still does something.
 
 The SIGNAL rack is available on top, minus its dither row — this mode owns dithering, and two
 dither controls in one panel is how you end up with an incoherent instrument.
