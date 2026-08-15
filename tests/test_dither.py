@@ -1,9 +1,8 @@
 """Tests for dtouch.dither — ordered (Bayer, blue-noise) and error-diffusion
 (Floyd-Steinberg, Riemersma) dithering, plus the sRGB gamma helpers."""
-import time
-
 import numpy as np
 import pytest
+from conftest import assert_within, best_ms
 
 from dtouch.dither import (
     bayer_dither,
@@ -466,22 +465,20 @@ class TestRiemersma:
 # ---------------------------------------------------------------------------
 
 class TestPerformance:
-    @staticmethod
-    def _best_ms(fn, img, runs=5):
-        best = np.inf
-        for _ in range(runs):
-            t0 = time.perf_counter()
-            fn(img)
-            best = min(best, time.perf_counter() - t0)
-        return best * 1000.0
+    # Both ordered dithers measure ~16.5x the reference float32 pass over the
+    # same 720p RGB plane (see tests/conftest.py). The budget is that ratio
+    # times PERF_MARGIN, so a 2x blowup fails and a busy machine — which slows
+    # the reference by the same factor — does not. This test used to assert a
+    # flat 12 ms and failed under load on a laptop it passes on when idle.
+    ORDERED_RATIO = 16.5
 
-    def test_ordered_dither_720p_within_budget(self):
+    def test_ordered_dither_720p_within_budget(self, perf_reference):
         """Bayer and blue-noise (gamma on, auto invert) on a 720p colour
-        frame. Budget is ~6 ms in the live post-FX chain; assert a loose
-        2× margin so CI noise can't flake the suite."""
+        frame, against the live post-FX chain's budget."""
         rng = np.random.default_rng(0)
         img = rng.random((720, 1280, 3), dtype=np.float32)
-        for fn in (lambda a: bayer_dither(a, bits=3),
-                   lambda a: blue_noise_dither(a, bits=3)):
-            fn(img)   # warm caches / LUTs
-            assert self._best_ms(fn, img) < 12.0
+        for name, fn in (("bayer", lambda: bayer_dither(img, bits=3)),
+                         ("blue noise", lambda: blue_noise_dither(img, bits=3))):
+            fn()   # warm caches / LUTs
+            assert_within(best_ms(fn), self.ORDERED_RATIO, perf_reference,
+                          "%s at 720p" % name)

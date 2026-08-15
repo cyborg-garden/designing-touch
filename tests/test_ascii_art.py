@@ -7,10 +7,9 @@ reachable; the grid carries the frame's aspect at every output resolution; the
 tone target is normalised to the ink colour so mid-grey survives; the
 endpoints are exact; and the whole step stays in the ordered-dither cost class.
 """
-import time
-
 import numpy as np
 import pytest
+from conftest import assert_within, best_ms
 
 from dtouch.ascii_art import (MIN_CELL_H, WEIGHTS, AsciiRenderer, build_atlas,
                               build_pos_lut, build_ramp, clear_caches,
@@ -404,21 +403,23 @@ def test_the_cell_cache_is_bounded():
 
 # ---------- cost ----------
 
-@pytest.mark.parametrize("res,rows,budget", [((1280, 720), 45, 2.5),
-                                             ((1280, 720), 90, 3.0),
-                                             ((1920, 1080), 45, 4.0)])
-def test_the_step_stays_in_the_ordered_dither_cost_class(res, rows, budget):
-    """Measured 0.6-1.4 ms on the development machine; the budgets here are
-    generous multiples so this fails on an algorithmic regression (a per-cell
-    putText path measures 20.7 ms at 720p) rather than on a busy CI box."""
+@pytest.mark.parametrize("res,rows,ratio", [((1280, 720), 45, 2.1),
+                                            ((1280, 720), 90, 3.4),
+                                            ((1920, 1080), 45, 4.1)])
+def test_the_step_stays_in_the_ordered_dither_cost_class(res, rows, ratio,
+                                                         perf_reference):
+    """Cost as a MULTIPLE of the reference float32 pass over a 720p RGB plane
+    (tests/conftest.py), not as absolute ms: the ratios below held to within
+    0.2x across a 37% swing in the reference itself, so they survive a busy
+    machine, and PERF_MARGIN still fails a 2x blowup. These budgets read as
+    generous because the failure they exist to catch is not: the rejected
+    per-cell putText path measures 20.7 ms at 720p, forty times over."""
     rend = AsciiRenderer(res[0], res[1], rows, 16, WOB)
     frame = np.tile(np.linspace(0, 255, res[0]).astype(np.uint8), (res[1], 1))
     for _ in range(3):
         rend.render(frame)
-    t0 = time.perf_counter()
-    for _ in range(10):
-        rend.render(frame)
-    assert (time.perf_counter() - t0) / 10 * 1000 < budget
+    assert_within(best_ms(lambda: rend.render(frame)), ratio, perf_reference,
+                  "ascii %dx%d at %d rows" % (res[0], res[1], rows))
 
 
 def test_the_grid_note_reads_like_a_grid():
