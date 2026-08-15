@@ -6,6 +6,8 @@ swatch caching, preset capture/apply round-trips (incl. the nested "signal"
 block and the suppressed dither row), bank seeding, still input, and the
 shell-command wiring for menu + direct mode keys.
 """
+import time
+
 import cv2
 import numpy as np
 import pytest
@@ -949,20 +951,62 @@ def test_ascii_bits_set_the_ramp_length(tmp_path):
         assert m._ascii.n == n
 
 
-def test_ascii_renderer_is_rebuilt_only_when_it_must_be(tmp_path):
-    host = _booted(tmp_path)
+def test_ascii_rebuilds_only_what_a_change_invalidates(tmp_path):
+    """The frame buffer is what a rebuild was really costing: at 4K it is
+    24 MB, and allocate-and-clear measured 31.9 ms of a 35.0 ms construction —
+    so a Hue drag (which invalidates the ATLAS and nothing else) ran at 46
+    ms/frame against 7 ms idle. Retune in place; keep the buffer."""
+    host = _booted(tmp_path, res=(640, 360))   # tall enough that Scale moves
+                                               # the grid off the cell floor
     ui, m = host.ui, host.mode
     ui.dg_algo_idx = ALGOS.index("ASCII")
     m.step(_white(), None, 1 / 30)
-    first = m._ascii
+    rend, buf, atlas, lut = m._ascii, m._ascii.out, m._ascii.atlas, m._ascii.pos_lut
+    ramp, view = m._ascii.ramp, m._ascii.view
+
     m.step(_black(), None, 1 / 30)
-    assert m._ascii is first                       # a new frame is not a rebuild
+    assert m._ascii is rend and m._ascii.atlas is atlas   # a frame is not a rebuild
     ui.dg_contrast = 1.8
     m.step(_white(), None, 1 / 30)
-    assert m._ascii is first                       # nor is a per-frame control
+    assert m._ascii is rend and m._ascii.atlas is atlas   # nor a per-frame control
+
+    # palette only: the atlas is palette-coloured and the LUT reads the atlas,
+    # so both go — the buffer, the strided view and the ramp search do not
     ui.dg_palette_idx = list(PALETTES).index("ice")
     m.step(_white(), None, 1 / 30)
-    assert m._ascii is not first                   # the atlas is palette-coloured
+    assert m._ascii is rend
+    assert m._ascii.out is buf, "a palette change reallocated the frame buffer"
+    assert m._ascii.view is view
+    assert m._ascii.ramp is ramp
+    assert m._ascii.atlas is not atlas and m._ascii.pos_lut is not lut
+
+    # gamma only: the LUT inverts the atlas's measured curve, the atlas stands
+    atlas = m._ascii.atlas
+    ui.dg_gamma = False
+    m.step(_white(), None, 1 / 30)
+    assert m._ascii.atlas is atlas and m._ascii.out is buf
+    assert m._ascii.pos_lut is not lut
+
+    # the grid: new cells, so everything below them — still the same buffer
+    ui.dg_scale = 30.0
+    m.step(_white(), None, 1 / 30)
+    assert m._ascii.out is buf
+    assert m._ascii.ramp is not ramp and m._ascii.view is not view
+
+
+def test_hue_and_tint_do_not_reallocate_the_ascii_buffer(tmp_path):
+    """The interaction the rebuild-every-frame cost actually landed on: Hue
+    and Tint are sliders, so a drag is one palette change per frame."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_tint = 0.5
+    m.step(_white(), None, 1 / 30)
+    rend, buf = m._ascii, m._ascii.out
+    for hue in range(0, 360, 7):
+        ui.dg_hue = float(hue)
+        m.step(_white(), None, 1 / 30)
+        assert m._ascii is rend and m._ascii.out is buf
 
 
 def test_ascii_matte_gate_still_composites(tmp_path):
@@ -1060,7 +1104,7 @@ def test_grid_note_says_when_scale_has_run_out_of_room(tmp_path):
     assert m._draw_grid_note(frame, g, 10, 10, 200) > short   # one line more
 
 
-def test_the_ascii_perf_note_is_measured_and_latched(tmp_path):
+def test_the_ascii_perf_note_is_measured_and_reported(tmp_path):
     """Perf honesty (§4.2) without a guessed per-resolution threshold: the
     mode times its own step. ASCII is in the ordered class at 720p/1080p but a
     4K frame at the cell floor measures ~8.7 ms, and an operator is owed the
@@ -1078,10 +1122,46 @@ def test_the_ascii_perf_note_is_measured_and_latched(tmp_path):
 
     m._ascii_ms, m._ascii_slow = 9.3, True
     assert m._draw_grid_note(frame, g, 10, 10, 200) > clean
-    # ...and a new setting is a new measurement, never an inherited verdict
-    ui.dg_bits = 2.0
-    m.step(_white(), None, 1 / 30)
+    # ...and the verdict follows the measurement back DOWN, so a setting that
+    # is fast again stops being scolded without needing a rebuild to clear it
+    for _ in range(40):
+        m.step(_white(), None, 1 / 30)
     assert m._ascii_slow is False and m._ascii_ms < ASCII_SLOW_MS
+
+
+def test_the_ascii_perf_note_can_fire_during_the_drag_that_is_slow(tmp_path):
+    """The note used to be structurally unable to report the one interaction
+    that was slow: the clock started AFTER the rebuild (so it timed render()
+    only — the real step cost 28.7 ms while the note read 5.3 ms), and the
+    frame counter was cleared on every rebuild, so a drag that rebuilt every
+    frame could never reach the 8-frame warm-up gate."""
+    from dtouch.ascii_art import AsciiRenderer
+    from dtouch.modes.dithergirl import ASCII_SLOW_MS, ASCII_WARMUP_FRAMES
+
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_tint = 0.5
+    m.step(_white(), None, 1 / 30)
+
+    real, cost = AsciiRenderer.configure, ASCII_SLOW_MS * 2.0 / 1000.0
+
+    def slow_configure(self, *a, **kw):
+        time.sleep(cost)                  # stand-in for a 4K atlas rebuild
+        return real(self, *a, **kw)
+
+    AsciiRenderer.configure = slow_configure
+    try:
+        for i in range(ASCII_WARMUP_FRAMES * 3):
+            ui.dg_hue = float((i * 11) % 360)     # a drag: retune every frame
+            m.step(_white(), None, 1 / 30)
+    finally:
+        AsciiRenderer.configure = real
+
+    assert m._ascii_ms > ASCII_SLOW_MS, (
+        "the measurement must include what the frame actually cost")
+    assert m._ascii_slow is True, (
+        "a drag that retunes every frame must still reach the warm-up gate")
 
 
 def test_the_ascii_notes_wrap_inside_the_panel_column(tmp_path):

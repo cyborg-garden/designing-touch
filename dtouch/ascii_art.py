@@ -298,11 +298,20 @@ def grid_for(frame_w: int, frame_h: int, rows_req: float):
 class AsciiRenderer:
     """A configured ASCII quantiser: grid + ramp + atlas + tone LUT.
 
-    Construction does all the expensive work (coverage scan on a cold cell
-    size, ramp search, atlas raster, LUT build); :meth:`render` is a
-    downsample, a LUT, an integer ordered dither and one gather-blit.
-    Rebuild — do not mutate — when the grid, ramp length, palette or gamma
-    changes; :meth:`key` is the identity to compare against.
+    Setup does all the expensive work (coverage scan on a cold cell size, ramp
+    search, atlas raster, LUT build); :meth:`render` is a downsample, a LUT, an
+    integer ordered dither and one gather-blit. :meth:`key` is the identity to
+    compare against.
+
+    **Retune with :meth:`configure`, do not construct a second renderer**, for
+    anything short of an output-resolution change. The frame buffer dominates
+    setup — at 4K a warm construction measured 35.0 ms of which 31.9 ms was the
+    24 MB allocate-and-clear — so building a whole renderer for a palette nudge
+    turned a Hue drag into 46 ms/frame (22 fps) against 7 ms idle. `configure`
+    keeps the buffer, and rebuilds only the parts a change actually
+    invalidates: the ramp needs the grid and n, the atlas needs the ramp and
+    the palette, the LUT needs the atlas and gamma, the strided view and the
+    noise tile need the grid. A palette-only change is atlas + LUT alone.
     """
 
     def __init__(self, frame_w: int, frame_h: int, rows_req: float = 45.0,
@@ -310,41 +319,76 @@ class AsciiRenderer:
                  gamma: bool = True, bias: str = "auto", grain: bool = True,
                  pool=PREF, weights=WEIGHTS, font: int = FONT):
         self.frame_w, self.frame_h = int(frame_w), int(frame_h)
-        self.rows_req = float(rows_req)
-        (self.cell_w, self.cell_h, self.cols, self.rows,
-         self.clamped) = grid_for(self.frame_w, self.frame_h, rows_req)
-        self.palette = (tuple(palette[0]), tuple(palette[1]))
-        self.gamma, self.bias, self.grain = bool(gamma), str(bias), bool(grain)
+        self._pool, self._weights, self._font = pool, weights, font
+        self._ramp_key = self._atlas_key = self._lut_key = self._grid = None
 
-        self.ramp = build_ramp(n, self.cell_w, self.cell_h, pool, weights, font)
-        self.n = len(self.ramp)
-        self.atlas, self.lum = build_atlas(self.ramp, self.cell_w, self.cell_h,
-                                           self.palette[0], self.palette[1],
-                                           font)
-        self.pos_lut = build_pos_lut(self.lum, self.palette[0],
-                                     self.palette[1], self.gamma)
-
-        # ramp-position dither: the project's own 64x64 blue-noise texture,
-        # tiled over the CHARACTER grid (not the pixel grid) — same asset, same
-        # code shape and same bias semantics as _ordered_dither, one level up.
-        bn = _blue_noise_matrix()
-        ty = int(np.ceil(self.rows / bn.shape[0]))
-        tx = int(np.ceil(self.cols / bn.shape[1]))
-        self.noise = (np.tile(bn, (ty, tx))[:self.rows, :self.cols]
-                      * 255.0).astype(np.uint16)
-
-        # Output buffer + a strided (rows, cols, cell_h, cell_w, 3) view of the
-        # centred character grid, so the blit is one contiguous `view[:] =
-        # atlas[idx]` (0.44 ms at 720p — the fastest of five strategies
-        # measured, and 30x faster than per-cell putText).
-        gh, gw = self.rows * self.cell_h, self.cols * self.cell_w
-        self.grid_h, self.grid_w = gh, gw
-        self.x0, self.y0 = (self.frame_w - gw) // 2, (self.frame_h - gh) // 2
+        # Allocated once and reused by every later configure(). Cleared to the
+        # background here so a caller that reads `out` before the first render
+        # sees a frame rather than uninitialised memory; render() rewrites the
+        # whole buffer (grid + border) so the clear is never needed again.
         self.out = np.empty((self.frame_h, self.frame_w, 3), np.uint8)
-        self.out[:] = np.uint8(self.palette[0])
-        self.view = (self.out[self.y0:self.y0 + gh, self.x0:self.x0 + gw]
-                     .reshape(self.rows, self.cell_h, self.cols, self.cell_w, 3)
-                     .transpose(0, 2, 1, 3, 4))
+        self.out[:] = np.uint8(palette[0])
+        self.configure(rows_req, n, palette, gamma, bias, grain)
+
+    def configure(self, rows_req: float, n: int, palette, gamma: bool,
+                  bias: str, grain: bool = True) -> None:
+        """Re-point this renderer at a new setting, in place.
+
+        Same frame size only — the buffer is what this exists to keep. Every
+        stage is guarded by the inputs it actually depends on, so the cost
+        scales with what changed rather than with the output resolution.
+        """
+        n = max(int(n), 1)
+        palette = (tuple(palette[0]), tuple(palette[1]))
+        gamma, grain, bias = bool(gamma), bool(grain), str(bias)
+        cw, ch, cols, rows, clamped = grid_for(self.frame_w, self.frame_h,
+                                               rows_req)
+        self.rows_req, self.clamped = float(rows_req), clamped
+        self.cell_w, self.cell_h, self.cols, self.rows = cw, ch, cols, rows
+        self.palette, self.gamma = palette, gamma
+        self.bias, self.grain = bias, grain
+        grid = (cw, ch, cols, rows)
+
+        if (grid, n) != self._ramp_key:
+            self.ramp = build_ramp(n, cw, ch, self._pool, self._weights,
+                                   self._font)
+            self.n = len(self.ramp)
+            self._ramp_key = (grid, n)
+            self._atlas_key = self._lut_key = None
+        if (self._ramp_key, palette) != self._atlas_key:
+            self.atlas, self.lum = build_atlas(self.ramp, cw, ch, palette[0],
+                                               palette[1], self._font)
+            self._atlas_key = (self._ramp_key, palette)
+            self._lut_key = None
+        if (self._atlas_key, gamma) != self._lut_key:
+            self.pos_lut = build_pos_lut(self.lum, palette[0], palette[1],
+                                         gamma)
+            self._lut_key = (self._atlas_key, gamma)
+
+        if grid != self._grid:
+            # ramp-position dither: the project's own 64x64 blue-noise texture,
+            # tiled over the CHARACTER grid (not the pixel grid) — same asset,
+            # same code shape and same bias semantics as _ordered_dither, one
+            # level up.
+            bn = _blue_noise_matrix()
+            ty = int(np.ceil(rows / bn.shape[0]))
+            tx = int(np.ceil(cols / bn.shape[1]))
+            self.noise = (np.tile(bn, (ty, tx))[:rows, :cols]
+                          * 255.0).astype(np.uint16)
+
+            # A strided (rows, cols, cell_h, cell_w, 3) view of the centred
+            # character grid inside the frame buffer, so the blit is one
+            # contiguous `view[:] = atlas[idx]` (0.44 ms at 720p — the fastest
+            # of five strategies measured, and 30x faster than per-cell
+            # putText). A view, so it costs nothing to re-take.
+            gh, gw = rows * ch, cols * cw
+            self.grid_h, self.grid_w = gh, gw
+            self.x0 = (self.frame_w - gw) // 2
+            self.y0 = (self.frame_h - gh) // 2
+            self.view = (self.out[self.y0:self.y0 + gh, self.x0:self.x0 + gw]
+                         .reshape(rows, ch, cols, cw, 3)
+                         .transpose(0, 2, 1, 3, 4))
+            self._grid = grid
 
     # ----- identity -----
     @staticmethod

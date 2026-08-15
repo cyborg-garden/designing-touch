@@ -174,6 +174,8 @@ SLOW_SCALE = 180.0
 
 
 ASCII_SLOW_MS = 8.0   # measured ASCII step cost that earns an amber note
+ASCII_SLOW_CLEAR = 0.75   # ...and the fraction of it that takes the note away
+ASCII_WARMUP_FRAMES = 8   # EMA frames before either verdict is allowed
 
 
 def _dither(gray, algo, bits, gamma, bias):
@@ -282,6 +284,7 @@ class DitherGirlMode:
         self.mat = None
         self._mat_kind = None
         self._ascii = None
+        self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
 
     def on_resize(self, w, h):
         pass                               # everything derives from host.res
@@ -547,35 +550,48 @@ class DitherGirlMode:
                     palette):
         """The ASCII branch of step(): quantise tone to glyph tiles.
 
-        The renderer is rebuilt — never mutated — when the grid, ramp length,
-        palette or gamma changes, because every one of those invalidates the
-        atlas and the tone LUT together. Rebuild costs 7-30 ms (a cold cell
-        size pays for its coverage scan), which lands on an EDIT action —
-        dragging Scale, cycling palette — and never on a perform key.
-        """
-        key = AsciiRenderer.make_key(rw, rh, scale, 1 << bits, palette, gamma,
-                                     bias, True)
-        if self._ascii is None or self._ascii.key() != key:
-            self._ascii = AsciiRenderer(rw, rh, rows_req=scale, n=1 << bits,
-                                        palette=palette, gamma=gamma,
-                                        bias=bias)
-            # a new setting is a new measurement: never carry a warning (or a
-            # clean bill of health) over from the setting that earned it
-            self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
-        self._ascii.set_rows_req(scale)
+        The renderer is RETUNED in place for a settings change and rebuilt only
+        for a new output resolution. It used to be rebuilt for both, and the
+        frame buffer made that ruinous: a Hue drag at 4K measured 46 ms/frame
+        against 7 ms idle, because every frame allocated and cleared a fresh
+        24 MB buffer for a change that only invalidates the atlas.
 
+        The whole step is timed, rebuild included (§4.2 perf honesty). Timing
+        only `render()` measured the one part of an edit that was never the
+        expensive part: the real step cost 28.7 ms while the note read 5.3 ms.
+        """
         t0 = time.perf_counter()
-        out = self._ascii.render(gray_u8, contrast)
+        rend = self._ascii
+        if rend is None or (rend.frame_w, rend.frame_h) != (rw, rh):
+            rend = self._ascii = AsciiRenderer(rw, rh, rows_req=scale,
+                                               n=1 << bits, palette=palette,
+                                               gamma=gamma, bias=bias)
+            # a new output resolution is a different instrument; nothing
+            # measured against the old one carries over
+            self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
+        elif rend.key() != AsciiRenderer.make_key(rw, rh, scale, 1 << bits,
+                                                  palette, gamma, bias, True):
+            rend.configure(scale, 1 << bits, palette, gamma, bias, True)
+        rend.set_rows_req(scale)
+        out = rend.render(gray_u8, contrast)
         ms = (time.perf_counter() - t0) * 1000.0
 
         self._ascii_ms = ms if self._ascii_ms is None else (
             0.85 * self._ascii_ms + 0.15 * ms)
         self._ascii_frames += 1
-        # latched, and only once the EMA has settled — a warning that blinks
-        # on and off while an operator hovers the threshold is noise, and the
-        # first frames after a rebuild are polluted by cold caches
-        if self._ascii_frames >= 8 and self._ascii_ms > ASCII_SLOW_MS:
-            self._ascii_slow = True
+        # The verdict follows the measurement in BOTH directions, with a
+        # hysteresis band so it cannot blink while an operator hovers the
+        # threshold. It used to be latched-until-rebuild instead, which was the
+        # same bug as timing only render(): a drag that retunes every frame
+        # cleared the frame counter every frame, so the warm-up gate below was
+        # unreachable during the one interaction that was actually slow.
+        # Warm-up still applies, because a cold cell size pays a one-off
+        # coverage scan that says nothing about the steady state.
+        if self._ascii_frames >= ASCII_WARMUP_FRAMES:
+            if self._ascii_ms > ASCII_SLOW_MS:
+                self._ascii_slow = True
+            elif self._ascii_ms < ASCII_SLOW_MS * ASCII_SLOW_CLEAR:
+                self._ascii_slow = False
         return out
 
     def step(self, frame_bgr, audio_levels, dt):
