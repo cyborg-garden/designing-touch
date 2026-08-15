@@ -171,6 +171,49 @@ def test_apply_look_rejects_nan_and_infinity():
         assert ui.fade == 0.5
 
 
+def test_apply_look_clamps_a_value_to_the_sliders_declared_range():
+    """A Slider's range is the whole truth about what that control can hold.
+    `ascii stream` shipped scale=30 under a 45-720 slider: the handle drew off
+    the end of its own track and the first click on it destroyed the value.
+    Out-of-range is CLAMPED, not skipped — a look that is 90% loadable loads,
+    and 30 under a 45 floor means 'as low as this goes', not 'unusable'."""
+    ui = _ui()
+    ui.fade = 0.5
+    spec = [Slider("Fade", "fade", 0.25, 0.75)]
+    assert apply_look(ui, spec, {"fade": 2.0}) == []
+    assert ui.fade == 0.75
+    assert apply_look(ui, spec, {"fade": -3.0}) == []
+    assert ui.fade == 0.25
+    # in range is still passed through untouched, exactly
+    assert apply_look(ui, spec, {"fade": 0.4}) == []
+    assert ui.fade == 0.4
+
+
+def test_a_slider_handle_never_draws_outside_its_track():
+    """Defence in depth behind the clamp above: an out-of-range value reaching
+    the widget (a hand-edited presets.json, a built-in authored against an
+    older range) must still put the handle ON the track. A handle floating
+    past the end reads as a broken widget."""
+    from dtouch.imgui import HANDLE
+
+    g = Gui()
+    for val in (-50.0, 0.0, 0.5, 1.0, 99.0):
+        img = np.zeros((200, 400, 3), np.uint8)
+        hot = g.begin(1.0, (-1, -1))
+        g.slider(img, "Amt", "amt", val, 0.0, 1.0, 10, 44, 200)
+        _attr, tx0, tx1, _lo, _hi = next(p for _r, k, p in hot if k == "slider")
+        # the handle is the only thing drawn in HANDLE (a fill, so its centre
+        # pixels survive the antialiasing exactly)
+        cols = np.argwhere((img == np.uint8(HANDLE)).all(axis=2).any(axis=0))
+        assert cols.size, "the handle for val=%s must paint something" % val
+        # the centre sits ON the track (a handle at an endpoint overhangs by
+        # its own radius, which is what an endpoint is supposed to look like)
+        centre = (int(cols.min()) + int(cols.max())) / 2.0
+        assert tx0 <= centre <= tx1, (
+            "handle for val=%s is centred at %s, outside the track %s..%s"
+            % (val, centre, tx0, tx1))
+
+
 def test_apply_look_returns_empty_for_a_clean_look():
     ui = _ui()
     spec = [Slider("Fade", "fade", 0.0, 1.0)]
@@ -202,3 +245,37 @@ def test_gui_toolkit_draws_standalone():
     (attr, x0, x1, lo, hi) = next(p for _, k, p in hot if k == "slider")
     assert attr == "amt" and lo == 0.0 and hi == 1.0 and x0 < x1
     assert img.any()
+
+
+def test_no_shipped_look_sits_outside_the_control_that_edits_it():
+    """The clamp above is a safety net, never a silent retune of our own looks.
+
+    Two shipped looks had already drifted outside their sliders: `ascii stream`
+    at scale 30 under a 45 floor, and `portrait` at reseed 0.16 under a 0.15
+    ceiling — the second only surfaced once apply_look started clamping, which
+    turned a look that had rendered at 0.16 since before the panel had ranges
+    into one that rendered at 0.15. A built-in is the authority on its own
+    value, so the range moved, not the look. This sweeps every mode so the next
+    drift cannot land silently.
+    """
+    from dtouch.modes import REGISTRY
+
+    offenders = []
+    for entry in REGISTRY:
+        mode = entry() if isinstance(entry, type) else type(entry)()
+        ranges = {}
+        for section in mode.panel_spec():
+            for w in section.widgets:
+                if isinstance(w, Slider):
+                    ranges[getattr(w, "save_key", None) or w.attr] = (w.lo, w.hi, w.label)
+        for look_name, cfg in mode.BUILTIN.items():
+            for key, val in cfg.items():
+                if key not in ranges or not isinstance(val, (int, float)):
+                    continue
+                lo, hi, label = ranges[key]
+                if not (lo <= float(val) <= hi):
+                    offenders.append(
+                        "%s/%s: %s=%r outside %s range (%s, %s)"
+                        % (mode.id, look_name, key, val, label, lo, hi))
+    assert not offenders, ("shipped looks outside their own controls:\n  "
+                           + "\n  ".join(offenders))

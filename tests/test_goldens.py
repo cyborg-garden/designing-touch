@@ -36,6 +36,15 @@ point of the pin and it cuts both ways: an intentional row add or remove will
 move these two goldens far more than the closed ones, and they are meant to be
 regenerated with the rest.
 
+**The scrollbar gutter is part of the pinned ROI.** The panel's left gutter
+carries the scrollbar — up arrow, groove, thumb, down arrow — and it draws
+**only when the control column overflows the window**. That makes these twelve
+pins the regression test for that rule as much as for the widgets: the four
+goldens whose column fits (1080p and 4K, closed — 1012 px against 1080 and
+2160) must show a bare gutter, and did not move by a single pixel when the
+scrollbar grew arrows. The eight that overflow all moved, by 0.67-1.13 ROI, and
+were regenerated in the same commit that added the arrows.
+
 Comparison is two-tier:
 
 - PRIMARY: mean-abs-diff over the PANEL ROI only (the right sidebar — the only

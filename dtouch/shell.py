@@ -40,6 +40,7 @@ from .panelspec import Cycle, Section, Slider, apply_look, capture_look
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
+RESUME_HINT = "enter resumes"    # boot-menu hint prefix; retired when Enter lands
 ERR_TOAST_S = 5.0      # a repeating per-frame error re-toasts at most this often
 ERR_TOAST_MAX = 3      # ...and at most this many DISTINCT errors per window
 ERR_PRINT_MAX = 20     # ...and at most this many stdout lines per window
@@ -393,6 +394,13 @@ class Host:
         # is a TIME window, and a window nothing can advance is untestable
         self._now = now
         self._boot_mode = mode
+        # No explicit mode = launch opens on the HOME MENU (DESIGN.md §3,
+        # amended 2026-08-15 — the user's call). The last-used mode still boots
+        # and runs live BEHIND the menu, so the menu is not a dead screen and
+        # Enter is a one-key resume. An explicit mode (--mode/--still/an engine
+        # flag) still goes straight in: a flag means "boot into", and making a
+        # flag wait through a menu would be a worse launch than we had.
+        self._boot_menu = mode is None
         self._source = source
         self._device = device
         self._still_path = still if isinstance(still, str) else None
@@ -433,9 +441,10 @@ class Host:
 
     # ----- mode lifecycle (DESIGN.md §2.1) -----
     def _resolve_boot_mode(self):
-        """Boot with no explicit mode (DESIGN.md §3: launch goes straight into
-        the last-used mode; first run: Particles). state.json's autosaved mode
-        wins; an absent or unknown mode falls back to particles."""
+        """Boot with no explicit mode (DESIGN.md §3, amended: launch opens on
+        the home menu with the LAST-USED mode running behind it and selected).
+        state.json's autosaved mode wins; an absent or unknown mode falls back
+        to particles."""
         st = _presets.load_state(self.state_path)
         cls = mode_by_id(st.get("mode")) or mode_by_id("particles")
         return cls()
@@ -520,6 +529,29 @@ class Host:
             self.hud.toasts.hint(f"already in {self.mode.title}")
             return
         self.pending_mode = mode_id
+
+    def _menu_commit(self, mode_id, from_boot):
+        """One card committed from the menu (key, Enter, Esc-at-boot, click).
+
+        A commit from the BOOT menu that lands on the mode already running is
+        not a switch — that mode was started behind the menu so the screen
+        would be live, and it is what the selection defaulted to. Routing it
+        through `request_mode` scolded the operator with 'already in
+        Particles' for pressing Enter on the one card the menu pre-selected.
+        It gets the mode-title flash a real entry gets, and the three-doors
+        hint is posted HERE rather than at boot, so it lands on the mode
+        instead of on top of the menu's own hint line."""
+        if from_boot:
+            # the resume hint is a pointer at Enter, and Enter has just been
+            # pressed. Its 4 s ttl outlives that by ~3 s, so without this it
+            # stacks above the doors hint and the operator reads two
+            # sentences, one of them about a menu they have already left.
+            self.hud.toasts.retire(RESUME_HINT)
+            self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
+            if self.mode is not None and mode_id == self.mode.id:
+                self.hud.toasts.flash(self.mode.title, self.mode.accent)
+                return
+        self.request_mode(mode_id)
 
     def _switch_mode(self, mode_id):
         """One live mode switch: static boot card (shown + recorded — the
@@ -626,9 +658,10 @@ class Host:
             return
         if self.menu.open:
             if event == cv2.EVENT_LBUTTONDOWN:
+                from_boot = self.menu.boot     # click() closes and clears it
                 mode_id = self.menu.click((x, y))
                 if mode_id:
-                    self.request_mode(mode_id)
+                    self._menu_commit(mode_id, from_boot)
             return
         if self.ui is not None:
             self.ui.on_mouse(event, x, y, flags, param)
@@ -641,9 +674,10 @@ class Host:
         if key == 255:
             return
         if self.menu.open:
+            from_boot = self.menu.boot         # a commit closes and clears it
             action, mode_id = self.menu.key(key)
             if action == "switch":
-                self.request_mode(mode_id)
+                self._menu_commit(mode_id, from_boot)
             elif action == "quit":
                 self.reg.dispatch(ord("q"))     # first press toasts (§6.2)
             elif action == "unknown":
@@ -1203,7 +1237,7 @@ class Host:
                 # stepping untouched behind it
                 ui._hot = []
                 self.menu.rects = draw_menu(bgr, frame, self.menu.cards,
-                                            self.menu.sel)
+                                            self.menu.sel, boot=self.menu.boot)
                 # HIDDEN-state HUD = toasts + blackout tick only
                 self.hud.draw(bgr, OverlayState.HIDDEN,
                               blackout=self.ps.blackout)
@@ -1309,9 +1343,19 @@ class Host:
         else:
             _register_quit(self.reg, self.ps, self.hud.toasts)
 
-        # boot HUD hint (DESIGN.md §3): a 4 s fading pointer at the three
-        # doors — menu, panel, key map. ASCII only (Hershey).
-        self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
+        # Boot HUD hint (DESIGN.md §3): a 4 s fading pointer. ASCII only
+        # (Hershey). Which pointer depends on where the launch landed — the
+        # menu already names its own three keys along the bottom, so posting
+        # the doors hint there would say the wrong thing in the wrong place
+        # (and, before issue #18, on the same baseline). In the menu the
+        # useful sentence is what Enter does; the doors hint is posted when
+        # the menu is left (_menu_commit).
+        if self._boot_menu:
+            self.menu.show(self.mode.id, boot=True)
+            self.hud.toasts.hint("%s %s" % (RESUME_HINT,
+                                            self.mode.title.upper()), ttl=4.0)
+        else:
+            self.hud.toasts.hint("m menu - TAB panel - ? keys", ttl=4.0)
 
         # out/ is created by the first record, not here: makedirs on a
         # read-only launch dir used to end the boot with a traceback (§6.4).

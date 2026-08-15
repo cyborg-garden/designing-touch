@@ -29,7 +29,11 @@ the code-first tinkerer, the workshop teacher.
    exactly what the audience sees, minus panel/HUD (today's invariant, kept).
 3. **Perform/Edit Split.** Two surfaces, one engine: PANEL is the edit surface
    (mouse-friendly, full controls); HIDDEN/HUD is the perform surface (keys +
-   big transient feedback). The instrument boots into perform, already playing.
+   big transient feedback). The instrument boots to the home **menu** with the
+   last-used mode already running behind it and pre-selected — one key (Enter,
+   or Esc) is on stage. *(Amended 2026-08-15 — the user's call: "it should boot
+   into the menu not straight into particle." The rig is still playing at boot,
+   it just asks which instrument first; see §3.)*
 4. **Feedback Is Momentary, State Is Legible.** Every keystroke echoes as a
    large auto-fading toast; a compact always-current status line (derived from
    the panel spec, so it can never drift) answers "what is running" at a glance.
@@ -174,11 +178,32 @@ shell changes. The rationale goes on issue #7 for sign-off.
 **Form: in-app switcher screen, not a launcher.** One window; the menu is a
 shell overlay state, not a Mode.
 
-**Boot behavior (ships playing):** launch goes straight into the last-used mode
-(first run: Particles) with its look moving — no menu, no blank canvas. A HUD
-hint fades in for 4 s: `M menu · TAB panel · ? keys`. CLI flags mean "boot
-into": `--mode dithergirl`, `--flock`/`--glitch` as today. `start.command`
-unchanged.
+**Boot behavior (opens on the menu, still playing).** *(Amended 2026-08-15 —
+the user's call, and the doc previously said the opposite: "launch goes
+straight into the last-used mode … no menu".)*
+
+Launch with no mode-implying flag opens the **home menu**. It is not a blank
+canvas and not a launcher screen: the last-used mode (first run: Particles) has
+already been started and is stepping live behind it, the camera runs through the
+1-bit blue-noise backdrop, and that mode's card is **pre-selected**, so `Enter`
+is a one-key resume. `Esc` at boot **enters the selection** rather than
+"returning to the running mode" — at boot there is nothing behind the menu to
+return to, and a dismiss that dropped you onto a mode you never chose is the
+dead end principle 5 forbids. `q` still closes the menu and arms the quit
+confirm.
+
+CLI flags still mean "boot into" and **skip the menu entirely**: `--mode
+dithergirl`, `--still PATH`, `--flock`/`--glitch`. A flag that had to wait
+through a menu would be a worse launch than we had. `start.command` unchanged.
+
+The 4 s boot hint follows where the launch landed, because the menu already
+prints its own key line: in the menu it names the resume (`enter resumes
+PARTICLES`), and the three-doors hint (`m menu - TAB panel - ? keys`) is posted
+as the menu is left — on the mode, where it is true. It is never posted *under*
+the menu (issue #18: the menu's hint line and the HUD's hint toasts were drawn
+centered on the same baseline and rendered as one unreadable smear; the menu's
+line now sits clear of the whole 3-deep toast stack, at a fixed offset so it
+does not jump as toasts come and go).
 
 **Layout:** live camera behind the menu, rendered through 1-bit blue-noise
 dither and dimmed under a 65% scrim (graft from Cartridges: the menu proves the
@@ -196,8 +221,14 @@ its mode's accent:
 ```
 
 **Navigation:** the mode's letter or digit selects-and-enters; `,`/`.` move
-selection, `Enter` commits, `Esc` returns to the running mode untouched. Mouse:
-click a card.
+selection, `Enter` commits, `Esc` returns to the running mode untouched (at
+boot, where there is no running mode, `Esc` commits the selection instead).
+Mouse: click a card. Committing the card that is *already* running **at boot**
+is an entry, not a switch — it gets the mode-title flash, never the `already in
+X` scold, because that mode was started behind the menu so the screen would be
+live and it is what the selection defaulted to. Mid-set the scold stands: `m`,
+then `Enter` on the card you are already in, is a request for a mode you have,
+and saying so is more useful than a flash that looks like something happened.
 
 **Mode switch:** shell draws a **static boot card** (mode glyph + name in the
 mode's accent, one frame, no animation — graft from Cartridges, feasibility-
@@ -210,8 +241,9 @@ While blackout is armed, the boot card is NOT shown bright — the switch happen
 under black (tick stays); the card is only for un-blacked-out switches. Inside
 the menu, unknown keys get the `? for keys` hint (silence-on-input is a bug
 there too) and `q` closes the menu and arms the quit confirm. The menu's bottom
-hint line (`, . move - enter select - esc back`) is part of the layout, and the
-real mode cards render their titles in CAPS per the sketch.
+hint line is part of the layout — `, . move - enter select - esc back`, or
+`, . move - enter select - q quit` at boot, where `esc back` would be a lie —
+and the real mode cards render their titles in CAPS per the sketch.
 
 Saving a look (`+ Save current look` row, or the `s` key): creates an
 auto-named look and immediately opens its rename box — naming is one flow —
@@ -256,16 +288,20 @@ dtouch · DITHER GIRL
 - SOURCE           ← input cycle: camera / still… · matte cycle (dither the
                      subject only) · output res · Mirror
 - ALGORITHM        ← big active-algorithm label (1.4u, accent) · cycle: Bayer /
-                     Blue noise / Floyd-Steinberg / Riemersma · live/slow badge ·
-                     swatch strip: a gradient ramp rendered through the current
-                     algorithm+bits+gamma+bias, re-rendered only when TONE
-                     changes (graft from Cartridges — instant "what am I hearing"
-                     for the eyes)
+                     Blue noise / Floyd-Steinberg / Riemersma / ASCII ·
+                     live/slow badge · swatch strip: a gradient ramp rendered
+                     through the current algorithm+bits+gamma+bias+palette,
+                     re-rendered only when one of those changes (graft from
+                     Cartridges — instant "what am I hearing" for the eyes).
+                     Under ASCII the strip becomes one row of the live glyph
+                     ramp, the most direct answer to "what am I looking at"
 - TONE             ← Bits (1–4, int) · Gamma toggle (default ON) · Bias cycle
-                     auto/light/dark · Contrast · Scale (working height 45–720,
-                     default 72)
-- PALETTE          ← mono: white-on-black · black-on-white · amber · green
-                     phosphor (two-color ramps later)
+                     auto/light/dark · Contrast · Scale (30–720, default 72) ·
+                     grid readout (ASCII only)
+- PALETTE          ← eleven two-colour pairs, each shipped only if its own
+                     off/on measures ≥ 4.5:1 (§5): white-on-black ·
+                     black-on-white · amber · green phosphor · cyan · magenta ·
+                     ice · blood · gameboy · sepia · hi-vis — plus Hue and Tint
 - SIGNAL   (G)     ← shell rack minus dither row
 ──────────────────
 Sound react (A) · Sens · Record (R) · Menu (M) · Quit
@@ -274,10 +310,49 @@ Sound react (A) · Sens · Record (R) · Menu (M) · Quit
 Built-ins include stream-tuned looks (bigger cells, higher contrast — the
 compression-survivable presets streamers otherwise learn as folklore).
 
-**Perf honesty:** default working height 72 px keeps all four algorithms fast;
-ordered dithers (Bayer/blue) are permitted full-res; if Scale is dragged toward
-full-res while FS/Riemersma is active, an inline amber note reads
-`slow — ordered dither recommended live`. Never silent frame drops.
+**ASCII is the fifth quantiser, not a second engine** (amended 2026-08-15). It
+answers the question the four dithers answer — *given an output alphabet
+smaller than the input's tonal range, how do I spend it to fake continuous
+tone?* — with glyphs instead of grey levels, so it belongs in the same cycle
+and reuses the same blue-noise texture, transfer functions and bias semantics
+one level up, on the glyph index. It measures in the ordered class (0.6–1.2 ms
+at 720p) and the badge reads `live`. See `dtouch/ascii_art.py` for the three
+load-bearing choices (measured ramp, stroke weight as part of the ramp, tone
+normalised to the ink colour), each arrived at by rendering the alternative.
+
+Two TONE controls change **meaning** under ASCII, and the panel says so rather
+than hiding it:
+
+- **Bits** is the ramp LENGTH (n = 2/4/8/16 glyphs), not an output bit depth.
+  The stroke-weight search narrows with n: a heavy stroke buys tonal reach, and
+  spent on a two- or four-step ramp it is a cell-filling blob rather than a
+  glyph, so short ramps get letters instead of a dot halftone.
+- **Scale** is character ROWS, not working pixels — which is why its floor is
+  30 rather than the 45 working pixels the four pixel dithers shipped with. A
+  DIM readout under the slider gives the live grid (`grid 160 x 45 chars - cell
+  8x16`), and says `cell floor - characters stay legible` once the legibility
+  floor is what is setting the cell size and the slider has run out of room.
+
+**Hue / Tint** (delivering §4.2's "two-color ramps later"): two sliders rather
+than a longer list, because a list of named pairs cannot be dialled during a
+set and a per-colour RGB editor is six sliders of fiddling in a panel meant to
+be driven at arm's length in the dark. Tint is an amount, Hue a direction; at
+Tint 0 every named palette is bit-identical to its shipped values, so the pair
+COMPOSES with the palettes rather than replacing them. Both ends are steered,
+so a duotone stays a duotone. The steering target is lifted toward white until
+its relative luminance clears 65% of the source's — without that floor a hue
+near blue costs ~14x luminance and Tint could quietly turn any palette into an
+unreadable navy-on-black; with it, every shipped palette stays over 4.5:1 at
+every hue and every tint (measured, 72 hues × 4 tints).
+
+**Perf honesty:** default working height 72 px keeps all five algorithms fast;
+ordered dithers (Bayer/blue/ASCII) are permitted full-res; if Scale is dragged
+toward full-res while FS/Riemersma is active, an inline amber note reads
+`slow — ordered dither recommended live`. ASCII carries a measured note rather
+than a guessed threshold — it times its own whole step, rebuild included, and
+reads `ascii N.N ms/frame - lower Scale or output` once the EMA passes 8 ms
+(cleared again at 6, so it cannot blink while an operator hovers the line).
+Never silent frame drops.
 
 ### 4.3 Dispositions
 
@@ -391,6 +466,17 @@ As shipped: hover highlight, click rows/toggles, whole-row slider drag, wheel +
 drag scroll, hover rename/delete with two-click arm, `i` tooltips. New:
 clicking a preset row's slot badge assigns the next free bank number. No
 critical action is mouse-only; the mouse cannot reach anything keys cannot.
+
+**Scrollbar** (amended 2026-08-15): a real scrollbar in the panel's left
+gutter, drawn only when the content overflows — up arrow, draggable thumb,
+clickable track, down arrow. It exists because the wheel is the least portable
+input a cv2 window has (on macOS it never scrolled up at all), so a panel
+taller than the frame was mouse-unreachable at the bottom: the mouse layer is a
+fallback, and a fallback with a hole in it is not one. The arrows are drawn at
+the shipped chrome's button scale but their HIT rects are the full gutter width
+and 2.75u tall, flush against the top and bottom edges of the frame — an edge
+target is infinitely tall to a mouse (Fitts). Drawn small, hit large. Its hits
+are front-inserted, so a row that scrolled under the gutter cannot steal them.
 
 ### 6.4 Failure behavior (shell-owned)
 

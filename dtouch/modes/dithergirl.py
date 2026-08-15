@@ -18,11 +18,14 @@ ASCII text only in panel strings (Hershey fonts render non-ASCII as '?').
 """
 from __future__ import annotations
 
+import time
+
 import cv2
 import numpy as np
 
+from ..ascii_art import AsciiRenderer
 from ..dither import (bayer_dither, blue_noise_dither, floyd_steinberg,
-                      riemersma_dither)
+                      linear_to_srgb, riemersma_dither, srgb_to_linear)
 from ..hud import AMBER, put_outlined, text_size, u as _u
 from ..imgui import DIM
 from ..matte import select_matte
@@ -37,23 +40,128 @@ from .particles import MATTE_H, MATTE_W, MATTES
 # (Pure magenta (255,0,255) fails the bright-scrim case at 3.36:1.)
 ACCENT = (245, 140, 245)
 
-ALGOS = ["Bayer", "Blue noise", "Floyd-Steinberg", "Riemersma"]
-ORDERED = ("Bayer", "Blue noise")     # per-pixel threshold — safe at full res
+ALGOS = ["Bayer", "Blue noise", "Floyd-Steinberg", "Riemersma", "ASCII"]
+# No inter-pixel dependency — safe at full res, badge reads `live`. ASCII
+# belongs here for the same reason Bayer does: it is a per-cell table lookup
+# against a threshold texture, and it measures in the ordered-dither class
+# (0.6-1.2 ms at 720p, vs 3.4 ms for the Floyd-Steinberg default it replaces).
+ORDERED = ("Bayer", "Blue noise", "ASCII")
 BIASES = ["auto", "light", "dark"]    # ordered-dither rounding bias (invert)
 _BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
 
 # Palette (§4.2): map the dither's off/on levels to two colors (multi-bit
 # output interpolates between them). RGB (step() returns RGB at host.res).
+#
+# Chosen for a projector, not a monitor: every pair was measured for WCAG
+# contrast between its off and its on (the numbers below), and the floor for
+# shipping one is 4.5:1 — the same floor the mode accent was picked against
+# (§5). The weakest shipped pair is `gameboy` at 7.7:1, because Tint (see
+# TINT_LUMA_FLOOR) can spend some of a pair's separation and nothing may fall
+# under 4.5:1 after it does.
 PALETTES = {
-    "white-on-black": ((0, 0, 0), (255, 255, 255)),
-    "black-on-white": ((245, 245, 245), (16, 16, 16)),
-    "amber": ((24, 12, 0), (255, 176, 0)),
-    "green phosphor": ((0, 20, 8), (80, 255, 120)),
+    # --- shipped since v1 ---
+    "white-on-black": ((0, 0, 0), (255, 255, 255)),          # 21.00:1
+    "black-on-white": ((245, 245, 245), (16, 16, 16)),       # 17.45:1
+    "amber": ((24, 12, 0), (255, 176, 0)),                   # 10.50:1
+    "green phosphor": ((0, 20, 8), (80, 255, 120)),          # 14.42:1
+    # --- the rest of the phosphor family ---
+    "cyan": ((0, 14, 20), (96, 240, 255)),                   # 14.36:1
+    "magenta": ((18, 0, 16), (255, 120, 214)),               #  8.62:1
+    # --- cold and hot ---
+    "ice": ((6, 12, 26), (198, 236, 255)),                   # 15.66:1
+    "blood": ((12, 0, 2), (255, 112, 96)),                   #  7.61:1
+    # --- objects, not screens ---
+    "gameboy": ((10, 34, 10), (155, 188, 15)),               #  7.70:1
+    "sepia": ((236, 224, 198), (54, 36, 24)),                # 11.28:1
+    # --- the stream-safe pair: luma-dominant, chroma cheap to encode ---
+    "hi-vis": ((8, 8, 10), (255, 214, 10)),                  # 14.17:1
 }
+
+# ----- Hue / Tint (the customisability, §4.2 'two-color ramps later') -----
+#
+# Two sliders instead of a longer list, because a list of named pairs cannot
+# be dialled during a set and a per-colour RGB editor is six sliders of
+# fiddling in a panel meant to be driven at arm's length in the dark.
+#
+# Tint is an amount and Hue is a direction: at Tint 0 every named palette is
+# bit-identical to its shipped values, so the sliders COMPOSE with the
+# palettes rather than replacing them (the palette still owns which end is
+# dark, how dark, and the whole tonal structure; Hue/Tint only steer the
+# chroma). Both ends are steered, so a duotone stays a duotone — and a pure
+# black ground stays pure black for free, because the target is built at the
+# source colour's own value.
+#
+# The steering target is the fully saturated hue at the source's value, but
+# lifted toward white until its relative luminance is at least
+# TINT_LUMA_FLOOR of the source's. Without that floor a hue near blue costs
+# ~14x luminance (pure blue is 7% of white) and Tint could quietly turn any
+# palette into an unreadable navy-on-black. With it, every shipped palette
+# stays above 4.5:1 at every hue and every tint — measured over 72 hues x 4
+# tints in test_dithergirl.py.
+TINT_LUMA_FLOOR = 0.65
+HUE_LO, HUE_HI = 0.0, 360.0
+_LUMA = np.float32([0.2126, 0.7152, 0.0722])
+_TINT_CACHE = {}
+
+
+def _hue_rgb(hue_deg, value):
+    """Fully saturated sRGB triple of hue *hue_deg* at max-channel *value*."""
+    h6 = (float(hue_deg) / 60.0) % 6.0
+    i = int(h6)
+    f = h6 - i
+    v = float(value)
+    q, t = v * (1.0 - f), v * f
+    return np.float32([(v, t, 0.0), (q, v, 0.0), (0.0, v, t),
+                       (0.0, q, v), (t, 0.0, v), (v, 0.0, q)][i])
+
+
+def tint_rgb(rgb, hue_deg, amount, floor=TINT_LUMA_FLOOR):
+    """Steer one palette colour *amount* of the way toward *hue_deg*.
+
+    amount == 0 returns the colour unchanged (exactly — Tint 0 is a no-op, not
+    a round-trip). Mixing toward white happens in linear light, where relative
+    luminance is linear in the mix factor and the floor solves in closed form.
+    """
+    if amount <= 0.0:
+        return tuple(int(c) for c in rgb)
+    src = np.float32(rgb)
+    lin_hue = srgb_to_linear(_hue_rgb(hue_deg, float(src.max())) / 255.0)
+    l_hue = float((lin_hue * _LUMA).sum())
+    l_src = float((srgb_to_linear(src / 255.0) * _LUMA).sum())
+    need = floor * l_src
+    if l_hue < need:
+        k = (need - l_hue) / max(1.0 - l_hue, 1e-6)
+        lin_hue = lin_hue + k * (1.0 - lin_hue)
+    target = linear_to_srgb(lin_hue) * 255.0
+    out = np.clip(src + float(amount) * (target - src), 0.0, 255.0)
+    return tuple(int(round(c)) for c in out)
+
+
+def tinted_palette(name, hue_deg, amount):
+    """(off, on) for a named palette under the Hue/Tint pair. Cached — this
+    runs per frame and the answer only ever depends on three values."""
+    key = (name, round(float(hue_deg), 2), round(float(amount), 4))
+    got = _TINT_CACHE.get(key)
+    if got is None:
+        off, on = PALETTES[name]
+        got = (tint_rgb(off, hue_deg, amount), tint_rgb(on, hue_deg, amount))
+        if len(_TINT_CACHE) > 512:       # slider drags are unbounded in theory
+            _TINT_CACHE.clear()
+        _TINT_CACHE[key] = got
+    return got
+
 
 MATTES_DG = ["off"] + MATTES          # "off" = dither the whole frame
 
-SCALE_LO, SCALE_HI, SCALE_DEFAULT = 45.0, 720.0, 72.0
+SCALE_LO, SCALE_HI, SCALE_DEFAULT = 30.0, 720.0, 72.0
+# The floor is 30, not the 45 this slider shipped with, because Scale changed
+# UNIT when ASCII joined the cycle: 45 working PIXELS is a fine coarse floor for
+# the four pixel dithers, but 45 character ROWS is an 8x16 cell — the FINEST
+# grid ASCII should ever be asked for, not the coarsest. The `ascii stream`
+# built-in wants 30 rows (12x24 cells, what survives H.264), and a built-in
+# sitting outside its own control's range is a look no slider position can get
+# back to. Verified at 30 working pixels for all four pixel dithers (a 53x30
+# plane; every algorithm returns in under 0.6 ms and spans 0..1).
 # Error diffusion AT OR ABOVE this working height gets the amber note. The
 # comparison is >= on purpose: a threshold named SLOW_SCALE should mean "this
 # value is slow", and `newsprint` shipped sitting exactly on 180.0 with a `>`
@@ -65,10 +173,21 @@ SCALE_LO, SCALE_HI, SCALE_DEFAULT = 45.0, 720.0, 72.0
 SLOW_SCALE = 180.0
 
 
+ASCII_SLOW_MS = 8.0   # measured ASCII step cost that earns an amber note
+ASCII_SLOW_CLEAR = 0.75   # ...and the fraction of it that takes the note away
+ASCII_WARMUP_FRAMES = 8   # EMA frames before either verdict is allowed
+
+
 def _dither(gray, algo, bits, gamma, bias):
     """One grayscale float [0,1] plane through the named algorithm. Bias
     (rounding direction) applies to the ordered dithers only — error diffusion
-    self-corrects and takes no invert parameter."""
+    self-corrects and takes no invert parameter.
+
+    ASCII is deliberately NOT reachable here: it quantises to glyph tiles, not
+    to grey levels, so it never produces a [0,1] plane for `_palette_map` to
+    colour. `dtouch.ascii_art` owns that path end to end."""
+    if algo == "ASCII":
+        raise ValueError("ASCII renders through dtouch.ascii_art, not _dither")
     if algo == "Bayer":
         return bayer_dither(gray, bits=bits, invert=_BIAS_INVERT[bias], gamma=gamma)
     if algo == "Blue noise":
@@ -116,12 +235,24 @@ class DitherGirlMode:
         "riemersma still": dict(algorithm="Riemersma", bits=2.0, gamma=True,
                                 bias="auto", contrast=1.0, scale=240.0,
                                 palette="white-on-black", matte="off"),
+        # ASCII reinterprets Scale as character ROWS, so its looks live in a
+        # different numeric register: 45 rows is an 8x16 cell at 720p (the
+        # recommended default), 30 rows a 12x24 one.
+        "ascii": dict(algorithm="ASCII", bits=4.0, gamma=True, bias="auto",
+                      contrast=1.0, scale=45.0,
+                      palette="white-on-black", matte="off"),
+        # ASCII output is maximally high-frequency two-tone content — the
+        # worst case for H.264. Big cells and hard contrast are what survives
+        # a stream; 4x8 cells turn to mush (§4.2's stream-tuned looks).
+        "ascii stream": dict(algorithm="ASCII", bits=3.0, gamma=True,
+                             bias="light", contrast=1.4, scale=30.0,
+                             palette="green phosphor", matte="off"),
     }
 
     # apply="reset" merges a look over these (store keys — DESIGN.md §7)
     DEFAULTS = dict(algorithm="Floyd-Steinberg", bits=1.0, bias="auto",
                     contrast=1.0, scale=SCALE_DEFAULT,
-                    palette="white-on-black", matte="off")
+                    palette="white-on-black", hue=0.0, tint=0.0, matte="off")
 
     # shared-UI attrs this mode seeds (prefixed to coexist with every mode's
     # attrs on the one OverlayUI state object)
@@ -129,7 +260,7 @@ class DitherGirlMode:
                         dg_algo_idx=ALGOS.index("Floyd-Steinberg"),
                         dg_bits=1.0, dg_gamma=True, dg_bias_idx=0,
                         dg_contrast=1.0, dg_scale=SCALE_DEFAULT,
-                        dg_palette_idx=0)
+                        dg_palette_idx=0, dg_hue=0.0, dg_tint=0.0)
 
     def __init__(self, still=False):
         self.boot_still = still            # CLI --still: boot with still input
@@ -138,15 +269,22 @@ class DitherGirlMode:
         self._mat_kind = None
         self._swatch_key = None
         self._swatch_cache = None
+        self._ascii = None            # AsciiRenderer, rebuilt on any key change
+        self._ascii_ms = None         # measured cost, EMA (perf honesty §4.2)
+        self._ascii_frames = 0
+        self._ascii_slow = False      # latched; cleared on every rebuild
 
     # ----- lifecycle -----
     def start(self, host):
         self.host = host
 
     def stop(self):
-        """Idempotent (DESIGN.md §2.2). No GL — just drop the matte."""
+        """Idempotent (DESIGN.md §2.2). No GL — just drop the matte and the
+        ASCII renderer (which holds a full-res output buffer)."""
         self.mat = None
         self._mat_kind = None
+        self._ascii = None
+        self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
 
     def on_resize(self, w, h):
         pass                               # everything derives from host.res
@@ -181,6 +319,16 @@ class DitherGirlMode:
 
     def _palette_name(self):
         return self.palettes[int(self._ui("dg_palette_idx", 0)) % len(self.palettes)]
+
+    def _hue(self):
+        return float(np.clip(self._ui("dg_hue", 0.0), HUE_LO, HUE_HI))
+
+    def _tint(self):
+        return float(np.clip(self._ui("dg_tint", 0.0), 0.0, 1.0))
+
+    def _palette(self):
+        """The live (off, on) pair: the named palette, steered by Hue/Tint."""
+        return tinted_palette(self._palette_name(), self._hue(), self._tint())
 
     def _matte_name(self):
         return MATTES_DG[int(self._ui("dg_matte_idx", 0)) % len(MATTES_DG)]
@@ -232,13 +380,22 @@ class DitherGirlMode:
                            "survives stream compression."),
                 Slider("Scale", "dg_scale", SCALE_LO, SCALE_HI, fmt=".0f",
                        save_key="scale",
-                       tip="Working height in pixels. Low = big chunky cells; "
-                           "high = fine grain (slow for the diffusion dithers)."),
+                       tip="Working height: pixels for the dithers, character "
+                           "rows for ASCII. Low = big chunky cells; high = "
+                           "fine grain (slow for the diffusion dithers)."),
+                Readout(self._draw_grid_note),
                 Readout(self._draw_perf_note),
             ]),
             Section("PALETTE", [
                 Cycle("palette", "dg_palette_idx", list(PALETTES),
                       save_key="palette"),
+                Slider("Hue", "dg_hue", HUE_LO, HUE_HI, fmt=".0f",
+                       save_key="hue",
+                       tip="Which colour Tint steers toward. Does nothing "
+                           "until Tint is up."),
+                Slider("Tint", "dg_tint", 0.0, 1.0, save_key="tint",
+                       tip="How far to steer the palette toward Hue. 0 = the "
+                           "palette exactly as named."),
             ]),
         ]
 
@@ -277,15 +434,14 @@ class DitherGirlMode:
             g.text(frame, "slow at full res", x, y + g.S(12), AMBER, 0.42)
         return y + g.S(20)
 
-    def _draw_perf_note(self, frame, g, x, y, cw):
-        """Inline amber perf note — renders only when Scale is dragged high
-        while an error-diffusion algorithm is active (§4.2). Word-wrapped to
-        the panel column (at 720p the one-liner overflows the sidebar)."""
-        if not self.slow_warning():
-            return y
-        words = "slow - ordered dither recommended live".split()
+    @staticmethod
+    def _note_lines(g, text, cw):
+        """Word-wrap a note to the panel column. Every inline note goes through
+        this: the sidebar is narrow at 720p and gets narrower as the frame
+        does, and a note that runs off the panel is graffiti over the picture
+        rather than part of the panel."""
         lines, cur = [], ""
-        for wd in words:
+        for wd in text.split():
             cand = (cur + " " + wd).strip()
             tw = cv2.getTextSize(cand, cv2.FONT_HERSHEY_SIMPLEX,
                                  0.42 * g.s, 1)[0][0]
@@ -296,19 +452,64 @@ class DitherGirlMode:
                 cur = cand
         if cur:
             lines.append(cur)
-        for line in lines:
-            g.text(frame, line, x, y + g.S(12), AMBER, 0.42)
+        return lines
+
+    def _draw_note(self, frame, g, x, y, cw, text, color):
+        for line in self._note_lines(g, text, cw):
+            g.text(frame, line, x, y + g.S(12), color, 0.42)
             y += g.S(16)
+        return y
+
+    def _draw_perf_note(self, frame, g, x, y, cw):
+        """Inline amber perf note — renders only when Scale is dragged high
+        while an error-diffusion algorithm is active (§4.2). Word-wrapped to
+        the panel column (at 720p the one-liner overflows the sidebar)."""
+        if not self.slow_warning():
+            return y
+        y = self._draw_note(frame, g, x, y, cw,
+                            "slow - ordered dither recommended live", AMBER)
+        return y + g.S(4)
+
+    def _draw_grid_note(self, frame, g, x, y, cw):
+        """ASCII-only TONE readout (renders nothing otherwise — the same
+        conditional-Readout trick `_draw_perf_note` uses).
+
+        Under ASCII, Scale keeps its store key, its range and its label but
+        changes UNIT, from working pixels to character rows. That is a real
+        semantic shift inside one control and hiding it would be dishonest, so
+        the grid says what it actually is; and when Scale runs past the
+        legibility floor and stops doing anything, it says that too."""
+        if self._algo() != "ASCII":
+            return y
+        rend = self._ascii
+        if rend is None:
+            return y
+        y = self._draw_note(frame, g, x, y, cw, rend.grid_note(), DIM)
+        if rend.clamped:
+            # DIM, not amber: nothing is wrong, the control has run out of room
+            y = self._draw_note(frame, g, x, y, cw,
+                                "cell floor - characters stay legible", DIM)
+        if self._ascii_slow and self._ascii_ms is not None:
+            # perf honesty (§4.2): the measured cost, not a guessed threshold —
+            # ASCII is in the ordered class at 720p/1080p but a 4K frame at the
+            # cell floor is ~8.7 ms, and an operator is owed the number rather
+            # than a quietly halved frame rate.
+            y = self._draw_note(frame, g, x, y, cw,
+                                "ascii %.1f ms/frame - lower Scale or output"
+                                % self._ascii_ms, AMBER)
         return y + g.S(4)
 
     def _draw_swatch(self, frame, g, x, y, cw):
         """Swatch strip: a horizontal 0->1 gradient ramp rendered through the
-        CURRENT algorithm+bits+gamma+bias (+palette), cached and re-rendered
-        only when one of those changes (§4.2 — instant 'what am I hearing'
-        for the eyes)."""
+        CURRENT algorithm+bits+gamma+bias (+palette, +hue/tint), cached and
+        re-rendered only when one of those changes (§4.2 — instant 'what am I
+        hearing' for the eyes). Under ASCII the strip becomes one row of the
+        live glyph ramp, which is the most direct answer the panel can give to
+        'what am I looking at'."""
         hpx = g.S(16)
         key = (self._algo(), self._bits(), bool(self._ui("dg_gamma", True)),
-               self._bias(), self._palette_name(), cw, hpx)
+               self._bias(), self._palette_name(), self._hue(), self._tint(),
+               cw, hpx)
         if key != self._swatch_key:
             self._swatch_cache = self._render_swatch(*key)
             self._swatch_key = key
@@ -318,11 +519,22 @@ class DitherGirlMode:
             frame[y0:y1, x:x + cw] = self._swatch_cache[y0 - y:y1 - y]
         return y + hpx + g.S(8)
 
-    def _render_swatch(self, algo, bits, gamma, bias, palette, w, h):
-        ramp = np.tile(np.linspace(0.0, 1.0, w, dtype=np.float32), (h, 1))
-        lit = _dither(ramp, algo, bits, gamma, bias)
-        off, on = PALETTES[palette]
-        rgb = self._palette_map(lit, off, on)
+    def _render_swatch(self, algo, bits, gamma, bias, palette, hue, tint, w, h):
+        off, on = tinted_palette(palette, hue, tint)
+        if algo == "ASCII":
+            # one row of characters across the strip: the strip is 16 px tall,
+            # so it cannot preview the live CELL size, but it can preview the
+            # thing that actually changed — the ramp.
+            rend = AsciiRenderer(w, h, rows_req=1, n=1 << bits,
+                                 palette=(off, on), gamma=gamma, bias=bias)
+            ramp_u8 = np.tile(
+                np.linspace(0, 255, w, dtype=np.float32).astype(np.uint8),
+                (h, 1))
+            rgb = rend.render(ramp_u8)
+        else:
+            ramp = np.tile(np.linspace(0.0, 1.0, w, dtype=np.float32), (h, 1))
+            rgb = self._palette_map(_dither(ramp, algo, bits, gamma, bias),
+                                    off, on)
         return rgb[:, :, ::-1].copy()      # panel frames are BGR
 
     # ----- per-frame -----
@@ -333,6 +545,73 @@ class DitherGirlMode:
         on = np.float32(on)
         return (off[None, None, :]
                 + levels[:, :, None] * (on - off)).astype(np.uint8)
+
+    def _ascii_step(self, gray_u8, rw, rh, bits, gamma, bias, contrast, scale,
+                    palette):
+        """The ASCII branch of step(): quantise tone to glyph tiles.
+
+        The renderer is RETUNED in place for a settings change and rebuilt only
+        for a new output resolution. It used to be rebuilt for both, and the
+        frame buffer made that ruinous, because every frame allocated and
+        cleared a fresh 24 MB buffer for a change that only invalidates the
+        atlas. Both paths measured in one process, mean ms/frame:
+
+                        idle           Hue drag        Scale drag
+            720p    0.63 -> 0.64    3.14 ->  0.88    3.38 ->  2.49
+            1080p   1.25 -> 1.25    6.59 ->  1.60    7.21 ->  4.23
+            4K      4.13 -> 4.15   24.80 ->  4.87   29.11 -> 10.76
+
+        Idle is untouched, as it must be — this changes what an EDIT costs, not
+        what a frame costs. A Scale drag still pays a real coverage scan for
+        each new cell size, which is why the note below matters.
+
+        The whole step is timed, rebuild included (§4.2 perf honesty). Timing
+        only `render()` measured the one part of an edit that was never the
+        expensive part: the real step cost 28.7 ms while the note read 5.3 ms.
+        """
+        t0 = time.perf_counter()
+        rend = self._ascii
+        if rend is None or (rend.frame_w, rend.frame_h) != (rw, rh):
+            rend = self._ascii = AsciiRenderer(rw, rh, rows_req=scale,
+                                               n=1 << bits, palette=palette,
+                                               gamma=gamma, bias=bias)
+            # a new output resolution is a different instrument; nothing
+            # measured against the old one carries over
+            self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
+        elif rend.key() != AsciiRenderer.make_key(rw, rh, scale, 1 << bits,
+                                                  palette, gamma, bias, True):
+            rend.configure(scale, 1 << bits, palette, gamma, bias, True)
+        rend.set_rows_req(scale)
+        out = rend.render(gray_u8, contrast)
+        self._ascii_verdict((time.perf_counter() - t0) * 1000.0)
+        return out
+
+    def _ascii_verdict(self, ms):
+        """Fold one measured step cost into the EMA and update the slow latch.
+
+        Split out of `_ascii_step` so the honesty rule can be tested by feeding
+        it numbers instead of by racing a stopwatch — a test that asserts "this
+        machine renders ASCII in under 8 ms" is a perf test wearing a logic
+        test's clothes, and it fails on a busy box for reasons that have
+        nothing to do with the rule it means to pin.
+
+        The verdict follows the measurement in BOTH directions, through a
+        hysteresis band so it cannot blink while an operator hovers the
+        threshold. It used to be latched-until-rebuild instead, which was the
+        same bug as timing only render(): a drag that retunes every frame
+        cleared the frame counter every frame, so the warm-up gate was
+        unreachable during the one interaction that was actually slow. Warm-up
+        still applies, because a cold cell size pays a one-off coverage scan
+        that says nothing about the steady state.
+        """
+        self._ascii_ms = ms if self._ascii_ms is None else (
+            0.85 * self._ascii_ms + 0.15 * ms)
+        self._ascii_frames += 1
+        if self._ascii_frames >= ASCII_WARMUP_FRAMES:
+            if self._ascii_ms > ASCII_SLOW_MS:
+                self._ascii_slow = True
+            elif self._ascii_ms < ASCII_SLOW_MS * ASCII_SLOW_CLEAR:
+                self._ascii_slow = False
 
     def step(self, frame_bgr, audio_levels, dt):
         """input frame → optional matte gate → gamma-correct dither at the
@@ -345,7 +624,7 @@ class DitherGirlMode:
         bias = self._bias()
         contrast = float(self._ui("dg_contrast", 1.0))
         scale = float(self._ui("dg_scale", SCALE_DEFAULT))
-        off, on = PALETTES[self._palette_name()]
+        off, on = self._palette()
         matte_kind = self._matte_name()
 
         # audio modulation — deliberately minimal (§4.2): bass nudges Contrast
@@ -368,16 +647,20 @@ class DitherGirlMode:
         # test_contrast_reorder_canary in tests/test_dithergirl.py bounds it;
         # post-dither the visual difference is small.
         gray_u8 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        wh = int(np.clip(round(scale), SCALE_LO, SCALE_HI))
-        ww = max(8, int(round(wh * rw / float(rh))))
-        small = (cv2.resize(gray_u8, (ww, wh), interpolation=cv2.INTER_AREA)
-                 .astype(np.float32) / 255.0)
-        if contrast != 1.0:
-            small = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
+        if algo == "ASCII":
+            out = self._ascii_step(gray_u8, rw, rh, bits, gamma, bias,
+                                   contrast, scale, (off, on))
+        else:
+            wh = int(np.clip(round(scale), SCALE_LO, SCALE_HI))
+            ww = max(8, int(round(wh * rw / float(rh))))
+            small = (cv2.resize(gray_u8, (ww, wh), interpolation=cv2.INTER_AREA)
+                     .astype(np.float32) / 255.0)
+            if contrast != 1.0:
+                small = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
 
-        lit = _dither(small, algo, bits, gamma, bias)
-        out = self._palette_map(lit, off, on)
-        out = cv2.resize(out, (rw, rh), interpolation=cv2.INTER_NEAREST)
+            lit = _dither(small, algo, bits, gamma, bias)
+            out = self._palette_map(lit, off, on)
+            out = cv2.resize(out, (rw, rh), interpolation=cv2.INTER_NEAREST)
 
         if matte_kind != "off":
             # matte gate: dither the matted subject only; elsewhere the raw
@@ -394,6 +677,14 @@ class DitherGirlMode:
                 self.mat = mat
             m = self.mat.compute(cv2.resize(frame_bgr, (MATTE_W, MATTE_H)))
             m = np.clip(cv2.resize(m, (rw, rh)), 0.0, 1.0).astype(np.float32)
+            # The matte is NOT snapped to the character grid under ASCII, and
+            # that was a decision, not an oversight. Snapping (average the
+            # matte per cell, expand back) was built and looked at: it paints a
+            # staircase of half-lit grey cells around the subject — off-palette
+            # blocks in a two-tone picture — and a hard per-cell threshold
+            # instead throws away the feather every shipped matte produces.
+            # The unsnapped cut does clip glyphs, but at 8x16 cells that reads
+            # as texture, and it is what the pixel dithers already do.
             if self._ui("dg_matte_black", False):
                 bg = np.zeros_like(out)
             else:

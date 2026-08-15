@@ -5,10 +5,9 @@ force values: alignment should make neighbouring velocities agree, cohesion shou
 neighbourhood together, separation should push it apart. That way the tests survive a change
 of formulation and only fail if the behaviour is actually wrong.
 """
-import time
-
 import numpy as np
 import pytest
+from conftest import assert_within, best_ms, skip_if_contended
 
 from dtouch.flock import flock_forces
 
@@ -113,20 +112,33 @@ def test_flocking_makes_a_cloud_more_ordered_over_time():
     assert spread(vx, vy) < start, "an aligning cloud should become more uniform"
 
 
-def test_scales_to_the_live_instrument_particle_count():
-    """200k is what the live app actually pushes; O(n^2) would never return."""
+def test_scales_to_the_live_instrument_particle_count(perf_reference):
+    """200k is what the live app actually pushes; O(n^2) would never return.
+
+    The one workload in the suite a ratio budget cannot rescue on its own.
+    It scatters into a spatial grid, so it is bound by memory LATENCY where
+    the reference pass is bound by bandwidth, and the two do not slow down
+    together: its ratio went 12.3x quiet -> 76.2x with the load average at 45
+    on 14 cores. No margin both survives that and still means anything, so it
+    declines to measure on a contended box and asserts a x4 margin (49x) on a
+    quiet one. The regression it exists to catch is a complexity change —
+    true all-pairs boids at this count is ~4e10 pair terms — which is orders
+    of magnitude away, not a factor of four."""
+    skip_if_contended()
     rng = np.random.default_rng(1)
     n = 200_000
     px = rng.uniform(0, 416, n).astype(np.float32)
     py = rng.uniform(0, 234, n).astype(np.float32)
     vx = rng.standard_normal(n).astype(np.float32)
     vy = rng.standard_normal(n).astype(np.float32)
-    flock_forces(px, py, vx, vy, 416, 234, cohesion=0.5, alignment=0.5, separation=0.5)
-    t = time.perf_counter()
-    for _ in range(3):
-        flock_forces(px, py, vx, vy, 416, 234, cohesion=0.5, alignment=0.5, separation=0.5)
-    dt = (time.perf_counter() - t) / 3
-    assert dt < 0.030, f"flocking must fit in a frame budget; took {dt*1000:.1f} ms"
+
+    def step():
+        flock_forces(px, py, vx, vy, 416, 234, cohesion=0.5, alignment=0.5,
+                     separation=0.5)
+
+    step()
+    assert_within(best_ms(step, runs=6), 12.3, perf_reference,
+                  "flocking at 200k particles", margin=4.0)
 
 
 def test_forces_are_float32():

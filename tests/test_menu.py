@@ -6,9 +6,11 @@ skipped everywhere, mouse-click commit through the drawn rects. draw_menu and
 render_boot_card render onto plain numpy frames.
 """
 import numpy as np
+import pytest
 
-from dtouch.hud import DIM
-from dtouch.menu import Card, Menu, draw_menu, registry_cards, render_boot_card
+from dtouch.hud import DIM, TITLE_SAFE, Toasts
+from dtouch.menu import (Card, Menu, draw_menu, hint_baseline, menu_hint,
+                         registry_cards, render_boot_card)
 from dtouch.modes import REGISTRY
 
 
@@ -81,6 +83,50 @@ def test_esc_closes_without_committing():
 def test_m_closes_too():
     m = _menu()
     assert m.key(ord("m")) == ("close", None)
+
+
+# ---------- the boot menu (DESIGN.md §3, amended 2026-08-15) ----------
+
+def test_show_marks_the_boot_menu_and_close_clears_it():
+    m = Menu(cards=_cards())
+    m.show(active_id="dithergirl", boot=True)
+    assert m.boot is True and m.sel == 1
+    m.close()
+    assert m.boot is False
+    m.show()                                  # a later open is not a boot menu
+    assert m.boot is False
+
+
+def test_esc_at_boot_commits_the_selection_instead_of_closing():
+    """At boot there is no 'running mode' behind the menu to return to, so a
+    dismiss that just closed would leave the operator on a mode they never
+    chose — the dead end principle 5 forbids."""
+    m = Menu(cards=_cards())
+    m.show(active_id="particles", boot=True)
+    assert m.key(27) == ("switch", "particles")
+    assert m.open is False and m.boot is False
+
+
+def test_m_at_boot_commits_too():
+    m = Menu(cards=_cards())
+    m.show(active_id="dithergirl", boot=True)
+    assert m.key(ord("m")) == ("switch", "dithergirl")
+
+
+def test_esc_at_boot_commits_what_the_operator_moved_to():
+    m = Menu(cards=_cards())
+    m.show(active_id="particles", boot=True)
+    m.key(ord("."))
+    assert m.key(27) == ("switch", "dithergirl")
+
+
+def test_q_at_boot_still_quits_rather_than_committing():
+    """q is 'leave', not 'pick' — the boot menu must not turn it into an
+    entry (DESIGN.md §3: q closes the menu and arms the quit confirm)."""
+    m = Menu(cards=_cards())
+    m.show(boot=True)
+    assert m.key(ord("q")) == ("quit", None)
+    assert m.open is False
 
 
 # ---------- direct keys ----------
@@ -163,8 +209,73 @@ def test_bottom_hint_line_renders():
     ', . move - enter select - esc back' is part of the layout."""
     frame = np.zeros((720, 1280, 3), np.uint8)
     draw_menu(frame, None, _cards(), 0)
-    band = frame[660:, 300:980]                          # bottom-center strip
+    y = hint_baseline(720)
+    band = frame[y - 20:y + 6, 300:980]                  # bottom-center strip
     assert band.max() > 0, "the hint line must render bottom-center"
+
+
+def test_boot_menu_hint_names_quit_instead_of_esc_back():
+    """At boot Esc does not go 'back' — it enters the selection — so the line
+    may not say it does. `q` is the other door, and it is the true one."""
+    assert menu_hint(boot=False) == ", . move - enter select - esc back"
+    assert menu_hint(boot=True) == ", . move - enter select - q quit"
+    for s in (menu_hint(True), menu_hint(False)):
+        assert s == s.encode("ascii", "replace").decode()   # Hershey is ASCII
+
+
+def test_draw_menu_boot_flag_reaches_the_hint_line(monkeypatch):
+    import dtouch.menu as M
+    texts = []
+    real = M.put_outlined
+
+    def spy(img, text, *a, **k):
+        texts.append(text)
+        return real(img, text, *a, **k)
+    monkeypatch.setattr(M, "put_outlined", spy)
+    draw_menu(np.zeros((720, 1280, 3), np.uint8), None, _cards(), 0, boot=True)
+    assert menu_hint(boot=True) in texts
+
+
+@pytest.mark.parametrize("res", [(1280, 720), (1920, 1080), (3840, 2160)])
+@pytest.mark.parametrize("n_hints", [1, 2, 3])
+def test_menu_hint_never_shares_a_row_with_a_hud_hint_toast(res, n_hints):
+    """Issue #18, at every resolution and every stack depth.
+
+    The HUD stacks its hint toasts UP from the title-safe bottom inset, which
+    is exactly where the menu's own hint line used to sit: at boot the doors
+    hint and the menu hint were drawn centered on one baseline, so the first
+    frame of the app showed two messages smeared into one unreadable line.
+
+    Pixels, not coordinates: whatever rows the menu's hint paints, no toast in
+    a full 3-deep stack may paint any of them."""
+    w, h = res
+    menu = np.zeros((h, w, 3), np.uint8)
+    draw_menu(menu, None, _cards(), 0)
+    y = hint_baseline(h)
+    band = slice(max(0, y - int(0.08 * h)), h)           # bottom band only
+    menu_rows = {r for r in range(band.start, h) if menu[r].any()}
+    assert menu_rows, "the menu hint must actually paint something"
+
+    toasts = np.zeros((h, w, 3), np.uint8)
+    t = Toasts(now=lambda: 0.0)
+    for text in ["m menu - TAB panel - ? keys", "enter resumes PARTICLES",
+                 "q again to quit"][:n_hints]:
+        t.hint(text, ttl=4.0)
+    t.draw(toasts)
+    toast_rows = {r for r in range(band.start, h) if toasts[r].any()}
+    assert toast_rows, "the toast stack must actually paint something"
+
+    assert not (menu_rows & toast_rows), (
+        "menu hint and HUD toasts overprint on rows "
+        f"{sorted(menu_rows & toast_rows)}")
+
+
+def test_menu_hint_stays_inside_the_title_safe_box():
+    """DESIGN.md §5: nothing crosses the inset — the lift may not push the
+    line up out of the bottom of the frame either."""
+    for h in (360, 720, 1080, 2160):
+        y = hint_baseline(h)
+        assert int(h * 0.5) < y <= h - int(h * TITLE_SAFE)
 
 
 def test_draw_menu_survives_no_camera_frame():

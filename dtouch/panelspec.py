@@ -220,5 +220,15 @@ def apply_look(state, spec, cfg, defaults=None):
             if not math.isfinite(num):
                 skipped.append(key)
                 continue
+            # A Slider's declared range is the whole truth about what values
+            # that control can hold, so a look may not land outside it. It
+            # used to be able to: `ascii stream` shipped with scale=30 under a
+            # 45-720 slider, and recalling it drew the handle 3 px outside its
+            # own track and then snapped 30 -> 45 on the first click anywhere
+            # on it — a value the operator could see, could not restore, and
+            # destroyed by touching the control. Clamping here (rather than in
+            # each mode's built-ins) means no future look can do it either.
+            if isinstance(w, Slider):
+                num = min(max(num, w.lo), w.hi)
             setattr(state, w.attr, num)
     return skipped

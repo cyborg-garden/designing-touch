@@ -19,6 +19,7 @@ render exactly as authored and 4K renders at 2x (issue #3).
 from __future__ import annotations
 
 import cv2
+import numpy as np
 
 # BGR chrome — shared by the panel and every future toolkit surface.
 PANEL = (34, 32, 30)
@@ -39,10 +40,88 @@ def in_rect(rect, p):
 
 
 # ----- scroll mechanics (pure) -----
+#
+# ==========================================================================
+# THE SCROLL CONVENTION — read this before touching any scroll path.
+#
+# `scroll` is how many pixels the content column has been pushed UP past the
+# top of the view. It is always >= 0. Widgets draw at `y = y0 - scroll`, so:
+#
+#       scroll INCREASES  ->  content moves UP  ->  you see what is BELOW
+#       scroll DECREASES  ->  content moves DOWN ->  you see what is ABOVE
+#
+# Every input path must agree with that sentence. There are four, and they are
+# only consistent if you say each one out loud:
+#
+#   wheel   `wheel_scroll`  delta < 0 (toward the user) INCREASES scroll
+#   drag    `drag_scroll`   finger UP (y < y0)          INCREASES scroll
+#                           -- the CONTENT follows the finger
+#   thumb   `thumb_scroll`  finger DOWN (y > y0)        INCREASES scroll
+#                           -- the THUMB follows the finger, so the content
+#                              goes the OTHER way. This is the mirror of
+#                              drag_scroll and it is correct: you are dragging
+#                              a different object.
+#   arrows  `Gui.scrollbar` the DOWN arrow               INCREASES scroll
+#
+# If you add a fifth path, add a line here and make it obey. Two paths that
+# disagree read to the user as "the menu scrolls up and down inconsistently",
+# which is exactly the bug this block exists to prevent recurring.
+# ==========================================================================
 
-def wheel_scroll(scroll, step, flags):
-    """One wheel event: flags>0 = wheel up. Clamping happens at draw time."""
-    return scroll + (-step if flags > 0 else step)
+SCROLL_STEP = 40    # baseline px moved by one wheel notch / one arrow click
+WHEEL_NOTCH = 120   # Win32/GTK encode one wheel detent as +-120
+
+
+def wheel_delta(x, y, flags):
+    """Normalize one cv2 EVENT_MOUSEWHEEL callback into a single signed delta.
+
+    The live cv2 backends disagree about WHERE the delta is, and the difference
+    is not cosmetic — reading the wrong place breaks scrolling outright:
+
+    * **Win32 / GTK / Qt** pack the delta into the HIGH 16 bits of `flags` as a
+      signed short, in multiples of +-120 (one detent). `(x, y)` is the cursor.
+    * **macOS / Cocoa** passes the delta in `(x, y)` — literally
+      `int(event.scrollingDeltaY)`, already corrected for the system "natural
+      scrolling" preference by AppKit — and `flags` carries ONLY the
+      Shift/Ctrl/Alt modifier bits. See `cvSendMouseEvent:type:flags:` and
+      `cvMouseEvent:` in opencv/modules/highgui/src/window_cocoa.mm.
+
+    So on macOS `flags` is 0 on every unmodified wheel event, and any code that
+    reads the direction out of it (`flags > 0`) scrolls the same way forever —
+    the shipped bug: both directions scrolled DOWN, and holding Shift was the
+    only way to scroll up.
+
+    The discriminator is safe both ways: the modifier bits are all below 0x40,
+    so the high word is nonzero ONLY on the flags-encoding backends, and those
+    never deliver a wheel event with a zero delta.
+
+    Note there is no supported decoder to lean on — OpenCV's
+    `cv::getMouseWheelDelta` is C++-only and is not exported to the Python
+    bindings (verified on cv2 4.13.0), which is most likely why the high word
+    got missed in the first place.
+
+    Sign, after this: **positive = pushed away from the user = show me what is
+    above = scroll decreases**. Uniform on every backend.
+    """
+    hi = (flags >> 16) & 0xFFFF
+    if hi:
+        return hi - 0x10000 if hi >= 0x8000 else hi
+    return y            # cocoa; horizontal wheels arrive as EVENT_MOUSEHWHEEL
+
+
+def wheel_scroll(scroll, step, delta):
+    """One wheel event, given a delta already normalized by `wheel_delta`.
+
+    Magnitude is deliberately coarse: a detent-encoded delta (|d| >= 120) moves
+    one `step` per detent, and anything smaller — a macOS trackpad's per-frame
+    pixel delta — moves exactly one step per event. A truncated-to-zero delta
+    moves nothing (it used to move a whole step DOWN, which is the jitter half
+    of "scrolls inconsistently"). Clamping happens at draw time.
+    """
+    if not delta:
+        return scroll
+    notches = round(abs(delta) / WHEEL_NOTCH) if abs(delta) >= WHEEL_NOTCH else 1
+    return scroll - step * notches if delta > 0 else scroll + step * notches
 
 
 def clamp_scroll(scroll, content_h, view_h):
@@ -51,8 +130,23 @@ def clamp_scroll(scroll, content_h, view_h):
 
 
 def drag_scroll(scroll0, y0, y):
-    """Drag-on-empty-panel scrolling: content follows the finger."""
+    """Drag-on-empty-panel scrolling: the CONTENT follows the finger, so
+    dragging UP increases scroll (see the convention block)."""
     return scroll0 + (y0 - y)
+
+
+def thumb_scroll(scroll0, y0, y, travel, span):
+    """Scrollbar-thumb drag: the THUMB follows the finger, so dragging DOWN
+    increases scroll — the mirror of `drag_scroll`, because you have hold of a
+    different object (see the convention block).
+
+    `travel` is how far the thumb can slide (track_h - thumb_h); `span` is how
+    far the content can scroll (content_h - view_h). Ungrabbable thumbs
+    (travel <= 0) hold still rather than divide by zero.
+    """
+    if travel <= 0:
+        return scroll0
+    return int(round(scroll0 + (y - y0) * span / travel))
 
 
 def arm_delete(armed, name):
@@ -138,7 +232,12 @@ class Gui:
         tx0, tx1 = x + self.S(96), x + w - self.S(44)
         cv2.line(img, (tx0, y + self.S(13)), (tx1, y + self.S(13)), TRACK,
                  max(1, self.S(3)), cv2.LINE_AA)
-        hx = int(tx0 + (val - lo) / (hi - lo) * (tx1 - tx0))
+        # clamped to the track: a value outside [lo, hi] (a hand-edited preset,
+        # a built-in authored against an older range) must still draw a handle
+        # ON its own track — a handle floating past the end reads as a broken
+        # widget, and the click that "fixes" it silently destroys the value.
+        frac = min(max((val - lo) / (hi - lo), 0.0), 1.0) if hi > lo else 0.0
+        hx = int(tx0 + frac * (tx1 - tx0))
         cv2.circle(img, (hx, y + self.S(13)), self.S(6), HANDLE, -1, cv2.LINE_AA)
         self.text(img, f"{val:{fmt}}", x + w - self.S(38), y + self.S(17), INK, 0.42)
         self.hot.append(((tx0 - self.S(8), y, tx1 + self.S(8), y + self.S(26)),
@@ -243,10 +342,106 @@ class Gui:
         for i, ln in enumerate(lines):
             self.text(img, ln, bx + self.S(10), by + self.S(20) + i * self.S(16), INK, 0.42)
 
-    def scrollbar(self, img, px, view_h, content_h, scroll):
-        """Slim scrollbar on the panel's left edge — only when content overflows."""
+    def scrollbar_geom(self, px, view_h, content_h, scroll):
+        """Geometry of the panel's left-gutter scrollbar, or None when the
+        content fits — in which case nothing draws and nothing is clickable.
+
+        Everything lives in the S(16) gutter between the panel's left edge and
+        the controls' left edge, so no control is DRAWN under it — with one
+        exception that matters for hit-testing rather than for pixels: a
+        section header's rect starts S(4) into the gutter, so the two overlap
+        by a quarter of its width. `scrollbar` front-inserts its hits for
+        exactly this reason (fixed chrome above scrolled content), which is
+        what makes the overlap harmless instead of a header that eats arrow
+        clicks near the top and bottom of the panel.
+
+        The arrow BUTTONS are drawn at the shipped chrome's button scale (the
+        cycle `<` `>` buttons are S(28)xS(24), the manage buttons S(22)xS(20)).
+        Their HIT rects are the full gutter width and 2.75u tall — DESIGN.md
+        §5's minimum target, u = view_h/45 — which costs nothing, because the
+        gutter beside them is empty. Drawn small, hit large.
+
+        Returns a dict of (x0, y0, x1, y1) rects: up_box/down_box (drawn),
+        up_hit/down_hit (clickable), track, thumb — plus thumb_h/travel/span,
+        the numbers `thumb_scroll` needs. `thumb` is None if the track is too
+        short to hold one.
+        """
         if content_h <= view_h:
-            return
-        bar_h = max(int(view_h * view_h / content_h), self.S(30))
-        by = int((view_h - bar_h) * (scroll / max(content_h - view_h, 1)))
-        cv2.rectangle(img, (px + self.S(2), by), (px + self.S(5), by + bar_h), TRACK, -1)
+            return None
+        S = self.S
+        gx0, gx1 = px, px + S(16)
+        bx0, bx1, bh = px + S(2), px + S(14), S(22)
+        # Targets first, flush against the top and bottom edges of the frame —
+        # an edge target is infinitely tall to a mouse (Fitts), and flush is
+        # also where the click-flash outline reads best. The button is then
+        # centred inside its target.
+        th = max(bh + S(4), int(round(2.75 * view_h / 45.0)))      # DESIGN.md §5
+        th = min(th, max(view_h // 3, bh))
+        up_hit = (gx0, 0, gx1, th)
+        down_hit = (gx0, view_h - th, gx1, view_h)
+        def _box(hit):
+            top = (hit[1] + hit[3]) // 2 - bh // 2
+            return (bx0, top, bx1, top + bh)
+        up_box, down_box = _box(up_hit), _box(down_hit)
+        ty0, ty1 = up_hit[3] + S(2), down_hit[1] - S(2)
+        track_h, span = max(ty1 - ty0, 0), max(content_h - view_h, 1)
+        thumb_h = min(max(int(track_h * view_h / content_h), S(30)), track_h)
+        thumb = None
+        if thumb_h > 0:
+            travel = track_h - thumb_h
+            top = ty0 + int(travel * (min(max(scroll, 0), span) / span))
+            thumb = (bx0, top, bx1, top + thumb_h)
+        return {"up_box": up_box, "down_box": down_box,
+                "up_hit": up_hit, "down_hit": down_hit,
+                "track": (gx0, ty0, gx1, ty0 + track_h), "thumb": thumb,
+                "track_y0": ty0, "track_h": track_h,
+                "thumb_h": thumb_h, "travel": track_h - thumb_h, "span": span}
+
+    def scrollbar(self, img, px, view_h, content_h, scroll, step):
+        """Scrollbar in the panel's left gutter — only when content overflows.
+
+        Up arrow, thumb, down arrow. The arrows are real hit targets so the
+        panel is scrollable with clicks alone (DESIGN.md §6.3: the mouse layer
+        is a fallback that must reach everything, and a cv2 window's wheel is
+        the least portable input we have — see `wheel_delta`). One click moves
+        one `step`, the same step one wheel notch moves.
+
+        Hits are front-inserted, like the collapse button and the manage
+        buttons: this is fixed chrome floating above scrolled content, so a row
+        that scrolled under it must never steal the click.
+        """
+        geom = self.scrollbar_geom(px, view_h, content_h, scroll)
+        if geom is None:
+            return None
+        if geom["thumb"]:
+            x0, y0, x1, y1 = geom["thumb"]
+            hot = in_rect(geom["track"], self.mouse)
+            # recessed groove first, so the empty part of the track still reads
+            # as somewhere you can click (DARK is the same well the unassigned
+            # slot badge uses)
+            cv2.rectangle(img, (x0, geom["track_y0"]),
+                          (x1, geom["track_y0"] + geom["track_h"]), DARK, -1)
+            cv2.rectangle(img, (x0, y0), (x1, y1), HOVER if hot else TRACK, -1)
+            self.hot.insert(0, (geom["track"], "scrolltrack",
+                                (geom["track_y0"], geom["track_h"],
+                                 geom["thumb_h"], geom["span"],
+                                 max(view_h - step, step))))
+        for box, hit, sign in ((geom["up_box"], geom["up_hit"], -1),
+                               (geom["down_box"], geom["down_hit"], +1)):
+            self.box(img, box, HOVER if in_rect(hit, self.mouse) else BTN)
+            self._arrow(img, box, sign)
+            self.hot.insert(0, (hit, "scroll", sign * step))
+        return geom
+
+    def _arrow(self, img, box, sign):
+        """Filled triangle inside an arrow button — a polygon, not a glyph:
+        Hershey has no triangle and `^`/`v` do not read as a matched pair
+        (see the module docstring on ASCII-only text)."""
+        x0, y0, x1, y1 = box
+        mx, my = self.S(2), self.S(6)
+        cx = (x0 + x1) // 2
+        if sign < 0:
+            pts = [(cx, y0 + my), (x1 - mx, y1 - my), (x0 + mx, y1 - my)]
+        else:
+            pts = [(cx, y1 - my), (x1 - mx, y0 + my), (x0 + mx, y0 + my)]
+        cv2.fillConvexPoly(img, np.array(pts, np.int32), INK, cv2.LINE_AA)

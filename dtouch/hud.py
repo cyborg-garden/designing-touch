@@ -263,6 +263,16 @@ class Toasts:
         self._hints.append(_Toast(text, color, self._now(), ttl))
         self._hints = self._hints[-3:]
 
+    def retire(self, prefix):
+        """Drop any live hint starting with *prefix* — it has been answered.
+
+        A hint is a pointer, and a pointer outlives its usefulness the moment
+        the operator follows it. The boot menu's 'enter resumes PARTICLES' is
+        posted with a 4 s ttl and Enter is usually pressed inside one, so it
+        stacked above the doors hint that replaces it and the operator got two
+        sentences, one of them about a menu they had just left."""
+        self._hints = [t for t in self._hints if not t.text.startswith(prefix)]
+
     def active(self):
         now = self._now()
         if self._center is not None and self._center.alpha(now) > 0:
