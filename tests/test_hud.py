@@ -4,10 +4,9 @@ Everything runs on a fake clock so fades are deterministic. The load-bearing pin
 is the OBS capture contract: HIDDEN draws NOTHING once toasts expire — the frame
 is provably untouched.
 """
-import time
-
 import numpy as np
 import pytest
+from conftest import assert_within, best_ms
 
 from dtouch import hud as H
 from dtouch.hud import (Hud, Osd, OverlayState, Toasts, cycle_overlay,
@@ -289,22 +288,25 @@ def test_osd_draws_bottom_left_and_fades():
 
 # ---------- budget ----------
 
-def test_hud_draw_stays_within_rough_budget():
-    """DESIGN.md §5: overlay budget <= 1 ms/frame. Toasts/status are small-ROI
-    ops; typical measure here is well under 0.5 ms. Asserted at 2 ms to absorb
-    CI noise while still catching an accidental full-frame op."""
+def test_hud_draw_stays_within_rough_budget(perf_reference):
+    """DESIGN.md §5: the overlay is a set of small-ROI ops, and the failure
+    worth catching is an accidental FULL-FRAME one — which on a 1080p frame is
+    not a percentage, it is a different order of magnitude.
+
+    Measured at 0.73x the reference float32 pass over a 720p RGB plane (see
+    tests/conftest.py), so the budget is a ratio rather than the flat 2 ms this
+    replaces: mean-of-100 wall clock made a busy machine look like a
+    regression, and it duly failed the suite with every core pegged."""
     clock = Clock()
     hud = Hud(now=clock)
     hud.toasts.flash("EMBERS")
     hud.toasts.hint("? for keys")
     img = _frame()
-    hud.draw(img, OverlayState.HUD, status="matte=auto  color=ice", recording=True,
-             blackout=True)   # warm-up
-    n = 100
-    t0 = time.perf_counter()
-    for _ in range(n):
+
+    def draw():
         clock.t += 0.001     # keep the toasts alive (fading) the whole run
         hud.draw(img, OverlayState.HUD, status="matte=auto  color=ice",
                  recording=True, blackout=True)
-    per_frame_ms = (time.perf_counter() - t0) * 1000.0 / n
-    assert per_frame_ms < 2.0, f"HUD draw took {per_frame_ms:.2f} ms/frame"
+
+    draw()                   # warm-up
+    assert_within(best_ms(draw, runs=100), 0.73, perf_reference, "HUD draw")

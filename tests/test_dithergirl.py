@@ -11,6 +11,7 @@ import time
 import cv2
 import numpy as np
 import pytest
+from conftest import best_ms
 
 import dtouch.presets as _presets
 from dtouch import imgui
@@ -1109,29 +1110,46 @@ def test_the_ascii_perf_note_is_measured_and_reported(tmp_path):
     mode times its own step. ASCII is in the ordered class at 720p/1080p but a
     4K frame at the cell floor measures ~8.7 ms, and an operator is owed the
     number rather than a quietly halved frame rate."""
-    from dtouch.modes.dithergirl import ASCII_SLOW_MS
+    from dtouch.modes.dithergirl import (ASCII_SLOW_CLEAR, ASCII_SLOW_MS,
+                                         ASCII_WARMUP_FRAMES)
 
-    # pinned against the LITERAL: every assertion below compares a measured
-    # cost against ASCII_SLOW_MS, so they all pass vacuously if the threshold
-    # is raised, and the threshold IS the claim the panel makes
-    assert ASCII_SLOW_MS == 8.0
+    # pinned against the LITERALS: every assertion below compares a cost
+    # against these, so they all pass vacuously if the thresholds move, and
+    # the thresholds ARE the claim the panel makes
+    assert (ASCII_SLOW_MS, ASCII_SLOW_CLEAR, ASCII_WARMUP_FRAMES) == (8.0, 0.75, 8)
 
     host = _booted(tmp_path)
     ui, m, g = host.ui, host.mode, _gui()
     ui.dg_algo_idx = ALGOS.index("ASCII")
     frame = np.zeros((400, 400, 3), np.uint8)
-    for _ in range(10):
-        m.step(_white(), None, 1 / 30)
+
+    # driven with numbers, not with a stopwatch: what is pinned here is the
+    # rule, and "this machine renders ASCII in under 8 ms" is a perf test
+    # wearing a logic test's clothes — it fails on a busy box for reasons that
+    # have nothing to do with the rule
+    for _ in range(20):
+        m._ascii_verdict(1.2)
     assert m._ascii_ms < ASCII_SLOW_MS and m._ascii_slow is False
+    m.step(_white(), None, 1 / 30)             # the renderer the note reads
     clean = m._draw_grid_note(frame, g, 10, 10, 200)
 
     m._ascii_ms, m._ascii_slow = 9.3, True
     assert m._draw_grid_note(frame, g, 10, 10, 200) > clean
+
+    # a warm-up before either verdict is allowed: a cold cell size pays a
+    # one-off coverage scan that says nothing about the steady state
+    m._ascii_ms, m._ascii_frames, m._ascii_slow = None, 0, False
+    for _ in range(ASCII_WARMUP_FRAMES - 1):
+        m._ascii_verdict(40.0)
+    assert m._ascii_slow is False              # measured slow, not yet said
+    m._ascii_verdict(40.0)
+    assert m._ascii_slow is True
+
     # ...and the verdict follows the measurement back DOWN, so a setting that
     # is fast again stops being scolded without needing a rebuild to clear it
     for _ in range(40):
-        m.step(_white(), None, 1 / 30)
-    assert m._ascii_slow is False and m._ascii_ms < ASCII_SLOW_MS
+        m._ascii_verdict(1.2)
+    assert m._ascii_slow is False and m._ascii_ms < ASCII_SLOW_MS * ASCII_SLOW_CLEAR
 
 
 def test_the_ascii_perf_note_can_fire_during_the_drag_that_is_slow(tmp_path):
@@ -1211,9 +1229,11 @@ def test_ascii_swatch_previews_the_glyph_ramp(tmp_path):
 
 def test_ascii_step_is_not_slower_than_the_default_algorithm(tmp_path):
     """ASCII replaces the mode's Floyd-Steinberg default when selected; the
-    operator must not pay for the switch."""
-    import time
+    operator must not pay for the switch.
 
+    Already a ratio between two things timed in the same run, so the machine's
+    speed cannot decide it — but a MEAN can still be decided by a load spike
+    landing in one half and not the other, so both halves are best-of-N."""
     host = _booted(tmp_path, res=(640, 360))
     ui, m = host.ui, host.mode
     frame = np.random.default_rng(7).integers(0, 256, (360, 640, 3), np.uint8)
@@ -1223,9 +1243,6 @@ def test_ascii_step_is_not_slower_than_the_default_algorithm(tmp_path):
         ui.dg_scale = scale
         for _ in range(3):
             m.step(frame, None, 1 / 30)
-        t0 = time.perf_counter()
-        for _ in range(8):
-            m.step(frame, None, 1 / 30)
-        return (time.perf_counter() - t0) / 8
+        return best_ms(lambda: m.step(frame, None, 1 / 30))
 
     assert bench("ASCII", 45.0) < bench("Floyd-Steinberg", 72.0)

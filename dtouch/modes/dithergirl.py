@@ -583,25 +583,35 @@ class DitherGirlMode:
             rend.configure(scale, 1 << bits, palette, gamma, bias, True)
         rend.set_rows_req(scale)
         out = rend.render(gray_u8, contrast)
-        ms = (time.perf_counter() - t0) * 1000.0
+        self._ascii_verdict((time.perf_counter() - t0) * 1000.0)
+        return out
 
+    def _ascii_verdict(self, ms):
+        """Fold one measured step cost into the EMA and update the slow latch.
+
+        Split out of `_ascii_step` so the honesty rule can be tested by feeding
+        it numbers instead of by racing a stopwatch — a test that asserts "this
+        machine renders ASCII in under 8 ms" is a perf test wearing a logic
+        test's clothes, and it fails on a busy box for reasons that have
+        nothing to do with the rule it means to pin.
+
+        The verdict follows the measurement in BOTH directions, through a
+        hysteresis band so it cannot blink while an operator hovers the
+        threshold. It used to be latched-until-rebuild instead, which was the
+        same bug as timing only render(): a drag that retunes every frame
+        cleared the frame counter every frame, so the warm-up gate was
+        unreachable during the one interaction that was actually slow. Warm-up
+        still applies, because a cold cell size pays a one-off coverage scan
+        that says nothing about the steady state.
+        """
         self._ascii_ms = ms if self._ascii_ms is None else (
             0.85 * self._ascii_ms + 0.15 * ms)
         self._ascii_frames += 1
-        # The verdict follows the measurement in BOTH directions, with a
-        # hysteresis band so it cannot blink while an operator hovers the
-        # threshold. It used to be latched-until-rebuild instead, which was the
-        # same bug as timing only render(): a drag that retunes every frame
-        # cleared the frame counter every frame, so the warm-up gate below was
-        # unreachable during the one interaction that was actually slow.
-        # Warm-up still applies, because a cold cell size pays a one-off
-        # coverage scan that says nothing about the steady state.
         if self._ascii_frames >= ASCII_WARMUP_FRAMES:
             if self._ascii_ms > ASCII_SLOW_MS:
                 self._ascii_slow = True
             elif self._ascii_ms < ASCII_SLOW_MS * ASCII_SLOW_CLEAR:
                 self._ascii_slow = False
-        return out
 
     def step(self, frame_bgr, audio_levels, dt):
         """input frame → optional matte gate → gamma-correct dither at the
