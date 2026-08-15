@@ -266,6 +266,43 @@ def test_menu_unknown_key_hints(tmp_path):
     assert any("? for keys" in t for t in _hints(host))
 
 
+def test_no_key_in_the_menu_is_silent(tmp_path):
+    """The menu is the first screen anyone meets. Every digit, every arrow and
+    Enter must leave something behind — a hint, a moved selection, or a
+    committed card. `0` and `3`-`9` used to leave nothing at all."""
+    for ch in "0123456789":
+        host = _booted(tmp_path)
+        host._wire_keys()
+        host.menu.show("dithergirl")
+        host.hud.toasts._hints.clear()       # the boot hint is not an answer
+        before = (host.menu.sel, host.menu.open)
+        host._route_key(ord(ch))
+        moved = (host.menu.sel, host.menu.open) != before
+        assert moved or _hints(host), f"digit {ch} did nothing and said nothing"
+
+
+def test_the_reserved_card_names_itself_in_the_menu(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    i = next(i for i, c in enumerate(host.menu.cards) if not c.enabled)
+    host._route_key(ord(str(i + 1)))
+    assert host.menu.open is True
+    assert any("coming soon" in t for t in _hints(host))
+
+
+def test_arrows_navigate_the_menu_from_the_real_key_route(tmp_path):
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    sel = host.menu.sel
+    host._route_key(1)                       # down arrow (macOS 63233 & 0xFF)
+    assert host.menu.sel != sel
+    assert host.menu.open is True
+    host._route_key(0)                       # up arrow, back again
+    assert host.menu.sel == sel
+
+
 # ---------- camera that never yields: responsive, quittable ----------
 
 def test_camera_that_never_yields_keeps_keys_alive_and_quits(tmp_path,

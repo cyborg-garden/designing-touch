@@ -42,6 +42,22 @@ from .modes import REGISTRY
 
 MENU_SCRIM = 0.65               # DESIGN.md §5: menu scrim 65%
 
+# Arrow keys as they arrive here: cv2's waitKey code masked with `& 0xFF` by
+# the shell loop. macOS reports 63232..63235, which mask to these four.
+#
+# The menu is the first screen anyone meets and it is a row of cards, so the
+# arrows are the obvious thing to press — a child reaches for them before they
+# reach for `,` and `.`. They used to land on the unknown branch and hint
+# "? for keys", which is feedback pointing at a key map that does not mention
+# menu navigation, so it answered a question nobody asked.
+#
+# This does NOT make the arrows load-bearing (DESIGN.md §6.2 — their codes are
+# platform-dependent, and these values are macOS's). `,`/`.` remain the
+# documented navigation and the menu's own hint line still names them; on a
+# platform that reports something else the arrows fall through to the same
+# hint they gave before. Nothing is reachable ONLY by arrow.
+UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
+
 
 @dataclass
 class Card:
@@ -68,9 +84,11 @@ class Menu:
     `key()` returns ("switch", mode_id) when a card is committed,
     ("close", None) when the menu dismisses, ("quit", None) when q closes the
     menu and asks the shell to arm the quit confirm (DESIGN.md §3),
-    ("unknown", None) for keys the menu doesn't know (the shell hints —
-    silence-on-input is a bug there too), and (None, None) otherwise. Commit
-    and dismiss both close the menu; the shell routes the switch.
+    ("soon", title) when the key names the reserved card, ("unknown", None) for
+    keys the menu doesn't know (the shell hints — silence-on-input is a bug
+    there too), and (None, None) only when the key DID something visible on
+    screen. Commit and dismiss both close the menu; the shell routes the
+    switch.
 
     In the BOOT menu (`show(..., boot=True)`) the dismiss keys commit instead,
     so Esc/`m` return ("switch", mode_id) too — see the module docstring."""
@@ -120,6 +138,16 @@ class Menu:
         self.close()
         return "switch", self.cards[i].id
 
+    def _soon(self, i):
+        """Answer for a key that named a card that is on screen but not
+        selectable. `3` used to return (None, None) — the reserved 'coming
+        soon' card is RIGHT THERE and dashed, and pressing its number did
+        nothing at all, which reads as a broken menu rather than a card that
+        is not built yet. Anything that names no card is just unknown."""
+        if 0 <= i < len(self.cards):
+            return "soon", self.cards[i].title
+        return "unknown", None
+
     def key(self, code):
         """Route one cv2.waitKey code. See class docstring for returns."""
         if code == 27 or code in (ord("m"), ord("M")):   # Esc / m: back untouched
@@ -136,11 +164,11 @@ class Menu:
         if code in (13, 10):                             # Enter commits
             if self._enabled(self.sel):
                 return self._commit(self.sel)
-            return None, None
-        if code == ord(","):
+            return self._soon(self.sel)
+        if code in (ord(","), LEFT, UP):
             self.move(-1)
-            return None, None
-        if code == ord("."):
+            return None, None                            # the selection moved
+        if code in (ord("."), RIGHT, DOWN):
             self.move(+1)
             return None, None
         if 32 <= code <= 126:
@@ -149,7 +177,10 @@ class Menu:
                 i = int(ch) - 1
                 if self._enabled(i):
                     return self._commit(i)
-                return None, None
+                # `0` (i = -1) and every digit past the last card are simply
+                # unknown; a digit that names the reserved card gets the real
+                # answer instead of a deflection to the key map.
+                return self._soon(i)
             for i, c in enumerate(self.cards):           # letter selects-and-enters
                 if c.enabled and c.key and ch == c.key.lower():
                     return self._commit(i)

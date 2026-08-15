@@ -683,6 +683,10 @@ class Host:
                 self._menu_commit(mode_id, from_boot)
             elif action == "quit":
                 self.reg.dispatch(ord("q"))     # first press toasts (§6.2)
+            elif action == "soon":
+                # the reserved card is on screen and dashed: name it, rather
+                # than deflect to a key map that cannot explain it either
+                self.hud.toasts.hint(f"{mode_id.lower()} - coming soon")
             elif action == "unknown":
                 self.hud.toasts.hint("? for keys")
             return

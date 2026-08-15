@@ -245,6 +245,20 @@ hint line is part of the layout — `, . move - enter select - esc back`, or
 `, . move - enter select - q quit` at boot, where `esc back` would be a lie —
 and the real mode cards render their titles in CAPS per the sketch.
 
+*(Amended 2026-08-15.)* No key in the menu is silent. `0` and `3`–`9` used to
+do nothing at all: the digit branch mapped a key to `i = int(ch) - 1` and
+returned nothing to hint on when that index was not an enabled card, while `s`,
+`r`, TAB and every other unbound printable key hinted correctly. A digit that
+names the **reserved card** now says so in words (`flocking - coming soon`) —
+that card is on screen and dashed, so deflecting to a key map that cannot
+explain it either was the wrong answer; a digit that names no card at all hints
+`? for keys` like everything else. The **arrow keys** also move the selection,
+because the menu is a row of cards and the first screen anyone meets, and a
+child reaches for arrows long before `,`/`.`. That does not make them
+load-bearing (§6.2): `,`/`.` stay the documented navigation and stay on the
+hint line, the arrow codes here are macOS's masked values, and nothing in the
+menu is reachable only by arrow.
+
 Saving a look (`+ Save current look` row, or the `s` key): creates an
 auto-named look and immediately opens its rename box — naming is one flow —
 and two saves in one second must not collide (suffix on collision). Save,
