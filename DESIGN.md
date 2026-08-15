@@ -486,7 +486,13 @@ lowercase; an uppercase-only table would silently demand Shift).
 Param nudging without the panel: `,`/`.` select prev/next control in spec
 order (OSD shows name + value + bar), `-`/`=` nudge by 1/40 of range
 (`_`/`+` = ×5). Works in every overlay state. Arrow keys are deliberately not
-load-bearing (`waitKey` platform codes).
+load-bearing (`waitKey` platform codes) — but not load-bearing means they must
+say so, not vanish. The `? for keys` hint used to fire only for codes 32–126,
+and macOS masks the arrows to 0–3 (Enter 13, Backspace 8, Delete 127), so those
+seven keys did nothing anywhere with no feedback at all while every printable
+unbound key answered correctly (amended 2026-08-15). They hint now. `TAB` and
+`Esc` stay out of that window on purpose — the overlay stepper consumes them
+before dispatch — and so does `waitKey`'s idle code, which is no keypress.
 
 The walk skips any control the perform layer cannot take back (amended
 2026-08-15). Today that is exactly one: **output resolution**. It is a `Cycle`,

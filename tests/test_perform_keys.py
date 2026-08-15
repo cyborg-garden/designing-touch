@@ -332,6 +332,23 @@ def test_unknown_key_hints_question_mark():
     assert "? for keys" in r.hints()
 
 
+@pytest.mark.parametrize("code,name", [
+    (0, "up"), (1, "down"), (2, "left"), (3, "right"),
+    (13, "enter"), (10, "lf"), (8, "backspace"), (127, "delete"),
+])
+@pytest.mark.parametrize("state", [OverlayState.HIDDEN, OverlayState.HUD,
+                                   OverlayState.PANEL])
+def test_the_arrows_and_enter_answer_in_every_overlay_state(code, name, state):
+    """These did nothing, anywhere, silently — the hint window was 32..126 and
+    macOS masks the arrows to 0..3, Enter is 13, Backspace 8, Delete 127. They
+    stay not-load-bearing (DESIGN.md §6.2); they just stop pretending they are
+    not there."""
+    r = Rig()
+    r.overlay = state
+    r.press(code)
+    assert "? for keys" in r.hints(), f"{name} is silent in {state}"
+
+
 # ---------- param nudging + OSD (DESIGN.md §6.2) ----------
 
 def _nudgeables(ui):
