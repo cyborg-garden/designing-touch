@@ -245,3 +245,37 @@ def test_gui_toolkit_draws_standalone():
     (attr, x0, x1, lo, hi) = next(p for _, k, p in hot if k == "slider")
     assert attr == "amt" and lo == 0.0 and hi == 1.0 and x0 < x1
     assert img.any()
+
+
+def test_no_shipped_look_sits_outside_the_control_that_edits_it():
+    """The clamp above is a safety net, never a silent retune of our own looks.
+
+    Two shipped looks had already drifted outside their sliders: `ascii stream`
+    at scale 30 under a 45 floor, and `portrait` at reseed 0.16 under a 0.15
+    ceiling — the second only surfaced once apply_look started clamping, which
+    turned a look that had rendered at 0.16 since before the panel had ranges
+    into one that rendered at 0.15. A built-in is the authority on its own
+    value, so the range moved, not the look. This sweeps every mode so the next
+    drift cannot land silently.
+    """
+    from dtouch.modes import REGISTRY
+
+    offenders = []
+    for entry in REGISTRY:
+        mode = entry() if isinstance(entry, type) else type(entry)()
+        ranges = {}
+        for section in mode.panel_spec():
+            for w in section.widgets:
+                if isinstance(w, Slider):
+                    ranges[getattr(w, "save_key", None) or w.attr] = (w.lo, w.hi, w.label)
+        for look_name, cfg in mode.BUILTIN.items():
+            for key, val in cfg.items():
+                if key not in ranges or not isinstance(val, (int, float)):
+                    continue
+                lo, hi, label = ranges[key]
+                if not (lo <= float(val) <= hi):
+                    offenders.append(
+                        "%s/%s: %s=%r outside %s range (%s, %s)"
+                        % (mode.id, look_name, key, val, label, lo, hi))
+    assert not offenders, ("shipped looks outside their own controls:\n  "
+                           + "\n  ".join(offenders))

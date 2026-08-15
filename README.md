@@ -166,8 +166,9 @@ says `live`.
 
 - The ramp is **measured, not folklore**. Every candidate character is rasterised by the font
   that will draw it, at the size it will be drawn at, and sorted by its actual ink coverage.
-  The familiar `" .:-=+*#%@"` isn't monotonic under measurement — four of its nine steps go
-  backwards — which is why so much ASCII art has flat, muddy mid-tones.
+  The familiar `" .:-=+*#%@"` isn't monotonic under measurement — three or four of its nine
+  steps go backwards, depending on stroke weight — which is why so much ASCII art has flat,
+  muddy mid-tones.
 - **Bits** becomes how many characters are in the ramp (2 / 4 / 8 / 16).
 - **Scale** becomes character **rows**, not pixels — 45 rows is a 160×45 grid whether you're
   outputting 720p or 4K, so a look you author once stays the same look at any resolution. The

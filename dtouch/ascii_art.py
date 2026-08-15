@@ -16,8 +16,9 @@ alternative and looking at it:
 the font that will draw it, at the cell size it will be drawn at, and its ink
 coverage is the mean alpha of that render. The folkloric `" .:-=+*#%@"` is not
 monotonic under measurement (`-` is lighter than `:`, `%` and `@` are lighter
-than `#`): four of its nine steps go backwards, so its upper mid-tones collapse
-onto one mark and faces read flat.
+than `#`): three of its nine steps go backwards at stroke weight 1.0 and 3.0,
+four at 1.6 and 2.2 — so its upper mid-tones collapse onto one mark and faces
+read flat.
 
 **Hershey is a stroke font, so stroke weight is part of the ramp.** At a fixed
 thickness the densest glyph covers only ~0.38 of the cell, which caps the
@@ -265,7 +266,7 @@ def build_atlas(ramp, cell_w: int, cell_h: int, off_rgb, on_rgb,
     luminance is not quite the same number: it is computed through sRGB
     encode/decode on 8-bit tiles, and measured over (resolution x rows x n x
     palette) it goes backwards by one step in some combinations — including 4K
-    at the default 45 rows for ten of the eleven shipped palettes. The
+    at the default 45 rows for nine of the eleven shipped palettes. The
     magnitude is small and ``pos_lut`` still came out monotone, but np.interp
     requires an increasing x and a silent violation costs a tone somewhere in
     the ramp. So the ramp is re-sorted here, tiles and luminances together, and

@@ -48,7 +48,11 @@ RES_OPTIONS = [("720p", 1280, 720), ("1080p", 1920, 1080),
 _RANGES = {
     "fade": (0.50, 0.985), "exposure": (0.3, 4.0), "spark": (0.0, 1.0),
     "curl": (0.0, 1.0), "dot": (0.004, 0.020), "sens": (0.0, 3.0),
-    "count": (0.1, 1.0), "damp": (0.82, 0.985), "pull": (8.0, 40.0), "reseed": (0.005, 0.15),
+    # reseed's ceiling is 0.16, not 0.15, because the shipped `portrait` look is
+    # authored at 0.16. A built-in is the authority on its own value: when
+    # apply_look started clamping, a 0.15 ceiling silently retuned a look that
+    # had rendered at 0.16 since before the panel had ranges at all.
+    "count": (0.1, 1.0), "damp": (0.82, 0.985), "pull": (8.0, 40.0), "reseed": (0.005, 0.16),
     "video_mix": (0.05, 1.0),
     # MOTION (boids gains) and SIGNAL (circuit-bent) — see dtouch.flock / dtouch.circuit_bent
     "cohere": (0.0, 1.0), "align": (0.0, 1.0), "separate": (0.0, 1.0),
