@@ -241,7 +241,10 @@ def test_all_sections_open_still_reachable_by_scrolling():
     # 16 ms later; here nothing would ever redraw unless the test does.
     ui.draw(np.zeros((720, 1280, 3), np.uint8), {"status": ""})
     for _ in range(80):
-        ui.on_mouse(cv2.EVENT_MOUSEWHEEL, 1100, 300, -120)
+        # a real macOS wheel event: delta in (x, y), flags = modifiers only.
+        # Passing the delta AS flags is a shape no cv2 backend sends — see the
+        # module docstring of tests/test_overlay_scroll.py.
+        ui.on_mouse(cv2.EVENT_MOUSEWHEEL, 0, -3, 0)
     ui.draw(np.zeros((720, 1280, 3), np.uint8), {"status": ""})
     quit_bottom = next(r for r, k, _ in ui._hot if k == "quit")[3]
     assert quit_bottom <= 720

@@ -216,6 +216,7 @@ class OverlayUI:
         self.scroll = 0          # panel scroll offset (px) — content taller than the window
         self._content_h = 0      # measured column height from the last draw
         self._scroll_drag = None
+        self._thumb_drag = None  # grabbed the scrollbar thumb (not the content)
         self._tooltip = None
         self.pending_preset = None
         self.pending_save = False
@@ -405,7 +406,8 @@ class OverlayUI:
         g.box(frame, cr, HOVER if _in(cr, self.mouse) else BTN)
         g.text(frame, ">", w - g.S(33), g.S(30), INK, 0.55, 2)
         self._hot.append((cr, "collapse", None))
-        g.scrollbar(frame, px, h, self._content_h, self.scroll)
+        g.scrollbar(frame, px, h, self._content_h, self.scroll,
+                    step=g.S(imgui.SCROLL_STEP))
 
         # click feedback: flash the last-clicked control — border-only (a fill
         # would hide the row's own content, e.g. the armed delete's 'sure?'),
@@ -502,6 +504,15 @@ class OverlayUI:
         return (kind, payload)
 
     def on_mouse(self, event, x, y, flags, param=None):
+        if event in (cv2.EVENT_MOUSEWHEEL, cv2.EVENT_MOUSEHWHEEL):
+            # NOT a cursor position: on the Cocoa backend (x, y) IS the wheel
+            # delta, so assigning it to self.mouse teleports every hover
+            # highlight to the top-left corner mid-scroll. Decode and return.
+            if event == cv2.EVENT_MOUSEWHEEL and self.open:
+                self.scroll = imgui.wheel_scroll(
+                    self.scroll, self._S(imgui.SCROLL_STEP),
+                    imgui.wheel_delta(x, y, flags))
+            return
         self.mouse = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
             # Fixed chrome first: the collapse button floats ABOVE scrolled
@@ -512,38 +523,55 @@ class OverlayUI:
             for rect, kind, payload in self._hot:
                 if kind == "collapse" and _in(rect, (x, y)):
                     self._flash_key, self._flash = self._flash_id(kind, payload), 4
-                    self._activate(kind, payload, x)
+                    self._activate(kind, payload, x, y)
                     return
             for rect, kind, payload in self._hot:
                 if kind == "collapse":
                     continue
                 if _in(rect, (x, y)):
                     self._flash_key, self._flash = self._flash_id(kind, payload), 4
-                    self._activate(kind, payload, x)
+                    self._activate(kind, payload, x, y)
                     return
             if self.open and x >= self.w - self._panel_px:
                 self._scroll_drag = (y, self.scroll)   # empty panel area: drag to scroll
-        elif event == cv2.EVENT_MOUSEWHEEL and self.open:
-            # flags>0 = wheel up (clamped in draw)
-            self.scroll = imgui.wheel_scroll(self.scroll, self._S(40), flags)
         elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
             if self._drag:
                 attr, x0, x1, lo, hi = self._drag
                 t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
                 setattr(self, attr, lo + t * (hi - lo))
+            elif self._thumb_drag:
+                # the THUMB follows the finger (imgui's convention block)
+                y0, s0, travel, span = self._thumb_drag
+                self.scroll = imgui.thumb_scroll(s0, y0, y, travel, span)
             elif self._scroll_drag:
+                # the CONTENT follows the finger (imgui's convention block)
                 y0, s0 = self._scroll_drag
                 self.scroll = imgui.drag_scroll(s0, y0, y)
         elif event == cv2.EVENT_LBUTTONUP:
             self._drag = None
             self._scroll_drag = None
+            self._thumb_drag = None
 
-    def _activate(self, kind, payload, x):
+    def _activate(self, kind, payload, x, y=0):
         """Generic activation: toggles flip their attr, cycles rotate through
         their options, sliders set their attr from the track position, actions
         post to their mailbox. Routing comes from the spec (set_spec's maps)."""
         if kind != "del" and self._del_armed:
             self._del_armed = None       # any other click disarms a pending delete
+        if kind == "scroll":
+            # a scrollbar arrow: payload is the signed step (down = positive =
+            # show me what is below — imgui's convention block). draw() clamps.
+            self.scroll += payload
+            return
+        if kind == "scrolltrack":
+            ty0, track_h, thumb_h, span, page = payload
+            travel = track_h - thumb_h
+            top = ty0 + int(travel * (min(max(self.scroll, 0), span) / span))
+            if top <= y <= top + thumb_h:
+                self._thumb_drag = (y, self.scroll, travel, span)
+            else:
+                self.scroll += page if y > top else -page
+            return
         if kind == "del":
             self._del_armed, confirmed = imgui.arm_delete(self._del_armed, payload)
             if confirmed:
