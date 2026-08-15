@@ -371,9 +371,10 @@ class AsciiRenderer:
 
     **Retune with :meth:`configure`, do not construct a second renderer**, for
     anything short of an output-resolution change. The frame buffer dominates
-    setup — at 4K a warm construction measured 35.0 ms of which 31.9 ms was the
+    setup — at 4K a warm construction measured 35 ms of which 32 ms was the
     24 MB allocate-and-clear — so building a whole renderer for a palette nudge
-    turned a Hue drag into 46 ms/frame (22 fps) against 7 ms idle. `configure`
+    turned a Hue drag into 24.8 ms/frame against 4.1 ms idle (both measured in
+    one process; see DitherGirlMode._ascii_step for the table). `configure`
     keeps the buffer, and rebuilds only the parts a change actually
     invalidates: the ramp needs the grid and n, the atlas needs the ramp and
     the palette, the LUT needs the atlas and gamma, the strided view and the

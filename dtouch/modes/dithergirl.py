@@ -552,9 +552,18 @@ class DitherGirlMode:
 
         The renderer is RETUNED in place for a settings change and rebuilt only
         for a new output resolution. It used to be rebuilt for both, and the
-        frame buffer made that ruinous: a Hue drag at 4K measured 46 ms/frame
-        against 7 ms idle, because every frame allocated and cleared a fresh
-        24 MB buffer for a change that only invalidates the atlas.
+        frame buffer made that ruinous, because every frame allocated and
+        cleared a fresh 24 MB buffer for a change that only invalidates the
+        atlas. Both paths measured in one process, mean ms/frame:
+
+                        idle           Hue drag        Scale drag
+            720p    0.63 -> 0.64    3.14 ->  0.88    3.38 ->  2.49
+            1080p   1.25 -> 1.25    6.59 ->  1.60    7.21 ->  4.23
+            4K      4.13 -> 4.15   24.80 ->  4.87   29.11 -> 10.76
+
+        Idle is untouched, as it must be — this changes what an EDIT costs, not
+        what a frame costs. A Scale drag still pays a real coverage scan for
+        each new cell size, which is why the note below matters.
 
         The whole step is timed, rebuild included (§4.2 perf honesty). Timing
         only `render()` measured the one part of an edit that was never the
