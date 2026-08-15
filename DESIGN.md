@@ -493,7 +493,7 @@ lowercase; an uppercase-only table would silently demand Shift).
 | `r` | `record.toggle` | red dot; filename toast on stop |
 | `v` | `video_bg.toggle` (Particles) | toast |
 | `i` | `debug.toggle` — fps/frame-time/res HUD line (graft: Contract) | HUD line |
-| `?` | `help.overlay` — live key map over scrim; any key closes | — |
+| `?` | `help.overlay` — live key map on a plate over the scrim; any key closes | — |
 | `q` | quit: first press toasts `q again to quit`, second within 2 s quits | toast |
 | `s` | `preset.save` (PANEL state only — edit action) | name toast |
 
@@ -529,6 +529,16 @@ showed a completely normal instrument — bottom hint still reading
 `Esc` got out, and nothing said so. The shell now cancels any rename box that
 was not painted on the frame just composed: visibility is the rule, not a list
 of routes, so any future way to take the panel off screen is covered.
+
+**The key map sits on a plate** (amended 2026-08-15). The 65% scrim is a
+multiply, so it darkens the picture without flattening it: a 1-bit output is 0
+vs 255, and 65% of that is 0 vs 89 — still hard-edged, still full-contrast, and
+at the same spatial scale as the glyph strokes. Measured over pure 1-bit noise,
+the ground under the table swung 0–89 (std 44.5) and gave white ink only 2.9×
+contrast against the brightest pixel it sat on. The block now gets the panel's
+own ground (PANEL at 0.86) sized to the table: ground 28–40 (std 6.0), worst
+case 6.4×. The scrim stays, so the picture is still visibly there around the
+plate and help never reads as the instrument stopping.
 
 **Rename typing consumes every key except `Esc`** (which cancels the rename and
 nothing else). This is the explicit carve-out rule (judge finding: "panic works

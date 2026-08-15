@@ -185,6 +185,35 @@ def test_the_key_map_holds_full_size_type_at_the_shipped_row_count():
         assert len({p[2] for p in placed}) == 2
 
 
+def test_the_key_map_is_readable_over_a_1_bit_picture():
+    """The scrim is a MULTIPLY, so it darkens the picture without flattening
+    it: a 1-bit output is 0 vs 255, and 65% of that is 0 vs 89 — still hard
+    edges, still full contrast, at the same spatial scale as the glyph
+    strokes. The table stayed legible but fought the ground the whole time,
+    and this is the screen that teaches the keys, so it has to read over ANY
+    output. Measured on pure 1-bit noise, in a strip of the block's padding
+    where no glyph ever lands: the ground swung 0..89 (std 44.5), giving white
+    ink only 2.9x contrast against the brightest pixel it sat on.
+    """
+    rows = [("%d" % i, "Row number %d" % i) for i in range(18)]
+    w, h = 1920, 1080
+    rng = np.random.default_rng(1)
+    img = np.repeat(((rng.random((h, w)) > 0.5) * 255).astype(np.uint8)[:, :, None],
+                    3, axis=2)
+    _org, _tpx, px, placed = H.help_layout(w, h, rows)
+    kx = min(p[2] for p in placed)
+    ys, ye = placed[0][4], placed[-1][4]
+    strip = (slice(ys, ye), slice(kx - int(0.8 * px), kx - 3))
+
+    draw_help(img, rows)
+    ground = img[strip]
+    assert ground.std() < 12.0, "the key table still sits on a 1-bit checkerboard"
+    assert ground.max() < 70, f"brightest ground pixel {ground.max()} fights white ink"
+    # ...and the plate is a plate, not a blackout: the picture is still there
+    # around it, so help never looks like the instrument stopped.
+    assert img[:ys // 2].std() > 20.0
+
+
 def test_draw_help_takes_the_mode_accent():
     """DESIGN.md §5 one-accent rule: help renders in the ACTIVE mode's accent,
     not a hard-coded green."""
