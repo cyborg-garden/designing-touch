@@ -149,8 +149,9 @@ The same camera (or a still, via `--still photo.jpg`) run through the dither pip
   (30–720 px, default 72). Big cells are the look; they're also what survives streaming
   compression. Drag Scale up with an error-diffusion algorithm active and it says so in amber
   rather than quietly dropping frames.
-- **Palette** — eleven two-colour pairs: white-on-black, black-on-white, amber, green
-  phosphor, cyan, magenta, ice, blood, gameboy, sepia and hi-vis. Every one was measured for
+- **Palette** — ten two-colour pairs: mono, amber, green phosphor, cyan, magenta, ice,
+  blood, gameboy, sepia and hi-vis, plus an **Invert** switch that flips the ink and the
+  background of any of them. Every one was measured for
   contrast between its own two ends and none ships under 4.5:1, because this is aimed at a
   projector rather than a monitor. Plus **Hue** and **Tint** — a direction and an amount, so
   you can dial a palette during a set instead of hunting a longer list. At Tint 0 every

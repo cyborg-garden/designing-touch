@@ -298,10 +298,10 @@ dtouch · DITHER GIRL
 - TONE             ← Bits (1–4, int) · Gamma toggle (default ON) · Bias cycle
                      auto/light/dark · Contrast · Scale (30–720, default 72) ·
                      grid readout (ASCII only)
-- PALETTE          ← eleven two-colour pairs, each shipped only if its own
-                     off/on measures ≥ 4.5:1 (§5): white-on-black ·
-                     black-on-white · amber · green phosphor · cyan · magenta ·
-                     ice · blood · gameboy · sepia · hi-vis — plus Hue and Tint
+- PALETTE          ← ten two-colour pairs, each shipped only if its own off/on
+                     measures ≥ 4.5:1 (§5): mono · amber · green phosphor ·
+                     cyan · magenta · ice · blood · gameboy · sepia · hi-vis —
+                     plus an **Invert** toggle, and Hue and Tint
 - SIGNAL   (G)     ← shell rack minus dither row
 ──────────────────
 Sound react (A) · Sens · Record (R) · Menu (M) · Quit
@@ -332,6 +332,40 @@ than hiding it:
   DIM readout under the slider gives the live grid (`grid 160 x 45 chars - cell
   8x16`), and says `cell floor - characters stay legible` once the legibility
   floor is what is setting the cell size and the slider has run out of room.
+
+**Invert** (amended 2026-08-15 — the user's call: "instead of having white on
+black or black on white couldn't any of the pallets just have an invert
+switcher?"). `white-on-black` and `black-on-white` were one palette entered
+twice: which end carries the ink is orthogonal to the hue, so spending two of
+eleven slots on it bought a flip for one palette and denied it to the other
+nine. They collapse to `mono` plus a toggle that flips ANY palette, composing
+with Hue/Tint, the swatch strip, ASCII (where it flips ink and ground for
+free — the glyph ramp is measured against whatever pair it is handed) and the
+matte gate.
+
+It saves and recalls like every other control, and it is `apply="reset"`
+rather than a Toggle's default `apply="keep"`: Invert is part of the picture,
+not a live rig switch, so a look that does not name it must land un-inverted.
+
+The retired names are accepted on load forever, mapping to `mono` + invert
+off/on, and the migration is bit-for-bit: `mono` inverted is the AUTHORED pair
+`black-on-white` shipped with (245 paper, 16 ink, 17.45:1), not the plain swap
+of `mono`'s own 0/255 — the two monochrome palettes were never each other's
+mirror, and a naive swap would have silently re-toned every look that named
+`black-on-white`, `newsprint` included.
+
+**Whole-number sliders** (same amendment — "maybe some sliders are actually
+only whole numbers?"). A control whose engine cannot use a fraction declares
+its quantum in the spec (`Slider.step`, and `Slider.snap` because Bits and
+Scale round while Crush truncates), and the one number it holds is what the
+panel prints, what the OSD and the spec-derived HUD line print, and what the
+engine consumes. Quantised: **Bits** (both racks, 4 settings), **Scale**
+(whole working pixels / whole character rows), **Crush** (whole output bits,
+`int()`), **Hue** (whole degrees — finer than the track can resolve anyway).
+Deliberately NOT quantised: Chroma and Drift, which look like pixel counts but
+are the amplitudes of a per-frame draw that then lands on a whole pixel — the
+fraction is used, so the tooltip says where the whole numbers come in instead
+of the slider pretending to be coarser than it is.
 
 **Hue / Tint** (delivering §4.2's "two-color ramps later"): two sliders rather
 than a longer list, because a list of named pairs cannot be dialled during a

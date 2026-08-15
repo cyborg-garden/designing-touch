@@ -29,7 +29,7 @@ from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
                     in_rect as _in)
 from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
-                        PresetList, Section)
+                        PresetList, Section, nudge_to, quantise)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
@@ -59,6 +59,19 @@ _RANGES = {
     "chroma": (0.0, 60.0), "drift": (0.0, 40.0), "crush": (0.0, 8.0),
 }
 
+# Sliders whose engine cannot use a fraction, and how a raw value lands on the
+# whole number it will actually be used as (panelspec.Slider.step/snap). The
+# rest of the rack is genuinely continuous and stays so.
+#
+# Crush TRUNCATES rather than rounds because the shell consumes it as
+# `int(ui.crush)` — see dtouch/shell.py's SIGNAL sync. Matching that here is
+# what makes the change invisible to already-saved looks: a stored Crush of
+# 2.92 has always rendered at bit depth 2, it just used to *read* "3".
+_QUANTISED = {
+    "sig_bits": (1.0, "round"),   # int(clip(round(v), 1, 4)) — 4 real settings
+    "crush":    (1.0, "floor"),   # int(v) — whole output bits, 0 = off
+}
+
 _SLIDERS = [
     ("Trails", "fade", "How long particle motion trails linger before fading."),
     ("Glow", "exposure", "Overall brightness and bloom of the particles."),
@@ -84,6 +97,11 @@ _SAVE_KEYS = {"curl": "curl_amp", "dot": "base_size", "reseed": "reseed_frac",
 def _slider_spec(label, attr, tip, **kw):
     lo, hi = _RANGES[attr]
     kw.setdefault("save_key", _SAVE_KEYS.get(attr))
+    if attr in _QUANTISED:
+        step, snap = _QUANTISED[attr]
+        kw.setdefault("step", step)
+        kw.setdefault("snap", snap)
+        kw.setdefault("fmt", ".0f")
     return Slider(label, attr, lo, hi, tip=tip, **kw)
 
 
@@ -137,18 +155,31 @@ def build_signal_section():
             # quality controls grow the rack; a mode that claims them —
             # Dither Girl owns ALL dither quality — hides them)
             Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
+                   step=_QUANTISED["sig_bits"][0],
+                   snap=_QUANTISED["sig_bits"][1],
                    tip="Dither bit depth. 1 = pure two-tone; higher keeps "
-                       "more shades."),
+                       "more shades. Whole numbers only - there are four "
+                       "settings."),
             Toggle("Gamma", "sig_gamma", save_key="gamma",
                    tip="Dither in linear light so mid-tones keep their "
                        "perceived brightness. Off = the crushed retro look."),
             Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias"),
+            # Chroma and Drift look like pixel counts and are not: each is the
+            # AMPLITUDE of a per-frame random draw that then lands on a whole
+            # pixel. The fraction is used — 12.4 and 12.6 are different bleeds
+            # — so the slider stays continuous and the tooltip says where the
+            # whole numbers come in, rather than the panel pretending the
+            # control is coarser than it is (DESIGN.md §4.1: the human
+            # explanation lives in the `i` tooltip).
             _slider_spec("Chroma", "chroma",
-                         "Colour bleed: red and blue drift apart, slowly."),
+                         "Colour bleed: red and blue drift apart, slowly. "
+                         "This is how far they can go; each frame lands on a "
+                         "whole pixel."),
             _slider_spec("Drift", "drift",
-                         "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears."),
+                         "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears. "
+                         "This is the most any row can slip, in whole pixels."),
             _slider_spec("Crush", "crush",
-                         "Hard bit-depth reduction. 0 = off."),
+                         "Hard bit-depth reduction, in whole bits. 0 = off."),
             Toggle("Scanlines", "scanlines", on_text="on"),
         ], open=False, gap=6, store="signal")
 
@@ -276,6 +307,7 @@ class OverlayUI:
         self._toggles = {}    # hit key -> Toggle
         self._cycles = {}     # hit key -> Cycle
         self._sliders = {}    # attr -> Slider
+        self._quant = {}      # attr -> Slider, for the sliders with a quantum
         for wdg in self.iter_widgets():
             if isinstance(wdg, Toggle):
                 self._toggles[wdg.attr] = wdg
@@ -286,6 +318,36 @@ class OverlayUI:
                 self._cycles[wdg.hit_key] = wdg
             elif isinstance(wdg, Slider):
                 self._sliders[wdg.attr] = wdg
+                if wdg.step:
+                    self._quant[wdg.attr] = wdg
+        # A spec swap (mode switch) can bind a quantum to an attr that is
+        # already carrying an off-grid value from before — land it now, so the
+        # panel never draws a number the engine is not using.
+        for attr, wdg in self._quant.items():
+            if hasattr(self, attr):
+                setattr(self, attr, quantise(wdg, getattr(self, attr)))
+
+    def __setattr__(self, name, value):
+        """Quantised sliders (DESIGN.md §4.1/§4.2) land on their own step here
+        rather than at each of the four places that write one.
+
+        Sliders, the nudge keys, preset apply and a mode's seeded defaults all
+        write plain attributes on this object, and only one of them — the
+        panel's own drag — lives in this file. Putting the rule at the write
+        means there is exactly one answer to "what value does this control
+        hold", which is the whole point: the readout, the OSD, the spec-derived
+        HUD line and the engine all read that one number.
+
+        `nudge_to` (not `quantise`) is the rule, so a 1/40-of-range nudge on a
+        four-step slider still moves it; see its docstring for why that cannot
+        misfire on the writers that mean an exact value.
+        """
+        quant = self.__dict__.get("_quant")
+        wdg = quant.get(name) if quant else None
+        if wdg is not None and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            value = nudge_to(wdg, value, self.__dict__.get(name))
+        object.__setattr__(self, name, value)
 
     def iter_widgets(self):
         """Every widget in the spec, sections flattened (spec order)."""
@@ -540,9 +602,7 @@ class OverlayUI:
                 self._scroll_drag = (y, self.scroll)   # empty panel area: drag to scroll
         elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
             if self._drag:
-                attr, x0, x1, lo, hi = self._drag
-                t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-                setattr(self, attr, lo + t * (hi - lo))
+                self._set_from_track(self._drag, x)
             elif self._thumb_drag:
                 # the THUMB follows the finger (imgui's convention block)
                 y0, s0, travel, span = self._thumb_drag
@@ -555,6 +615,23 @@ class OverlayUI:
             self._drag = None
             self._scroll_drag = None
             self._thumb_drag = None
+
+    def _set_from_track(self, payload, x):
+        """Turn a mouse x on a slider's track into that slider's value.
+
+        Quantised the EXACT way (`quantise`, not `nudge_to`): a drag is a
+        request for the value under the finger, so it must land on the nearest
+        step and stay there while the finger wanders inside it — a drag that
+        ratcheted a step per mouse-move event would be unusable. It is also
+        what keeps the nudge rule honest: this write arrives already on the
+        grid, so "the write did not move it" can only mean the finger is still
+        inside the same step.
+        """
+        attr, x0, x1, lo, hi = payload
+        t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
+        val = lo + t * (hi - lo)
+        wdg = self._quant.get(attr)
+        setattr(self, attr, quantise(wdg, val) if wdg is not None else val)
 
     def _activate(self, kind, payload, x, y=0):
         """Generic activation: toggles flip their attr, cycles rotate through
@@ -598,10 +675,8 @@ class OverlayUI:
             wdg = self._cycles[key]
             setattr(self, wdg.attr, (getattr(self, wdg.attr) + d) % len(wdg.options))
         elif kind == "slider":
-            attr, x0, x1, lo, hi = payload
             self._drag = payload
-            t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-            setattr(self, attr, lo + t * (hi - lo))
+            self._set_from_track(payload, x)
         elif kind == "section":
             self.sections[payload] = not self.sections.get(payload, True)
         elif kind in self._toggles:

@@ -17,8 +17,9 @@ import dtouch.presets as _presets
 from dtouch import imgui
 from dtouch.commands import CommandRegistry
 from dtouch.modes import REGISTRY, mode_by_id
-from dtouch.modes.dithergirl import (ACCENT, ALGOS, MATTES_DG, PALETTES,
-                                     DitherGirlMode)
+from dtouch.modes.dithergirl import (ACCENT, ALGOS, AUTHORED_INVERSE,
+                                     LEGACY_PALETTES, MATTES_DG, PALETTES,
+                                     DitherGirlMode, palette_pair)
 from dtouch.modes.particles import MATTE_H, MATTE_W, ParticlesMode
 from dtouch.panelspec import Cycle, Readout, Section, Slider, Toggle
 from dtouch.shell import Host
@@ -231,17 +232,19 @@ def test_palette_map_endpoints():
     assert out[0, 0].tolist() == [0, 0, 0] and out[0, 1].tolist() == [255, 255, 255]
 
 
-@pytest.mark.parametrize("palette,white_out,black_out", [
-    ("white-on-black", (255, 255, 255), (0, 0, 0)),
-    ("black-on-white", (16, 16, 16), (245, 245, 245)),
-    ("amber", (255, 176, 0), (24, 12, 0)),
-    ("green phosphor", (80, 255, 120), (0, 20, 8)),
+@pytest.mark.parametrize("palette,invert,white_out,black_out", [
+    ("mono", False, (255, 255, 255), (0, 0, 0)),
+    ("mono", True, (16, 16, 16), (245, 245, 245)),
+    ("amber", False, (255, 176, 0), (24, 12, 0)),
+    ("amber", True, (24, 12, 0), (255, 176, 0)),
+    ("green phosphor", False, (80, 255, 120), (0, 20, 8)),
 ])
-def test_step_maps_on_off_levels_to_the_palette(tmp_path, palette,
+def test_step_maps_on_off_levels_to_the_palette(tmp_path, palette, invert,
                                                 white_out, black_out):
     host = _booted(tmp_path)
     ui, m = host.ui, host.mode
     ui.dg_palette_idx = list(PALETTES).index(palette)
+    ui.dg_invert = invert
     out = m.step(_white(), None, 1 / 30)
     assert (out.reshape(-1, 3) == np.array(white_out, np.uint8)).all()
     out = m.step(_black(), None, 1 / 30)
@@ -554,7 +557,7 @@ def test_capture_includes_tone_and_nested_signal_minus_dither(tmp_path):
     ui.chroma = 25.0
     cfg = host._capture_cfg()
     assert cfg["algorithm"] == "Bayer" and cfg["bits"] == 3.0
-    assert cfg["palette"] == "white-on-black"
+    assert cfg["palette"] == "mono" and cfg["invert"] is False
     assert cfg["signal"]["chroma"] == 25.0 and cfg["signal"]["glitch"] is True
     assert "dither" not in cfg["signal"], "the suppressed row must not serialize"
     assert "input_idx" not in cfg and "res" not in cfg   # save=False widgets
@@ -785,14 +788,212 @@ def test_palettes_are_ascii_named_and_well_formed():
             assert len(c) == 3 and all(0 <= v <= 255 for v in c)
 
 
-def test_the_first_four_palettes_are_unchanged():
+def test_every_palette_reads_at_projector_distance_inverted_too():
+    """Invert must not be able to ship an unreadable pair. For nine palettes
+    that is arithmetic (a swap is the same two colours), but `mono`'s inverse
+    is authored, so it is a separate measurement, not a corollary."""
+    for name in PALETTES:
+        off, on = palette_pair(name, True)
+        assert _contrast(off, on) >= 4.5, f"{name} inverted is too flat"
+
+
+# ---------- Invert, and the migration off the retired pair (§4.2) ----------
+
+def test_invert_swaps_the_pair_for_every_palette_but_mono():
+    for name, (off, on) in PALETTES.items():
+        if name in AUTHORED_INVERSE:
+            continue
+        assert palette_pair(name, True) == (on, off)
+        assert palette_pair(name, False) == (off, on)
+
+
+def test_mono_inverted_is_the_authored_pair_not_the_naive_swap():
+    """The two monochrome palettes this replaced were never each other's
+    mirror: white-on-black was pure 0/255, black-on-white deliberately
+    softened to 245/16. A naive swap would silently re-tone every look that
+    named `black-on-white` — the `newsprint` built-in included."""
+    assert palette_pair("mono", True) == ((245, 245, 245), (16, 16, 16))
+    assert palette_pair("mono", True) != PALETTES["mono"][::-1]
+
+
+def test_the_retired_palette_names_are_still_accepted():
+    """DESIGN.md §9: presets are the one user-data-loss surface, and a Cycle
+    silently IGNORES a stored value it does not recognise — so without this a
+    look naming a retired palette would have loaded with whatever palette
+    happened to be live, quietly, forever."""
+    assert LEGACY_PALETTES["white-on-black"] == {"palette": "mono",
+                                                 "invert": False}
+    assert LEGACY_PALETTES["black-on-white"] == {"palette": "mono",
+                                                "invert": True}
+    pal = next(w for w in DitherGirlMode().panel_spec()[4].widgets
+               if getattr(w, "label", None) == "palette")
+    assert pal.legacy is LEGACY_PALETTES
+
+
+@pytest.mark.parametrize("legacy,pair", [
+    ("white-on-black", ((0, 0, 0), (255, 255, 255))),
+    ("black-on-white", ((245, 245, 245), (16, 16, 16))),
+])
+def test_a_look_naming_a_retired_palette_renders_identically(tmp_path, legacy,
+                                                             pair):
+    """The acceptance test for the whole change: a stored look that says
+    `white-on-black` / `black-on-white` must reach the exact pair it used to,
+    from any live state — including one where Invert is currently the WRONG
+    way round, which is the case a `apply="keep"` Invert would have failed."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    for live_invert in (False, True):
+        ui.dg_invert = live_invert
+        ui.dg_palette_idx = list(PALETTES).index("amber")
+        assert host._apply_look("legacy", {"palette": legacy})
+        assert m._palette() == pair
+        assert m._palette_name() == "mono"
+
+
+# The three looks below are the SHAPE of what a real presets.json written by
+# the pre-change build contains: a retired palette name, and Bits / Scale /
+# Crush carrying the fractional values a mouse drag produces (the track is
+# ~118 px wide, so every dragged value is a 118th of the range). Their
+# "engine" numbers were read off the PRE-change code and pasted here, so this
+# test fails if the collapse or the quantisation ever moves a stored look's
+# picture — which is the whole promise of both halves of this change.
+_PRE_CHANGE_LOOKS = [
+    (dict(algorithm="Bayer", bits=1.076271186440678, gamma=True, bias="auto",
+          contrast=0.7627118644067796, scale=508.3474576271186,
+          palette="green phosphor", matte="off",
+          signal=dict(crush=2.9152542372881354)),
+     dict(bits=1, height=508, crush=2, pair=((0, 20, 8), (80, 255, 120)))),
+    (dict(algorithm="Floyd-Steinberg", bits=1.8389830508474576, gamma=True,
+          bias="auto", contrast=1.0, scale=268.0932203389831,
+          palette="white-on-black", matte="off",
+          signal=dict(crush=1.7627118644067796)),
+     dict(bits=2, height=268, crush=1, pair=((0, 0, 0), (255, 255, 255)))),
+    (dict(algorithm="Blue noise", bits=1.0, gamma=True, bias="auto",
+          contrast=1.6, scale=56.0, palette="white-on-black", hue=0.0,
+          tint=0.0, matte="off", signal=dict(crush=2.1016949152542375)),
+     dict(bits=1, height=56, crush=2, pair=((0, 0, 0), (255, 255, 255)))),
+]
+
+
+@pytest.mark.parametrize("cfg,engine", _PRE_CHANGE_LOOKS)
+def test_a_pre_change_look_reaches_the_same_engine_values(tmp_path, cfg,
+                                                          engine):
+    """Migration is lossless where it counts: not "the file still loads" but
+    "every number the RENDER consumes is the one it consumed before".
+
+    The stored fractions are deliberately kept in the fixture rather than
+    pre-rounded, because that is what is actually on disk: the panel used to
+    print `1.84` and `2.92` while the engine had already made them 2 and 1.
+    Quantising moved the READOUT onto the engine's number, and this pins that
+    it did not move the engine.
+    """
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    assert host._apply_look("stored", cfg)
+    assert m._bits() == engine["bits"]
+    assert int(np.clip(round(float(ui.dg_scale)), 30, 720)) == engine["height"]
+    assert int(ui.crush) == engine["crush"]
+    assert m._palette() == engine["pair"]
+    # and the panel/OSD now print exactly those numbers, with no fraction left
+    for attr in ("dg_bits", "dg_scale", "crush"):
+        assert float(getattr(ui, attr)).is_integer(), attr
+
+
+def test_a_look_that_never_heard_of_invert_lands_un_inverted(tmp_path):
+    """Invert is apply="reset", not a Toggle's default "keep": it is part of
+    the picture, so recalling a look saved before Invert existed must not
+    inherit whatever the live toggle happened to be."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_invert = True
+    assert host._apply_look("old", {"palette": "green phosphor",
+                                    "algorithm": "Bayer"})
+    assert ui.dg_invert is False
+    assert m._palette() == PALETTES["green phosphor"]
+
+
+def test_invert_round_trips_through_capture_and_apply(tmp_path):
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.dg_invert, ui.dg_palette_idx = True, list(PALETTES).index("ice")
+    cfg = host._capture_cfg()
+    assert cfg["invert"] is True and cfg["palette"] == "ice"
+    ui.dg_invert = False
+    assert host._apply_look("x", cfg)
+    assert ui.dg_invert is True
+
+
+def test_invert_composes_with_tint(tmp_path):
+    """Tint steers the pair the operator is looking at: inverting then tinting
+    is a plain swap for nine palettes, and for mono it must tint the AUTHORED
+    inverse rather than the naive one."""
+    from dtouch.modes.dithergirl import tinted_palette
+
+    a = tinted_palette("amber", 120.0, 0.6, True)
+    b = tinted_palette("amber", 120.0, 0.6, False)
+    assert a == b[::-1]
+    mono_inv = tinted_palette("mono", 200.0, 0.5, True)
+    assert mono_inv != tinted_palette("mono", 200.0, 0.5, False)[::-1]
+    assert tinted_palette("mono", 0.0, 0.0, True) == AUTHORED_INVERSE["mono"]
+
+
+def test_invert_composes_with_the_matte_gate(tmp_path):
+    """Invert paints the dithered SUBJECT; the ungated background is still the
+    raw camera (or black), which is the matte's own contract."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_matte_idx = MATTES_DG.index("luma")
+    ui.dg_matte_black = True
+    ui.dg_palette_idx, ui.dg_invert = list(PALETTES).index("mono"), True
+    out = m.step(_white(), None, 1 / 30)
+    assert out.shape == (host.res[1], host.res[0], 3)
+    assert out.max() > 0
+
+
+def test_invert_changes_the_swatch_strip(tmp_path):
+    """The strip previews the live pair (§4.2), so it must be keyed on Invert
+    — a cache that ignored it would show yesterday's ramp."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    frame = np.zeros((host.res[1], host.res[0], 3), np.uint8)
+    ui.open = True
+    ui.draw(frame.copy(), {"status": ""})
+    before = m._swatch_cache.copy()
+    ui.dg_invert = True
+    ui.draw(frame.copy(), {"status": ""})
+    assert not np.array_equal(before, m._swatch_cache)
+
+
+def test_invert_flips_ink_and_ground_under_ascii(tmp_path):
+    """ASCII needed no code for Invert — it measures the pair it is handed —
+    but that is a claim, so it is pinned: the same frame under mono and mono
+    inverted must come back with its ink and its ground exchanged."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_palette_idx = list(PALETTES).index("mono")
+    # A white frame picks the DENSEST glyph either way — what changes is which
+    # colour that ink is. Un-inverted it is white ink on a black ground, so the
+    # frame reads dark; inverted it is black ink on paper, so it reads light.
+    ui.dg_invert = False
+    ink_on_black = m.step(_white(), None, 1 / 30).mean()
+    ui.dg_invert = True
+    ink_on_paper = m.step(_white(), None, 1 / 30).mean()
+    assert ink_on_paper > ink_on_black, "invert must exchange ink and ground"
+    # and the paper is the authored 245, not a naive 255: a black frame picks
+    # the sparsest glyph, i.e. bare ground
+    out = m.step(_black(), None, 1 / 30)
+    assert out.max() == 245
+
+
+def test_the_first_palettes_are_unchanged():
     """Looks saved before the palette set grew name their palette by VALUE;
-    renaming or re-toning one of the original four silently re-colours every
-    look that used it."""
-    assert list(PALETTES)[:4] == ["white-on-black", "black-on-white", "amber",
-                                  "green phosphor"]
-    assert PALETTES["white-on-black"] == ((0, 0, 0), (255, 255, 255))
-    assert PALETTES["black-on-white"] == ((245, 245, 245), (16, 16, 16))
+    renaming or re-toning one of the originals silently re-colours every look
+    that used it. `mono` and `mono` inverted carry the exact pairs the retired
+    `white-on-black` / `black-on-white` shipped with."""
+    assert list(PALETTES)[:3] == ["mono", "amber", "green phosphor"]
+    assert PALETTES["mono"] == ((0, 0, 0), (255, 255, 255))
+    assert AUTHORED_INVERSE["mono"] == ((245, 245, 245), (16, 16, 16))
     assert PALETTES["amber"] == ((24, 12, 0), (255, 176, 0))
     assert PALETTES["green phosphor"] == ((0, 20, 8), (80, 255, 120))
 
@@ -827,7 +1028,7 @@ def test_tint_cannot_push_any_palette_below_the_contrast_floor():
 def test_tint_steers_toward_the_hue_and_keeps_black_black():
     from dtouch.modes.dithergirl import tinted_palette
 
-    off, on = tinted_palette("white-on-black", 120.0, 1.0)
+    off, on = tinted_palette("mono", 120.0, 1.0)
     assert off == (0, 0, 0)                      # a pure black ground stays so
     assert on[1] > on[0] and on[1] > on[2]       # green now leads
 
@@ -835,9 +1036,9 @@ def test_tint_steers_toward_the_hue_and_keeps_black_black():
 def test_tint_moves_further_the_higher_it_goes():
     from dtouch.modes.dithergirl import tinted_palette
 
-    base = PALETTES["white-on-black"][1]
+    base = PALETTES["mono"][1]
     dist = [sum(abs(a - b) for a, b in
-                zip(tinted_palette("white-on-black", 200.0, amt)[1], base))
+                zip(tinted_palette("mono", 200.0, amt)[1], base))
             for amt in (0.0, 0.25, 0.5, 0.75, 1.0)]
     assert dist[0] == 0
     assert dist == sorted(dist) and dist[-1] > 0
@@ -847,10 +1048,10 @@ def test_palette_section_carries_hue_and_tint():
     spec = DitherGirlMode().panel_spec()
     pal = next(s for s in spec if s.title == "PALETTE")
     labels = [getattr(w, "label", None) for w in pal.widgets]
-    assert labels == ["palette", "Hue", "Tint"]
-    hue = pal.widgets[1]
+    assert labels == ["palette", "Invert", "Hue", "Tint"]
+    hue = pal.widgets[2]
     assert (hue.lo, hue.hi, hue.store_key) == (0.0, 360.0, "hue")
-    assert pal.widgets[2].store_key == "tint"
+    assert pal.widgets[3].store_key == "tint"
 
 
 def test_hue_and_tint_round_trip_through_a_look(tmp_path):
@@ -1029,7 +1230,7 @@ def test_ascii_survives_a_blackout_of_its_own_buffer(tmp_path):
     host = _booted(tmp_path)
     ui, m = host.ui, host.mode
     ui.dg_algo_idx = ALGOS.index("ASCII")
-    ui.dg_palette_idx = list(PALETTES).index("black-on-white")
+    ui.dg_palette_idx, ui.dg_invert = list(PALETTES).index("mono"), True
     m.step(_white(), None, 1 / 30)[:] = 0
     again = m.step(_white(), None, 1 / 30)
     assert again.any(), "the buffer must be wholly rewritten each frame"

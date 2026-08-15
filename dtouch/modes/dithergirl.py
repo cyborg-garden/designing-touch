@@ -58,10 +58,15 @@ _BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
 # (§5). The weakest shipped pair is `gameboy` at 7.7:1, because Tint (see
 # TINT_LUMA_FLOOR) can spend some of a pair's separation and nothing may fall
 # under 4.5:1 after it does.
+#
+# `white-on-black` and `black-on-white` used to sit at the top of this list.
+# They were one palette entered twice: which end is the ink is not a property
+# of the hue, it is a property orthogonal to every palette here, and spending
+# two of eleven slots on it meant the OTHER nine could not be flipped at all.
+# They are now `mono` plus the Invert toggle, which flips any of the ten.
 PALETTES = {
     # --- shipped since v1 ---
-    "white-on-black": ((0, 0, 0), (255, 255, 255)),          # 21.00:1
-    "black-on-white": ((245, 245, 245), (16, 16, 16)),       # 17.45:1
+    "mono": ((0, 0, 0), (255, 255, 255)),                    # 21.00:1
     "amber": ((24, 12, 0), (255, 176, 0)),                   # 10.50:1
     "green phosphor": ((0, 20, 8), (80, 255, 120)),          # 14.42:1
     # --- the rest of the phosphor family ---
@@ -76,6 +81,42 @@ PALETTES = {
     # --- the stream-safe pair: luma-dominant, chroma cheap to encode ---
     "hi-vis": ((8, 8, 10), (255, 214, 10)),                  # 14.17:1
 }
+
+# Invert = swap the ink and the ground. One exception, and it is authored, not
+# accidental: `mono` inverted is NOT (255,255,255)-on-(0,0,0).
+#
+# The two monochrome palettes this replaces were never each other's mirror.
+# `white-on-black` was pure — 0 and 255, 21.00:1 — and `black-on-white` was
+# deliberately softened to 245 paper and 16 ink, 17.45:1, because a full frame
+# of pure white is punishing off a projector and pure black ink on it rings.
+# A naive swap would have silently re-toned every look that ever said
+# `black-on-white`, the shipped `newsprint` built-in included, which is exactly
+# the "migration is the hard part" failure. So the softened pair is kept, as
+# mono's declared inverse, and the migration is bit-for-bit (pinned in
+# tests/test_dithergirl.py).
+#
+# Every other palette inverts by plain swap: same two colours, so the same
+# measured contrast ratio, and nothing to re-check.
+AUTHORED_INVERSE = {
+    "mono": ((245, 245, 245), (16, 16, 16)),                 # 17.45:1
+}
+
+# The retired names, and what they mean now. Kept forever (DESIGN.md §9:
+# presets are the one user-data-loss surface, and a Cycle silently ignores a
+# value it does not recognise — a look naming a retired palette would have
+# loaded with whatever palette happened to be live).
+LEGACY_PALETTES = {
+    "white-on-black": {"palette": "mono", "invert": False},
+    "black-on-white": {"palette": "mono", "invert": True},
+}
+
+
+def palette_pair(name, invert=False):
+    """The (off, on) pair for a named palette, flipped or not."""
+    off, on = PALETTES[name]
+    if not invert:
+        return off, on
+    return AUTHORED_INVERSE.get(name, (on, off))
 
 # ----- Hue / Tint (the customisability, §4.2 'two-color ramps later') -----
 #
@@ -137,13 +178,19 @@ def tint_rgb(rgb, hue_deg, amount, floor=TINT_LUMA_FLOOR):
     return tuple(int(round(c)) for c in out)
 
 
-def tinted_palette(name, hue_deg, amount):
-    """(off, on) for a named palette under the Hue/Tint pair. Cached — this
-    runs per frame and the answer only ever depends on three values."""
-    key = (name, round(float(hue_deg), 2), round(float(amount), 4))
+def tinted_palette(name, hue_deg, amount, invert=False):
+    """(off, on) for a named palette under Invert and the Hue/Tint pair.
+
+    Cached — this runs per frame and the answer only ever depends on four
+    values. Invert resolves FIRST and Tint steers what comes out: for the nine
+    plain-swap palettes the order cannot matter (tint_rgb is per-colour), but
+    mono's inverse is an authored pair and Tint must steer the pair the
+    operator is actually looking at.
+    """
+    key = (name, round(float(hue_deg), 2), round(float(amount), 4), bool(invert))
     got = _TINT_CACHE.get(key)
     if got is None:
-        off, on = PALETTES[name]
+        off, on = palette_pair(name, invert)
         got = (tint_rgb(off, hue_deg, amount), tint_rgb(on, hue_deg, amount))
         if len(_TINT_CACHE) > 512:       # slider drags are unbounded in theory
             _TINT_CACHE.clear()
@@ -222,25 +269,28 @@ class DitherGirlMode:
     BUILTIN = {
         "classic": dict(algorithm="Floyd-Steinberg", bits=1.0, gamma=True,
                         bias="auto", contrast=1.0, scale=72.0,
-                        palette="white-on-black", matte="off"),
+                        palette="mono", matte="off"),
+        # the only built-in that inverts: dark ink on paper. Its pair is
+        # AUTHORED_INVERSE["mono"], the exact colours it shipped with under the
+        # retired `black-on-white` name.
         "newsprint": dict(algorithm="Floyd-Steinberg", bits=1.0, gamma=True,
                           bias="light", contrast=1.15, scale=160.0,
-                          palette="black-on-white", matte="off"),
+                          palette="mono", invert=True, matte="off"),
         "phosphor": dict(algorithm="Bayer", bits=2.0, gamma=True,
                          bias="auto", contrast=1.1, scale=144.0,
                          palette="green phosphor", matte="off"),
         "stream-safe": dict(algorithm="Blue noise", bits=1.0, gamma=True,
                             bias="auto", contrast=1.6, scale=56.0,
-                            palette="white-on-black", matte="off"),
+                            palette="mono", matte="off"),
         "riemersma still": dict(algorithm="Riemersma", bits=2.0, gamma=True,
                                 bias="auto", contrast=1.0, scale=240.0,
-                                palette="white-on-black", matte="off"),
+                                palette="mono", matte="off"),
         # ASCII reinterprets Scale as character ROWS, so its looks live in a
         # different numeric register: 45 rows is an 8x16 cell at 720p (the
         # recommended default), 30 rows a 12x24 one.
         "ascii": dict(algorithm="ASCII", bits=4.0, gamma=True, bias="auto",
                       contrast=1.0, scale=45.0,
-                      palette="white-on-black", matte="off"),
+                      palette="mono", matte="off"),
         # ASCII output is maximally high-frequency two-tone content — the
         # worst case for H.264. Big cells and hard contrast are what survives
         # a stream; 4x8 cells turn to mush (§4.2's stream-tuned looks).
@@ -249,10 +299,18 @@ class DitherGirlMode:
                              palette="green phosphor", matte="off"),
     }
 
-    # apply="reset" merges a look over these (store keys — DESIGN.md §7)
+    # apply="reset" merges a look over these (store keys — DESIGN.md §7).
+    # `invert` is here, and its Toggle is apply="reset" rather than the Toggle
+    # default "keep", because it is part of the PICTURE, not a live rig switch
+    # like Glitch or Sound react: a look that does not mention it must land
+    # un-inverted, or recalling `phosphor` while Invert happened to be on would
+    # render a look nobody saved. It is also what makes the legacy rewrite
+    # total — every look predating Invert says nothing about it, and every one
+    # of them means False.
     DEFAULTS = dict(algorithm="Floyd-Steinberg", bits=1.0, bias="auto",
                     contrast=1.0, scale=SCALE_DEFAULT,
-                    palette="white-on-black", hue=0.0, tint=0.0, matte="off")
+                    palette="mono", invert=False, hue=0.0, tint=0.0,
+                    matte="off")
 
     # shared-UI attrs this mode seeds (prefixed to coexist with every mode's
     # attrs on the one OverlayUI state object)
@@ -260,7 +318,8 @@ class DitherGirlMode:
                         dg_algo_idx=ALGOS.index("Floyd-Steinberg"),
                         dg_bits=1.0, dg_gamma=True, dg_bias_idx=0,
                         dg_contrast=1.0, dg_scale=SCALE_DEFAULT,
-                        dg_palette_idx=0, dg_hue=0.0, dg_tint=0.0)
+                        dg_palette_idx=0, dg_invert=False,
+                        dg_hue=0.0, dg_tint=0.0)
 
     def __init__(self, still=False):
         self.boot_still = still            # CLI --still: boot with still input
@@ -320,6 +379,9 @@ class DitherGirlMode:
     def _palette_name(self):
         return self.palettes[int(self._ui("dg_palette_idx", 0)) % len(self.palettes)]
 
+    def _invert(self):
+        return bool(self._ui("dg_invert", False))
+
     def _hue(self):
         return float(np.clip(self._ui("dg_hue", 0.0), HUE_LO, HUE_HI))
 
@@ -327,8 +389,10 @@ class DitherGirlMode:
         return float(np.clip(self._ui("dg_tint", 0.0), 0.0, 1.0))
 
     def _palette(self):
-        """The live (off, on) pair: the named palette, steered by Hue/Tint."""
-        return tinted_palette(self._palette_name(), self._hue(), self._tint())
+        """The live (off, on) pair: the named palette, flipped by Invert if
+        the toggle is on, then steered by Hue/Tint."""
+        return tinted_palette(self._palette_name(), self._hue(), self._tint(),
+                              self._invert())
 
     def _matte_name(self):
         return MATTES_DG[int(self._ui("dg_matte_idx", 0)) % len(MATTES_DG)]
@@ -367,9 +431,10 @@ class DitherGirlMode:
             ]),
             Section("TONE", [
                 Slider("Bits", "dg_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
-                       status="{:.0f}-bit",
-                       tip="Output bit depth. 1 = pure two-tone; higher keeps "
-                           "more shades."),
+                       status="{:.0f}-bit", step=1.0,
+                       tip="Output bit depth (or, under ASCII, how many "
+                           "glyphs). Whole numbers only - there are four "
+                           "settings. 1 = pure two-tone."),
                 Toggle("Gamma", "dg_gamma", save_key="gamma",
                        tip="Dither in linear light so mid-tones keep their "
                            "perceived brightness. Off = the crushed retro look."),
@@ -379,19 +444,27 @@ class DitherGirlMode:
                        tip="Push tones apart before dithering. High contrast "
                            "survives stream compression."),
                 Slider("Scale", "dg_scale", SCALE_LO, SCALE_HI, fmt=".0f",
-                       save_key="scale",
-                       tip="Working height: pixels for the dithers, character "
-                           "rows for ASCII. Low = big chunky cells; high = "
-                           "fine grain (slow for the diffusion dithers)."),
+                       save_key="scale", step=1.0,
+                       tip="Working height: whole pixels for the dithers, "
+                           "whole character rows for ASCII. Low = big chunky "
+                           "cells; high = fine grain (slow for the diffusion "
+                           "dithers)."),
                 Readout(self._draw_grid_note),
                 Readout(self._draw_perf_note),
             ]),
             Section("PALETTE", [
                 Cycle("palette", "dg_palette_idx", list(PALETTES),
-                      save_key="palette"),
+                      save_key="palette", legacy=LEGACY_PALETTES),
+                # next to the cycle it modifies, because it belongs to every
+                # entry in it: which end is the ink is orthogonal to the hue.
+                Toggle("Invert", "dg_invert", save_key="invert",
+                       apply="reset",
+                       tip="Swap the ink and the background. Works on any "
+                           "palette - dark on light, or light on dark."),
                 Slider("Hue", "dg_hue", HUE_LO, HUE_HI, fmt=".0f",
-                       save_key="hue",
-                       tip="Which colour Tint steers toward. Does nothing "
+                       save_key="hue", step=1.0,
+                       tip="Which colour Tint steers toward, in whole "
+                           "degrees around the colour wheel. Does nothing "
                            "until Tint is up."),
                 Slider("Tint", "dg_tint", 0.0, 1.0, save_key="tint",
                        tip="How far to steer the palette toward Hue. 0 = the "
@@ -509,7 +582,7 @@ class DitherGirlMode:
         hpx = g.S(16)
         key = (self._algo(), self._bits(), bool(self._ui("dg_gamma", True)),
                self._bias(), self._palette_name(), self._hue(), self._tint(),
-               cw, hpx)
+               self._invert(), cw, hpx)
         if key != self._swatch_key:
             self._swatch_cache = self._render_swatch(*key)
             self._swatch_key = key
@@ -519,8 +592,9 @@ class DitherGirlMode:
             frame[y0:y1, x:x + cw] = self._swatch_cache[y0 - y:y1 - y]
         return y + hpx + g.S(8)
 
-    def _render_swatch(self, algo, bits, gamma, bias, palette, hue, tint, w, h):
-        off, on = tinted_palette(palette, hue, tint)
+    def _render_swatch(self, algo, bits, gamma, bias, palette, hue, tint,
+                       invert, w, h):
+        off, on = tinted_palette(palette, hue, tint, invert)
         if algo == "ASCII":
             # one row of characters across the strip: the strip is 16 px tall,
             # so it cannot preview the live CELL size, but it can preview the
