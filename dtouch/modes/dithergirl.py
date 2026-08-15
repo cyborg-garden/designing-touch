@@ -153,7 +153,15 @@ def tinted_palette(name, hue_deg, amount):
 
 MATTES_DG = ["off"] + MATTES          # "off" = dither the whole frame
 
-SCALE_LO, SCALE_HI, SCALE_DEFAULT = 45.0, 720.0, 72.0
+SCALE_LO, SCALE_HI, SCALE_DEFAULT = 30.0, 720.0, 72.0
+# The floor is 30, not the 45 this slider shipped with, because Scale changed
+# UNIT when ASCII joined the cycle: 45 working PIXELS is a fine coarse floor for
+# the four pixel dithers, but 45 character ROWS is an 8x16 cell — the FINEST
+# grid ASCII should ever be asked for, not the coarsest. The `ascii stream`
+# built-in wants 30 rows (12x24 cells, what survives H.264), and a built-in
+# sitting outside its own control's range is a look no slider position can get
+# back to. Verified at 30 working pixels for all four pixel dithers (a 53x30
+# plane; every algorithm returns in under 0.6 ms and spans 0..1).
 # Error diffusion AT OR ABOVE this working height gets the amber note. The
 # comparison is >= on purpose: a threshold named SLOW_SCALE should mean "this
 # value is slow", and `newsprint` shipped sitting exactly on 180.0 with a `>`

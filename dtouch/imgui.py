@@ -232,7 +232,12 @@ class Gui:
         tx0, tx1 = x + self.S(96), x + w - self.S(44)
         cv2.line(img, (tx0, y + self.S(13)), (tx1, y + self.S(13)), TRACK,
                  max(1, self.S(3)), cv2.LINE_AA)
-        hx = int(tx0 + (val - lo) / (hi - lo) * (tx1 - tx0))
+        # clamped to the track: a value outside [lo, hi] (a hand-edited preset,
+        # a built-in authored against an older range) must still draw a handle
+        # ON its own track — a handle floating past the end reads as a broken
+        # widget, and the click that "fixes" it silently destroys the value.
+        frac = min(max((val - lo) / (hi - lo), 0.0), 1.0) if hi > lo else 0.0
+        hx = int(tx0 + frac * (tx1 - tx0))
         cv2.circle(img, (hx, y + self.S(13)), self.S(6), HANDLE, -1, cv2.LINE_AA)
         self.text(img, f"{val:{fmt}}", x + w - self.S(38), y + self.S(17), INK, 0.42)
         self.hot.append(((tx0 - self.S(8), y, tx1 + self.S(8), y + self.S(26)),

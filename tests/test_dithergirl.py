@@ -143,7 +143,7 @@ def test_panel_sections_and_widgets():
     cyc = next(w for w in alg if isinstance(w, Cycle))
     assert list(cyc.options) == ALGOS
     assert sum(isinstance(w, Readout) for w in alg) == 3
-    # TONE: Bits 1-4 int-fmt, Gamma toggle, bias cycle, Contrast, Scale 45-720
+    # TONE: Bits 1-4 int-fmt, Gamma toggle, bias cycle, Contrast, Scale 30-720
     tone = by["TONE"]
     bits = next(w for w in tone if isinstance(w, Slider) and w.label == "Bits")
     assert (bits.lo, bits.hi, bits.fmt) == (1.0, 4.0, ".0f")
@@ -151,7 +151,7 @@ def test_panel_sections_and_widgets():
     bias = next(w for w in tone if isinstance(w, Cycle))
     assert list(bias.options) == ["auto", "light", "dark"]
     scale = next(w for w in tone if isinstance(w, Slider) and w.label == "Scale")
-    assert (scale.lo, scale.hi) == (45.0, 720.0)
+    assert (scale.lo, scale.hi) == (30.0, 720.0)
     assert any(isinstance(w, Readout) for w in tone)     # perf-honesty note
     # PALETTE
     pal = by["PALETTE"][0]
@@ -414,6 +414,28 @@ def test_no_shipped_look_balances_on_the_slow_threshold(tmp_path):
             continue                     # ordered dithers are fine at full res
         assert abs(look["scale"] - SLOW_SCALE) > SLOW_SCALE * 0.05, (
             "%s sits within 5%% of the perf line - make it deliberate" % name)
+
+
+def test_no_shipped_look_lands_outside_its_own_control(tmp_path):
+    """`ascii stream` shipped with scale=30 under a 45-720 Scale slider. The
+    handle drew 3 px past the end of its own track, and the first click
+    anywhere on that track snapped 30 -> 45 — taking the look from 12x24 cells
+    to 8x16 with no slider position that gets it back. A built-in is part of
+    the known-good set: every value in one must be reachable by the control
+    that owns it."""
+    from dtouch.panelspec import Slider, walk_spec
+
+    sliders = {w.store_key: w for _s, w in walk_spec(DitherGirlMode().panel_spec())
+               if isinstance(w, Slider)}
+    assert {"bits", "contrast", "scale", "hue", "tint"} <= set(sliders)
+    for name, look in DitherGirlMode.BUILTIN.items():
+        for key, val in look.items():
+            w = sliders.get(key)
+            if w is None:
+                continue
+            assert w.lo <= val <= w.hi, (
+                "built-in %r sets %s=%s, outside the slider's %s-%s"
+                % (name, key, val, w.lo, w.hi))
 
 
 def test_which_side_of_the_line_each_shipped_look_is_on(tmp_path):
