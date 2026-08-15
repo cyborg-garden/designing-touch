@@ -446,8 +446,32 @@ pinned regression target. Hit targets ≥ 2.75u whole-row.
   blackout is armed** (judge finding: a fading toast alone leaves an operator
   believing the app died; the tick is the one persistent element allowed on a
   blacked-out frame, and blackout output is intentionally not clean-capture).
+
+  *Re-examined 2026-08-15 and kept.* Blackout in HIDDEN lights 1,225 px of
+  2,073,600 at 1080p (the tick), which reads as a broken app rather than an
+  armed one. Two things make it not a dead end, both measured on that exact
+  frame: the tick is the **only** thing separating "armed" from "the app
+  died", so removing it makes the state genuinely indistinguishable from a
+  crash — the opposite of the fix; and the screen is black only while nobody
+  is touching it. Arming it flashes `BLACKOUT` (10,608 px). Any unbound key
+  paints the hint (1,963). A param nudge paints the OSD (4,356). One `TAB`
+  brings the whole HUD back (2,807). Ten seconds hands-off returns to 1,225 —
+  the clean-capture contract intact. The keys that used to answer with nothing
+  here were the arrows and Enter, and that was §6.2's hint window, now fixed.
 - Every state redundantly coded (color + text + shape). Contrast target:
   legible against a white wall. Cursor auto-hides after 2 s idle.
+
+  *Measured 2026-08-15, after the Invert toggle raised the worry that ten
+  palettes can now put a bright ground under the HUD.* The double-draw holds,
+  and the worry is backwards: the black under-stroke carries the glyph, so the
+  brighter the ground the better it reads. Status line — white 21.0:1, 235-grey
+  17.6:1, mid-grey 5.32:1, black 14.7:1. Bottom hint (DIM, the smaller and
+  weaker of the two) — white 21.0:1, 220-grey 15.3:1, mid-grey 5.32:1, dark
+  40-grey 4.74:1. The weakest ground is a flat mid-grey, which still clears
+  WCAG AA, and it is the ground **Invert moves away from**: over the inverted
+  1-bit picture the toggle actually produces, both lines render as heavy black
+  outline type. No scrim added — it would put permanent chrome on the picture
+  in HUD, which is a state used for composing shots, for no measured gain.
 
 **Layout discipline:** persistent UI only in the right sidebar and corners;
 title-safe 3.5% inset; frame center reserved for transient toasts. Overlay
@@ -538,7 +562,10 @@ the ground under the table swung 0–89 (std 44.5) and gave white ink only 2.9×
 contrast against the brightest pixel it sat on. The block now gets the panel's
 own ground (PANEL at 0.86) sized to the table: ground 28–40 (std 6.0), worst
 case 6.4×. The scrim stays, so the picture is still visibly there around the
-plate and help never reads as the instrument stopping.
+plate and help never reads as the instrument stopping. It costs 2.2 → 2.9 ms
+per frame at 1080p, and only on the frames the modal is open: help is a modal,
+explicitly outside the ≤1 ms steady-state overlay budget (§5). HIDDEN (0.002
+ms), HUD (0.141) and PANEL (0.74) are unchanged.
 
 **Rename typing consumes every key except `Esc`** (which cancels the rename and
 nothing else). This is the explicit carve-out rule (judge finding: "panic works
