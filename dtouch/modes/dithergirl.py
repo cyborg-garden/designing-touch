@@ -423,15 +423,14 @@ class DitherGirlMode:
             g.text(frame, "slow at full res", x, y + g.S(12), AMBER, 0.42)
         return y + g.S(20)
 
-    def _draw_perf_note(self, frame, g, x, y, cw):
-        """Inline amber perf note — renders only when Scale is dragged high
-        while an error-diffusion algorithm is active (§4.2). Word-wrapped to
-        the panel column (at 720p the one-liner overflows the sidebar)."""
-        if not self.slow_warning():
-            return y
-        words = "slow - ordered dither recommended live".split()
+    @staticmethod
+    def _note_lines(g, text, cw):
+        """Word-wrap a note to the panel column. Every inline note goes through
+        this: the sidebar is narrow at 720p and gets narrower as the frame
+        does, and a note that runs off the panel is graffiti over the picture
+        rather than part of the panel."""
         lines, cur = [], ""
-        for wd in words:
+        for wd in text.split():
             cand = (cur + " " + wd).strip()
             tw = cv2.getTextSize(cand, cv2.FONT_HERSHEY_SIMPLEX,
                                  0.42 * g.s, 1)[0][0]
@@ -442,9 +441,22 @@ class DitherGirlMode:
                 cur = cand
         if cur:
             lines.append(cur)
-        for line in lines:
-            g.text(frame, line, x, y + g.S(12), AMBER, 0.42)
+        return lines
+
+    def _draw_note(self, frame, g, x, y, cw, text, color):
+        for line in self._note_lines(g, text, cw):
+            g.text(frame, line, x, y + g.S(12), color, 0.42)
             y += g.S(16)
+        return y
+
+    def _draw_perf_note(self, frame, g, x, y, cw):
+        """Inline amber perf note — renders only when Scale is dragged high
+        while an error-diffusion algorithm is active (§4.2). Word-wrapped to
+        the panel column (at 720p the one-liner overflows the sidebar)."""
+        if not self.slow_warning():
+            return y
+        y = self._draw_note(frame, g, x, y, cw,
+                            "slow - ordered dither recommended live", AMBER)
         return y + g.S(4)
 
     def _draw_grid_note(self, frame, g, x, y, cw):
@@ -461,21 +473,19 @@ class DitherGirlMode:
         rend = self._ascii
         if rend is None:
             return y
-        g.text(frame, rend.grid_note(), x, y + g.S(12), DIM, 0.42)
-        y += g.S(16)
+        y = self._draw_note(frame, g, x, y, cw, rend.grid_note(), DIM)
         if rend.clamped:
             # DIM, not amber: nothing is wrong, the control has run out of room
-            g.text(frame, "cell floor - characters stay legible",
-                   x, y + g.S(12), DIM, 0.42)
-            y += g.S(16)
+            y = self._draw_note(frame, g, x, y, cw,
+                                "cell floor - characters stay legible", DIM)
         if self._ascii_slow and self._ascii_ms is not None:
             # perf honesty (§4.2): the measured cost, not a guessed threshold —
             # ASCII is in the ordered class at 720p/1080p but a 4K frame at the
             # cell floor is ~8.7 ms, and an operator is owed the number rather
             # than a quietly halved frame rate.
-            g.text(frame, "ascii %.1f ms/frame - lower Scale or output"
-                   % self._ascii_ms, x, y + g.S(12), AMBER, 0.42)
-            y += g.S(16)
+            y = self._draw_note(frame, g, x, y, cw,
+                                "ascii %.1f ms/frame - lower Scale or output"
+                                % self._ascii_ms, AMBER)
         return y + g.S(4)
 
     def _draw_swatch(self, frame, g, x, y, cw):
@@ -544,6 +554,7 @@ class DitherGirlMode:
             # a new setting is a new measurement: never carry a warning (or a
             # clean bill of health) over from the setting that earned it
             self._ascii_ms, self._ascii_frames, self._ascii_slow = None, 0, False
+        self._ascii.set_rows_req(scale)
 
         t0 = time.perf_counter()
         out = self._ascii.render(gray_u8, contrast)
@@ -623,10 +634,14 @@ class DitherGirlMode:
                 self.mat = mat
             m = self.mat.compute(cv2.resize(frame_bgr, (MATTE_W, MATTE_H)))
             m = np.clip(cv2.resize(m, (rw, rh)), 0.0, 1.0).astype(np.float32)
-            if algo == "ASCII" and self._ascii is not None:
-                # the gate cuts through glyphs otherwise, and half a '$' is the
-                # one place the cell grid reads as damage rather than texture
-                m = self._ascii.snap_matte(m)
+            # The matte is NOT snapped to the character grid under ASCII, and
+            # that was a decision, not an oversight. Snapping (average the
+            # matte per cell, expand back) was built and looked at: it paints a
+            # staircase of half-lit grey cells around the subject — off-palette
+            # blocks in a two-tone picture — and a hard per-cell threshold
+            # instead throws away the feather every shipped matte produces.
+            # The unsnapped cut does clip glyphs, but at 8x16 cells that reads
+            # as texture, and it is what the pixel dithers already do.
             if self._ui("dg_matte_black", False):
                 bg = np.zeros_like(out)
             else:

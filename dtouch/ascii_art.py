@@ -359,6 +359,17 @@ class AsciiRenderer:
                 self.cols, self.rows, self.n, self.palette, self.gamma,
                 self.bias, self.grain)
 
+    def set_rows_req(self, rows_req):
+        """Re-read the requested row count without rebuilding.
+
+        Past the legibility floor the grid stops changing but the REQUEST keeps
+        going, and `clamped` is a property of the request, not of the geometry.
+        Rebuilding the atlas just to flip a boolean would put a 7-30 ms hitch
+        on the far half of the Scale slider, where by definition nothing about
+        the picture is changing."""
+        self.rows_req = float(rows_req)
+        self.clamped = grid_for(self.frame_w, self.frame_h, rows_req)[4]
+
     # ----- per-frame -----
     def render(self, gray_u8: np.ndarray, contrast: float = 1.0) -> np.ndarray:
         """One grayscale uint8 frame (any size) -> the full RGB output frame.
@@ -374,6 +385,15 @@ class AsciiRenderer:
                                         beta=127.5 * (1.0 - contrast))
         p = cv2.LUT(small, self.pos_lut).astype(np.uint16)   # position 0..255
         m = self.n - 1
+        # floor(p/255 * m + t), t in [0, 1) — the same quantiser shape as
+        # _ordered_dither, and the divisor is 255 rather than a >> 8 shift on
+        # purpose: dividing by 256 pulls every level fractionally down, which
+        # costs the ENDPOINTS. Measured on a letterboxed frame, >> 8 sprinkled
+        # glyph 1 across pure black (p=0 is safe, but p=255 lands on m-1 for
+        # most of the noise texture, and under `bias auto` that inverts into
+        # the blacks). Exact division keeps 0 -> sparsest and 255 -> densest
+        # for every threshold, which is the property bayer_dither's docstring
+        # promises and the reason its blacks stay black.
         if self.grain and m > 0:
             invert = self.bias == "dark" or (self.bias == "auto"
                                              and self._is_dark(small))
@@ -382,11 +402,11 @@ class AsciiRenderer:
                 # upward-rounding density, dim detail preserved (dither.py's
                 # _ordered_dither docstring, applied to the glyph index)
                 np.subtract(np.uint16(255), p, out=p)
-            idx = ((p * m + self.noise) >> 8).astype(np.uint8)
+            idx = ((p * m + self.noise) // 255).astype(np.uint8)
             if invert:
                 np.subtract(np.uint8(m), idx, out=idx)
         else:
-            idx = ((p * m + 128) >> 8).astype(np.uint8)
+            idx = ((p * m + 127) // 255).astype(np.uint8)
         self.view[:] = self.atlas[idx]
         self._paint_border()
         return self.out
@@ -439,24 +459,6 @@ class AsciiRenderer:
         if self.gamma:
             return float(srgb_to_linear(np.float32(mean))) < _MID_GREY_LINEAR
         return mean < 0.5
-
-    def snap_matte(self, m: np.ndarray) -> np.ndarray:
-        """Quantise a float matte to the character grid.
-
-        The matte gate cuts through glyphs, so an unsnapped edge eats half a
-        `$` and the subject's outline reads as torn pixels — the one place
-        ASCII's cell structure is visible as damage rather than as texture.
-        Averaging the matte per cell and expanding it back makes whole
-        characters survive the cut, so the subject reads as text-shaped.
-        """
-        cell = cv2.resize(m, (self.cols, self.rows),
-                          interpolation=cv2.INTER_AREA)
-        big = cv2.resize(cell, (self.grid_w, self.grid_h),
-                         interpolation=cv2.INTER_NEAREST)
-        out = np.zeros((self.frame_h, self.frame_w), np.float32)
-        out[self.y0:self.y0 + self.grid_h,
-            self.x0:self.x0 + self.grid_w] = big
-        return out
 
     # ----- introspection (panel copy, tests) -----
     def ramp_str(self) -> str:

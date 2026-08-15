@@ -729,3 +729,396 @@ def test_boot_card_drawn_and_recorded_on_switch(tmp_path):
     assert (card == 0).all(axis=2).mean() > 0.5          # mostly black card
     assert host.hud.toasts.active()
     host.writer = None
+
+
+# ---------- palettes: the shipped set, measured (DESIGN.md §4.2 / §5) ----------
+
+def _rel_luma(rgb):
+    from dtouch.dither import srgb_to_linear
+    return float((srgb_to_linear(np.float32(rgb) / 255.0)
+                  * np.float32([0.2126, 0.7152, 0.0722])).sum())
+
+
+def _contrast(a, b):
+    la, lb = _rel_luma(a), _rel_luma(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def test_every_palette_reads_at_projector_distance():
+    """Colour is state, never decoration (§5) — and a duotone whose two ends
+    do not separate is not a look, it is an unreadable picture. 4.5:1 is the
+    same floor the mode accent was picked against."""
+    for name, (off, on) in PALETTES.items():
+        assert _contrast(off, on) >= 4.5, f"{name} is too flat to project"
+
+
+def test_palettes_are_ascii_named_and_well_formed():
+    for name, pair in PALETTES.items():
+        assert name == name.encode("ascii", "replace").decode()
+        assert len(pair) == 2
+        for c in pair:
+            assert len(c) == 3 and all(0 <= v <= 255 for v in c)
+
+
+def test_the_first_four_palettes_are_unchanged():
+    """Looks saved before the palette set grew name their palette by VALUE;
+    renaming or re-toning one of the original four silently re-colours every
+    look that used it."""
+    assert list(PALETTES)[:4] == ["white-on-black", "black-on-white", "amber",
+                                  "green phosphor"]
+    assert PALETTES["white-on-black"] == ((0, 0, 0), (255, 255, 255))
+    assert PALETTES["black-on-white"] == ((245, 245, 245), (16, 16, 16))
+    assert PALETTES["amber"] == ((24, 12, 0), (255, 176, 0))
+    assert PALETTES["green phosphor"] == ((0, 20, 8), (80, 255, 120))
+
+
+# ---------- Hue / Tint (the customisability) ----------
+
+def test_tint_zero_is_an_exact_no_op():
+    """Tint COMPOSES with the named palettes rather than replacing them: at 0
+    every palette must be bit-identical to its shipped pair, at every hue."""
+    from dtouch.modes.dithergirl import tinted_palette
+
+    for name, pair in PALETTES.items():
+        for hue in (0.0, 137.0, 359.0):
+            assert tinted_palette(name, hue, 0.0) == pair
+
+
+def test_tint_cannot_push_any_palette_below_the_contrast_floor():
+    """The luminance floor exists for exactly this: pure blue is 7% of white's
+    luminance, so an unfloored hue rotation could quietly turn any palette
+    into an unreadable navy-on-black."""
+    from dtouch.modes.dithergirl import tinted_palette
+
+    worst = min(
+        (_contrast(*tinted_palette(name, hue, amt)), name, hue, amt)
+        for name in PALETTES
+        for hue in range(0, 360, 5)
+        for amt in (0.25, 0.5, 0.75, 1.0))
+    assert worst[0] >= 4.5, "tint broke %s at hue %s tint %s (%.2f:1)" % (
+        worst[1], worst[2], worst[3], worst[0])
+
+
+def test_tint_steers_toward_the_hue_and_keeps_black_black():
+    from dtouch.modes.dithergirl import tinted_palette
+
+    off, on = tinted_palette("white-on-black", 120.0, 1.0)
+    assert off == (0, 0, 0)                      # a pure black ground stays so
+    assert on[1] > on[0] and on[1] > on[2]       # green now leads
+
+
+def test_tint_moves_further_the_higher_it_goes():
+    from dtouch.modes.dithergirl import tinted_palette
+
+    base = PALETTES["white-on-black"][1]
+    dist = [sum(abs(a - b) for a, b in
+                zip(tinted_palette("white-on-black", 200.0, amt)[1], base))
+            for amt in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    assert dist[0] == 0
+    assert dist == sorted(dist) and dist[-1] > 0
+
+
+def test_palette_section_carries_hue_and_tint():
+    spec = DitherGirlMode().panel_spec()
+    pal = next(s for s in spec if s.title == "PALETTE")
+    labels = [getattr(w, "label", None) for w in pal.widgets]
+    assert labels == ["palette", "Hue", "Tint"]
+    hue = pal.widgets[1]
+    assert (hue.lo, hue.hi, hue.store_key) == (0.0, 360.0, "hue")
+    assert pal.widgets[2].store_key == "tint"
+
+
+def test_hue_and_tint_round_trip_through_a_look(tmp_path):
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.dg_hue, ui.dg_tint = 210.0, 0.7
+    cfg = host._capture_cfg()
+    assert cfg["hue"] == 210.0 and cfg["tint"] == 0.7
+    ui.dg_hue, ui.dg_tint = 0.0, 0.0
+    _presets.save("tinted", cfg, path=host.presets_path, mode="dithergirl")
+    host._reload_presets()
+    ui.pending_preset = "tinted"
+    host._apply_pending_preset()
+    assert (ui.dg_hue, ui.dg_tint) == (210.0, 0.7)
+
+
+def test_a_builtin_recall_resets_tint(tmp_path):
+    """Built-ins record no hue/tint, and both are apply="reset" — recalling
+    `classic` mid-set must return the named palette, not keep yesterday's
+    tint (DESIGN.md §7)."""
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.dg_hue, ui.dg_tint = 300.0, 1.0
+    ui.pending_preset = "classic"
+    host._apply_pending_preset()
+    assert ui.dg_tint == 0.0
+
+
+def test_step_applies_the_tint(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    plain = m.step(_white(), None, 1 / 30)
+    ui.dg_hue, ui.dg_tint = 120.0, 1.0
+    tinted = m.step(_white(), None, 1 / 30)
+    assert not np.array_equal(plain, tinted)
+    px = tinted.reshape(-1, 3)[0]
+    assert px[1] > px[0] and px[1] > px[2]
+
+
+def test_swatch_invalidates_on_hue_and_tint(tmp_path):
+    """The swatch is the panel's answer to 'what am I looking at' — a palette
+    change it does not preview is a lying readout."""
+    host = _booted(tmp_path)
+    m, g = host.mode, _gui()
+    frame = np.zeros((400, 400, 3), np.uint8)
+    # Tint first: Hue alone is inert at Tint 0, which is the whole point of
+    # the pair, so a hue nudge must move the swatch only once Tint is up.
+    for attr, val in (("dg_tint", 0.8), ("dg_hue", 200.0)):
+        m._draw_swatch(frame, g, 10, 10, 200)
+        first = m._swatch_cache
+        setattr(host.ui, attr, val)
+        m._draw_swatch(frame, g, 10, 10, 200)
+        assert m._swatch_cache is not first
+        assert not np.array_equal(m._swatch_cache, first)
+
+
+# ---------- ASCII (DESIGN.md §4.2, the fifth quantiser) ----------
+
+def test_ascii_is_the_fifth_algorithm_and_reads_live(tmp_path):
+    from dtouch.modes.dithergirl import ORDERED, SCALE_HI
+
+    assert ALGOS[-1] == "ASCII" and "ASCII" in ORDERED
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_scale = SCALE_HI
+    assert m.slow_warning() is False          # a table lookup, at any Scale
+    g, frame = _gui(), np.zeros((400, 400, 3), np.uint8)
+    assert m._draw_perf_note(frame, g, 10, 10, 200) == 10   # no amber note
+
+
+def test_ascii_renders_and_stays_inside_the_palette(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_bits, ui.dg_scale = 4.0, 45.0
+    out = m.step(_white(), None, 1 / 30)
+    assert out.shape == (RES[1], RES[0], 3) and out.dtype == np.uint8
+    black = m.step(_black(), None, 1 / 30)
+    assert (black.reshape(-1, 3) == np.array((0, 0, 0), np.uint8)).all()
+
+
+def test_ascii_respects_the_palette_cycle(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_palette_idx = list(PALETTES).index("amber")
+    black = m.step(_black(), None, 1 / 30)
+    assert (black.reshape(-1, 3) == np.array((24, 12, 0), np.uint8)).all()
+
+
+def test_ascii_bits_set_the_ramp_length(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    for bits, n in ((1.0, 2), (2.0, 4), (3.0, 8), (4.0, 16)):
+        ui.dg_bits = bits
+        m.step(_white(), None, 1 / 30)
+        assert m._ascii.n == n
+
+
+def test_ascii_renderer_is_rebuilt_only_when_it_must_be(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    m.step(_white(), None, 1 / 30)
+    first = m._ascii
+    m.step(_black(), None, 1 / 30)
+    assert m._ascii is first                       # a new frame is not a rebuild
+    ui.dg_contrast = 1.8
+    m.step(_white(), None, 1 / 30)
+    assert m._ascii is first                       # nor is a per-frame control
+    ui.dg_palette_idx = list(PALETTES).index("ice")
+    m.step(_white(), None, 1 / 30)
+    assert m._ascii is not first                   # the atlas is palette-coloured
+
+
+def test_ascii_matte_gate_still_composites(tmp_path):
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_matte_idx = 1
+    m.mat, m._mat_kind = FakeMatte(), MATTES_DG[1]
+    ui.dg_matte_black = True
+    out = m.step(_white(), None, 1 / 30)
+    w = out.shape[1]
+    assert (out[:, :w // 2 - 2] == 0).all()        # background half is black
+    assert out[:, w // 2 + 2:].any()               # subject half has glyphs
+
+
+def test_ascii_survives_a_blackout_of_its_own_buffer(tmp_path):
+    """The shell blacks `out` IN PLACE for blackout (§6.2) and the renderer
+    hands back a reused buffer."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    ui.dg_palette_idx = list(PALETTES).index("black-on-white")
+    m.step(_white(), None, 1 / 30)[:] = 0
+    again = m.step(_white(), None, 1 / 30)
+    assert again.any(), "the buffer must be wholly rewritten each frame"
+
+
+def test_dither_helper_refuses_ascii():
+    """`_dither` returns a [0,1] plane for `_palette_map`; ASCII has no such
+    plane. Falling through to Riemersma would have been a silent wrong
+    picture."""
+    from dtouch.modes.dithergirl import _dither
+
+    with pytest.raises(ValueError):
+        _dither(np.zeros((4, 4), np.float32), "ASCII", 1, True, "auto")
+
+
+def test_ascii_builtins_are_shipped_and_apply(tmp_path):
+    assert set(DitherGirlMode.BUILTIN) >= {"ascii", "ascii stream"}
+    host = _booted(tmp_path)
+    ui = host.ui
+    ui.pending_preset = "ascii stream"
+    host._apply_pending_preset()
+    assert ALGOS[ui.dg_algo_idx] == "ASCII"
+    assert ui.dg_scale == 30.0 and ui.dg_contrast == 1.4   # stream-tuned
+    assert list(PALETTES)[ui.dg_palette_idx] == "green phosphor"
+
+
+def test_the_safe_look_is_still_a_pixel_dither():
+    """DESIGN.md §6.2: `0` must walk OUT of ASCII to a known-good picture."""
+    assert (DitherGirlMode.BUILTIN[DitherGirlMode().safe_look()]["algorithm"]
+            == "Floyd-Steinberg")
+
+
+def test_status_line_names_ascii(tmp_path):
+    host = _booted(tmp_path)
+    host.ui.dg_algo_idx = ALGOS.index("ASCII")
+    host.ui.dg_bits = 4.0
+    s = host._status_line()
+    assert s == "DITHER GIRL  ascii  4-bit  bias auto  src synthetic"
+    assert s == s.encode("ascii", "replace").decode()
+
+
+def test_grid_note_renders_only_under_ascii(tmp_path):
+    """Scale changes UNIT under ASCII, from working pixels to character rows.
+    Hiding that would be dishonest; so would drawing the note for the pixel
+    dithers, where it is a lie."""
+    host = _booted(tmp_path)
+    ui, m, g = host.ui, host.mode, _gui()
+    frame = np.zeros((400, 400, 3), np.uint8)
+    assert m._draw_grid_note(frame, g, 10, 10, 200) == 10   # not ASCII: silent
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    assert m._draw_grid_note(frame, g, 10, 10, 200) == 10   # no renderer yet
+    m.step(_white(), None, 1 / 30)
+    assert m._draw_grid_note(frame, g, 10, 10, 200) > 10
+    assert m._ascii.grid_note().startswith("grid ")
+
+
+def test_grid_note_says_when_scale_has_run_out_of_room(tmp_path):
+    from dtouch.modes.dithergirl import SCALE_HI
+
+    host = _booted(tmp_path, res=(640, 360))
+    ui, m, g = host.ui, host.mode, _gui()
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    frame = np.zeros((400, 400, 3), np.uint8)
+    ui.dg_scale = 45.0
+    m.step(_white(360, 640), None, 1 / 30)
+    short = m._draw_grid_note(frame, g, 10, 10, 200)
+    assert m._ascii.clamped is False
+    ui.dg_scale = SCALE_HI
+    m.step(_white(360, 640), None, 1 / 30)
+    # past the floor the GRID stops changing, so nothing is rebuilt — the
+    # request is still read, or the note would never appear at all
+    assert m._ascii.clamped is True
+    assert m._draw_grid_note(frame, g, 10, 10, 200) > short   # one line more
+
+
+def test_the_ascii_perf_note_is_measured_and_latched(tmp_path):
+    """Perf honesty (§4.2) without a guessed per-resolution threshold: the
+    mode times its own step. ASCII is in the ordered class at 720p/1080p but a
+    4K frame at the cell floor measures ~8.7 ms, and an operator is owed the
+    number rather than a quietly halved frame rate."""
+    from dtouch.modes.dithergirl import ASCII_SLOW_MS
+
+    host = _booted(tmp_path)
+    ui, m, g = host.ui, host.mode, _gui()
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    frame = np.zeros((400, 400, 3), np.uint8)
+    for _ in range(10):
+        m.step(_white(), None, 1 / 30)
+    assert m._ascii_ms < ASCII_SLOW_MS and m._ascii_slow is False
+    clean = m._draw_grid_note(frame, g, 10, 10, 200)
+
+    m._ascii_ms, m._ascii_slow = 9.3, True
+    assert m._draw_grid_note(frame, g, 10, 10, 200) > clean
+    # ...and a new setting is a new measurement, never an inherited verdict
+    ui.dg_bits = 2.0
+    m.step(_white(), None, 1 / 30)
+    assert m._ascii_slow is False and m._ascii_ms < ASCII_SLOW_MS
+
+
+def test_the_ascii_notes_wrap_inside_the_panel_column(tmp_path):
+    """Same rule as the amber slow-note: a note that runs off the sidebar is
+    graffiti over the picture, not part of the panel."""
+    host = _booted(tmp_path)
+    ui, m, g = host.ui, host.mode, _gui()
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    m.step(_white(), None, 1 / 30)
+    m._ascii_ms, m._ascii_slow = 9.3, True
+    frame = np.zeros((400, 400, 3), np.uint8)
+    wide = m._draw_grid_note(frame, g, 10, 10, 400)
+    narrow = m._draw_grid_note(frame, g, 10, 10, 120)
+    assert narrow > wide
+    assert len(m._note_lines(g, "ascii 9.3 ms/frame - lower Scale or output",
+                             120)) > 1
+
+
+def test_hue_alone_does_nothing_until_tint_is_up(tmp_path):
+    """The pair is a direction and an amount. A Hue slider that recoloured the
+    picture on its own would make Tint 0 unreachable by accident."""
+    host = _booted(tmp_path)
+    ui, m = host.ui, host.mode
+    plain = m.step(_white(), None, 1 / 30)
+    ui.dg_hue = 47.0
+    assert np.array_equal(plain, m.step(_white(), None, 1 / 30))
+
+
+def test_ascii_swatch_previews_the_glyph_ramp(tmp_path):
+    host = _booted(tmp_path)
+    ui, m, g = host.ui, host.mode, _gui()
+    frame = np.zeros((400, 400, 3), np.uint8)
+    ui.dg_algo_idx = ALGOS.index("ASCII")
+    m._draw_swatch(frame, g, 10, 10, 200)
+    swatch = m._swatch_cache
+    assert swatch is not None and swatch.any()
+    # sparse on the left, dense on the right — it is a ramp, not a fill
+    lit = swatch.reshape(swatch.shape[0], -1).mean(axis=0)
+    quarter = swatch.shape[1] // 4
+    assert lit[-quarter:].mean() > lit[:quarter].mean()
+
+
+def test_ascii_step_is_not_slower_than_the_default_algorithm(tmp_path):
+    """ASCII replaces the mode's Floyd-Steinberg default when selected; the
+    operator must not pay for the switch."""
+    import time
+
+    host = _booted(tmp_path, res=(640, 360))
+    ui, m = host.ui, host.mode
+    frame = np.random.default_rng(7).integers(0, 256, (360, 640, 3), np.uint8)
+
+    def bench(algo, scale):
+        ui.dg_algo_idx = ALGOS.index(algo)
+        ui.dg_scale = scale
+        for _ in range(3):
+            m.step(frame, None, 1 / 30)
+        t0 = time.perf_counter()
+        for _ in range(8):
+            m.step(frame, None, 1 / 30)
+        return (time.perf_counter() - t0) / 8
+
+    assert bench("ASCII", 45.0) < bench("Floyd-Steinberg", 72.0)
