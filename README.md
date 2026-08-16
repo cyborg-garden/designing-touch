@@ -138,6 +138,8 @@ panel. Your saved looks live in `presets.json`, and the mode, bank and current l
 
 ## Dither Girl
 
+<img alt="Dither Girl mode: Riemersma dithering, magenta palette, with the control panel open" src="docs/dither-girl-panel.png" />
+
 The same camera (or a still, via `--still photo.jpg`) run through the dither pipeline as the
 *primary* image rather than as an effect on top:
 
