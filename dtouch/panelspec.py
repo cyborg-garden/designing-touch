@@ -38,22 +38,40 @@ class Slider:
     # value; None = not part of the status line.
     status: Any = None
     # ----- quantisation (the whole-number sliders) -----
-    # `step` is the control's quantum in value units, declared ONLY when the
-    # engine downstream genuinely cannot use anything finer: Bits is
-    # `int(round(v))`, Scale is a whole working pixel / a whole character row,
-    # Crush is `int(v)`. None (the default) means genuinely continuous, and a
-    # continuous slider is left alone — faking precision and faking coarseness
-    # are the same lie in opposite directions.
+    # `step` is the control's quantum in value units — what the panel's INPUT
+    # surfaces (the drag, the nudge keys) land on. It comes in two honesties,
+    # told apart by `engine_snaps`:
     #
-    # `snap` is how a raw value lands on that quantum, and it exists because
-    # the engine's own rounding is not uniform: Bits/Scale round, Crush
-    # TRUNCATES (`int(ui.crush)`). A control must land where its engine lands
-    # or the readout goes back to lying — with the extra sting that `"{:.0f}"`
+    # * `engine_snaps=True` (default): the engine downstream genuinely cannot
+    #   use anything finer — Bits is `int(round(v))`, Crush is `int(v)`. Every
+    #   write lands on the grid (OverlayUI.__setattr__), stored looks
+    #   included, because a fractional value would only be a lie in the
+    #   readout: the picture already rendered at the snapped value.
+    #
+    # * `engine_snaps=False`: the engine consumes the value CONTINUOUSLY and
+    #   the step is a deliberate control-feel choice — Scale under ASCII is
+    #   `frame_h / rows_req` before any rounding (a stored 45.55 and 46 are
+    #   different character grids), Hue feeds `tint_rgb` as a float. The drag
+    #   and the nudge still snap (that is the display-honesty win), but a
+    #   STORED look is the authority on its own value (the reseed/`portrait`
+    #   rule: the control adapts, never the look), so `apply_look` passes it
+    #   through clamped and un-snapped, and the readout shows it faithfully
+    #   (`display_fmt` widens to one decimal for an off-grid legacy value).
+    #
+    # None (the default step) means genuinely continuous, and a continuous
+    # slider is left alone — faking precision and faking coarseness are the
+    # same lie in opposite directions.
+    #
+    # `snap` is how a raw value lands on the quantum, and it exists because
+    # the engines' own rounding is not uniform: Bits rounds, Crush TRUNCATES
+    # (`int(ui.crush)`). A control must land where its engine lands or the
+    # readout goes back to lying — with the extra sting that `"{:.0f}"`
     # rounds, so an unsnapped Crush of 2.92 drew "3" while the picture was
     # crushed to 2. Truncating here also makes the migration free: every
     # already-saved fractional Crush keeps the exact bit depth it rendered at.
     step: Optional[float] = None
     snap: str = "round"              # "round" | "floor"
+    engine_snaps: bool = True        # engine lands on the grid itself (see above)
     nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
 
     @property
@@ -206,6 +224,14 @@ def quantise(w, value):
     look stores, and what the engine consumes are one number. A continuous
     slider (`step is None`) is returned untouched — including its full
     precision, because faking coarseness is the same lie as faking precision.
+
+    The grid is anchored at ZERO, not at `w.lo`, because the engines round the
+    raw value itself — `int(round(v))`, `int(v)` — never `v - lo`. Anchoring
+    at `lo` disagreed with them on the half-steps: Bits runs 1-4, so
+    `round((2.5 - 1))` said 3 while the engine's `round(2.5)` (banker's, like
+    ours) rendered 2 — a stored 2.5 would have changed bit depth the moment it
+    passed through here. Every stepped slider's `lo` sits on the zero grid
+    (asserted in tests), so the anchor changes nothing else.
     """
     step = getattr(w, "step", None)
     if not step:
@@ -216,9 +242,30 @@ def quantise(w, value):
         return value
     if not math.isfinite(v):
         return value
-    n = (v - w.lo) / step
+    n = v / step
     n = math.floor(n) if getattr(w, "snap", "round") == "floor" else round(n)
-    return min(max(w.lo + n * step, w.lo), w.hi)
+    return min(max(n * step, w.lo), w.hi)
+
+
+def display_fmt(w, value):
+    """The fmt to draw `value` with: the widget's own, widened to one decimal
+    when the value sits OFF a stepped slider's grid. Only an
+    `engine_snaps=False` slider can hold such a value — a stored legacy
+    fraction that `apply_look` passed through because the engine renders it
+    (Scale 45.55 is a real character grid) — and `"{:.0f}"` would print "46"
+    while 45.55 is on screen, which is the readout lie quantisation exists to
+    kill, pointed the other way. One decimal for a legacy value is honest."""
+    fmt = getattr(w, "fmt", ".2f")
+    step = getattr(w, "step", None)
+    if not step:
+        return fmt
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return fmt
+    if math.isfinite(v) and quantise(w, v) != v:
+        return ".1f"
+    return fmt
 
 
 # The perform-layer nudge, as DESIGN.md §6.2 defines it: `-`/`=` move 1/40 of
@@ -422,8 +469,15 @@ def apply_look(state, spec, cfg, defaults=None):
             # each mode's built-ins) means no future look can do it either.
             if isinstance(w, Slider):
                 # quantise() clamps too — and a look is an exact request, so
-                # it goes through the exact path, never `nudge_to`
-                num = (quantise(w, num) if w.step
+                # it goes through the exact path, never `nudge_to`. But only
+                # where the engine itself lands on the grid: when it consumes
+                # the value continuously (`engine_snaps=False` — Scale under
+                # ASCII, Hue), a stored fraction is a real picture the look
+                # has always rendered, and re-quantising it here would re-grid
+                # a saved look (45.55 rows -> 46 rows moved 45.7% of the
+                # pixels). The reseed/`portrait` rule: a stored look is the
+                # authority; the control adapts, never the look.
+                num = (quantise(w, num) if w.step and w.engine_snaps
                        else min(max(num, w.lo), w.hi))
             setattr(state, w.attr, num)
     return skipped

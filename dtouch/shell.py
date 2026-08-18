@@ -37,7 +37,7 @@ from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
                          build_signal_section, build_global_rows)
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
-                        nudgeable)
+                        display_fmt, nudge_to, nudgeable)
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
@@ -207,8 +207,10 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             opts = list(w.options)
             hud.osd.show(w.label, str(opts[int(val) % len(opts)]))
         else:
+            # display_fmt: a stored legacy fraction on an engine-continuous
+            # slider shows one honest decimal instead of a rounded-up lie
             hud.osd.show(w.label, float(val), w.lo, w.hi,
-                         fmt="{:%s}" % w.fmt)
+                         fmt="{:%s}" % display_fmt(w, val))
 
     def nudge_select(d):
         ws = _nudgeables()
@@ -227,8 +229,16 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             opts = list(w.options)
             setattr(ui, w.attr, (int(getattr(ui, w.attr)) + d) % len(opts))
         else:
+            cur = float(getattr(ui, w.attr))
             step = (w.hi - w.lo) / 40.0 * (5.0 if big else 1.0)
-            val = min(max(float(getattr(ui, w.attr)) + d * step, w.lo), w.hi)
+            val = min(max(cur + d * step, w.lo), w.hi)
+            if w.step:
+                # the nudge is an input surface, so it snaps here explicitly:
+                # OverlayUI.__setattr__ only does it for engine-snapped
+                # sliders, and Scale/Hue (engine-continuous, quantised for
+                # control feel) must not drift onto fractions under the keys.
+                # Idempotent for the engine-snapped ones.
+                val = nudge_to(w, val, cur)
             setattr(ui, w.attr, val)
         _osd_show(w)
 

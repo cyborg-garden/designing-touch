@@ -906,9 +906,15 @@ def test_a_pre_change_look_reaches_the_same_engine_values(tmp_path, cfg,
     assert int(np.clip(round(float(ui.dg_scale)), 30, 720)) == engine["height"]
     assert int(ui.crush) == engine["crush"]
     assert m._palette() == engine["pair"]
-    # and the panel/OSD now print exactly those numbers, with no fraction left
-    for attr in ("dg_bits", "dg_scale", "crush"):
+    # Bits and Crush land on the engine's own number — their engines cannot
+    # use a fraction, so the readout and the engine become one number
+    for attr in ("dg_bits", "crush"):
         assert float(getattr(ui, attr)).is_integer(), attr
+    # ...but Scale passes through EXACTLY (engine_snaps=False): the pixel
+    # dithers round it themselves, and under ASCII the engine divides by it
+    # before any rounding — the stored fraction IS the picture, so snapping
+    # it here would be the one thing this test exists to forbid
+    assert float(ui.dg_scale) == cfg["scale"]
 
 
 def test_a_look_that_never_heard_of_invert_lands_un_inverted(tmp_path):
@@ -1273,6 +1279,25 @@ def test_the_safe_look_is_still_a_pixel_dither():
     """DESIGN.md §6.2: `0` must walk OUT of ASCII to a known-good picture."""
     assert (DitherGirlMode.BUILTIN[DitherGirlMode().safe_look()]["algorithm"]
             == "Floyd-Steinberg")
+
+
+def test_nudging_a_stored_fraction_lands_scale_back_on_the_grid(tmp_path):
+    """The other half of the pass-through bargain: the stored fraction is the
+    look's, not the control's. The look applies exactly, but the first real
+    edit — a nudge key here, through the real registry — adapts the control
+    back onto its whole-row grid, the same way the range fix let `ascii
+    stream` keep 30 until the operator moved the slider."""
+    from dtouch.panelspec import nudgeable
+
+    host = _booted(tmp_path)
+    host._wire_keys()
+    ui = host.ui
+    assert host._apply_look("legacy", {"scale": 45.55})
+    assert ui.dg_scale == 45.55                  # the stored look applies exactly
+    ws = [w for w in ui.iter_widgets() if nudgeable(w)]
+    ui.nudge_idx = next(i for i, w in enumerate(ws) if w.attr == "dg_scale")
+    host.reg.dispatch(ord("="))                  # one press: +17.25 rows
+    assert ui.dg_scale == 63.0                   # 62.8, snapped to the grid
 
 
 def test_status_line_names_ascii(tmp_path):

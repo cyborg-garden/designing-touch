@@ -443,8 +443,14 @@ class DitherGirlMode:
                 Slider("Contrast", "dg_contrast", 0.25, 3.0, save_key="contrast",
                        tip="Push tones apart before dithering. High contrast "
                            "survives stream compression."),
+                # engine_snaps=False: the pixel dithers round Scale themselves,
+                # but ASCII consumes it continuously (grid_for divides by it
+                # before any rounding), so a stored fractional scale is a real
+                # grid a look has always rendered — the step is control feel,
+                # and apply_look passes stored values through un-snapped
+                # (panelspec's step docstring).
                 Slider("Scale", "dg_scale", SCALE_LO, SCALE_HI, fmt=".0f",
-                       save_key="scale", step=1.0,
+                       save_key="scale", step=1.0, engine_snaps=False,
                        tip="Working height: whole pixels for the dithers, "
                            "whole character rows for ASCII. Low = big chunky "
                            "cells; high = fine grain (slow for the diffusion "
@@ -461,8 +467,12 @@ class DitherGirlMode:
                        apply="reset",
                        tip="Swap the ink and the background. Works on any "
                            "palette - dark on light, or light on dark."),
+                # engine_snaps=False: tint_rgb consumes hue as a float — the
+                # whole-degree step is control feel (a degree is below what an
+                # eye can name), not an engine constraint, so a stored
+                # fractional hue applies exactly (panelspec's step docstring).
                 Slider("Hue", "dg_hue", HUE_LO, HUE_HI, fmt=".0f",
-                       save_key="hue", step=1.0,
+                       save_key="hue", step=1.0, engine_snaps=False,
                        tip="Which colour Tint steers toward, in whole "
                            "degrees around the colour wheel. Does nothing "
                            "until Tint is up."),

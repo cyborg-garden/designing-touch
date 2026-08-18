@@ -29,7 +29,7 @@ from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
                     in_rect as _in)
 from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
-                        PresetList, Section, nudge_to, quantise)
+                        PresetList, Section, display_fmt, nudge_to, quantise)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
@@ -326,9 +326,13 @@ class OverlayUI:
                     self._quant[wdg.attr] = wdg
         # A spec swap (mode switch) can bind a quantum to an attr that is
         # already carrying an off-grid value from before — land it now, so the
-        # panel never draws a number the engine is not using.
+        # panel never draws a number the engine is not using. Only where the
+        # engine snaps, though: an `engine_snaps=False` slider (Scale, Hue)
+        # can legitimately hold a stored look's fraction — the engine renders
+        # it — and re-gridding it on every mode switch would silently retune
+        # the look the operator is coming back to.
         for attr, wdg in self._quant.items():
-            if hasattr(self, attr):
+            if wdg.engine_snaps and hasattr(self, attr):
                 setattr(self, attr, quantise(wdg, getattr(self, attr)))
 
     def __setattr__(self, name, value):
@@ -342,13 +346,24 @@ class OverlayUI:
         hold", which is the whole point: the readout, the OSD, the spec-derived
         HUD line and the engine all read that one number.
 
+        The rule applies only where the ENGINE lands on the grid
+        (`Slider.engine_snaps`, the default): for those, any fractional value
+        would be a readout lie about a picture already rendered at the snapped
+        number. A slider whose engine consumes the value continuously (Scale,
+        Hue) is quantised at its input surfaces instead — the drag in
+        `_set_from_track`, the nudge keys in the shell — because its one other
+        writer, `apply_look`, is a stored look that is the authority on its
+        own value and must pass through exactly (see panelspec's `step`
+        docstring).
+
         `nudge_to` (not `quantise`) is the rule, so a 1/40-of-range nudge on a
         four-step slider still moves it; see its docstring for why that cannot
         misfire on the writers that mean an exact value.
         """
         quant = self.__dict__.get("_quant")
         wdg = quant.get(name) if quant else None
-        if wdg is not None and isinstance(value, (int, float)) \
+        if wdg is not None and wdg.engine_snaps \
+                and isinstance(value, (int, float)) \
                 and not isinstance(value, bool):
             value = nudge_to(wdg, value, self.__dict__.get(name))
         object.__setattr__(self, name, value)
@@ -581,8 +596,11 @@ class OverlayUI:
         g = self._gui
         if isinstance(wdg, Slider):
             val = getattr(self, wdg.attr)
+            # display_fmt, not wdg.fmt: a stored legacy fraction on an
+            # engine-continuous slider is really rendering, so ".0f" would
+            # print "46" over a 45.55-row grid (panelspec.display_fmt)
             y = g.slider(frame, wdg.label, wdg.attr, val, wdg.lo, wdg.hi, x, y, cw,
-                         info=wdg.tip or None, fmt=wdg.fmt)
+                         info=wdg.tip or None, fmt=display_fmt(wdg, val))
             return y + g.S(wdg.gap) if wdg.gap else y
         if isinstance(wdg, Toggle):
             val = bool(getattr(self, wdg.attr))
