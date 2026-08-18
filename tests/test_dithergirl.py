@@ -816,6 +816,18 @@ def test_mono_inverted_is_the_authored_pair_not_the_naive_swap():
     assert palette_pair("mono", True) != PALETTES["mono"][::-1]
 
 
+def test_newsprint_resolves_to_the_authored_dark_ink_pair():
+    """`newsprint` is the one built-in whose stored representation the palette
+    consolidation changed (`black-on-white` -> `mono` + `invert: True`), and
+    nothing else pins that `invert` key: drop it from the BUILTIN dict and the
+    suite stays green while the shipped dark-ink-on-paper look silently
+    re-tones to light-on-dark. The authority is the RESOLVED pair — the exact
+    colours the look shipped with under the retired name."""
+    cfg = DitherGirlMode.BUILTIN["newsprint"]
+    pair = palette_pair(cfg["palette"], cfg.get("invert", False))
+    assert pair == ((245, 245, 245), (16, 16, 16))
+
+
 def test_the_retired_palette_names_are_still_accepted():
     """DESIGN.md §9: presets are the one user-data-loss surface, and a Cycle
     silently IGNORES a stored value it does not recognise — so without this a
