@@ -1875,3 +1875,55 @@ def test_a_visible_rename_box_still_owns_the_keyboard(tmp_path):
     assert host.ui.rename_buf == start + "qqqqqq"
     assert host.ps.quit is False
     assert host.overlay is OverlayState.PANEL        # TAB never fired either
+
+
+def test_scrolling_the_rename_box_off_the_top_cancels_it(tmp_path):
+    """Fourth route, and the only one that needs no second control: the panel
+    column is several windows tall, so a few wheel notches put the open rename
+    box above the frame. cv2 clips off-frame draws silently, so the walk still
+    "drew" the box every frame — reaching the row is not painting it — and the
+    measured buffer for TAB s <wheel> m ? 0 q q was `mine_112710m?qq` with
+    quit still False and zero box pixels on screen. The flag must be earned by
+    the drawn rect actually intersecting the frame."""
+    host = _renaming_host(tmp_path)
+    _present(host)                                   # reveal queued if needed
+    _present(host)                                   # box painted
+    assert host.ui.renaming is not None
+
+    # while the box IS on screen the contract is unweakened: typing still
+    # captures, and `q` lands in the buffer instead of quitting
+    _present(host, ord("q"))
+    assert host.ui.rename_buf.endswith("q")
+    assert host.ps.quit is False
+
+    # real wheel events through the real mouse route (Cocoa encoding: the
+    # delta rides in (x, y); negative = toward the user = scroll down)
+    for _ in range(24):
+        host._on_mouse(cv2.EVENT_MOUSEWHEEL, 0, -3, 0)
+        _present(host)
+    assert host.ui.scroll > 0
+    assert host.ui.renaming is None, "an off-screen box kept the keyboard"
+
+    _present(host, ord("q"))
+    _present(host, ord("q"))
+    assert host.ps.quit is True, "q must quit once the box is gone"
+
+
+def test_a_rename_box_born_below_the_fold_is_scrolled_into_view(tmp_path):
+    """The visibility gate must not break the flow it guards: save appends the
+    new look's row, and with enough looks (or a small window) that row opens
+    BELOW the fold. Silently expiring a rename the operator just asked for
+    would send the name they type to the global keys — `q q` would quit the
+    show mid-naming. Instead the next draw scrolls the row into view, and the
+    box keeps the keyboard because it is genuinely painted."""
+    host = _renaming_host(tmp_path)
+    # the harness window is 108 px against a ~1200 px column, so the fresh
+    # save's row starts off-screen — the exact case
+    _present(host)
+    assert host.ui.renaming is not None              # grace: reveal queued
+    _present(host)                                   # reveal applied: painted
+    assert host.ui.scroll > 0, "the panel did not scroll to the box"
+    assert host.ui.renaming is not None
+    for ch in "x!":
+        _present(host, ord(ch))
+    assert host.ui.rename_buf.endswith("x!")         # typing lands in the box

@@ -543,16 +543,25 @@ stay reachable, because pressing the key again undoes them. Resolution lives
 on the edit surface, where changing it is a deliberate decision.
 
 **A rename box holds the keyboard only while it is on screen** (amended
-2026-08-15). The consumption rule below is right and stays, but it was not
-tied to visibility, and three routes left `renaming` set with nothing drawn:
-collapse the sidebar with the chevron, open the menu from the panel's own
-`Menu (M)` row, or hide the overlay. Two clicks were enough. The screen then
-showed a completely normal instrument — bottom hint still reading
+2026-08-15; scroll route closed 2026-08-19). The consumption rule below is
+right and stays, but it was not tied to visibility, and four routes left
+`renaming` set with nothing drawn: collapse the sidebar with the chevron, open
+the menu from the panel's own `Menu (M)` row, hide the overlay — or scroll the
+box off the top of the column, which needs no second control at all (the panel
+column is ~1200 px in a 720 px window; TAB, `s`, a few wheel notches). The
+screen then showed a completely normal instrument — bottom hint still reading
 `m menu - TAB panel - ? keys`, all three dead — while TAB, `m`, `?`, space,
 `0` and both presses of `q` were typed into a field nobody could see. Only
 `Esc` got out, and nothing said so. The shell now cancels any rename box that
-was not painted on the frame just composed: visibility is the rule, not a list
-of routes, so any future way to take the panel off screen is covered.
+was not painted on the frame just composed, and *painted means pixels*: cv2
+clips off-frame draws silently, so the draw walk reaching the row does not
+count — the box's rect has to intersect the frame. Visibility is the rule, not
+a list of routes, so any future way to take the panel off screen is covered.
+One grace note keeps the rule from eating its own flow: a box that *opens*
+below the fold (save appends the new look's row) is scrolled into view on the
+next frame rather than silently expired — cancelling a rename the operator
+just asked for would send the name they type to the global keys, `q q`
+included.
 
 **The key map sits on a plate** (amended 2026-08-15). The 65% scrim is a
 multiply, so it darkens the picture without flattening it: a 1-bit output is 0

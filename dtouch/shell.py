@@ -928,8 +928,7 @@ class Host:
                 names = self._reload_presets()
                 if name in names:
                     ui.preset_idx = names.index(name)
-                ui.renaming = name
-                ui.rename_buf = name
+                ui.begin_rename(name)
                 self.hud.toasts.hint("saved - " + name)
                 print("saved preset", name)
             elif ok:

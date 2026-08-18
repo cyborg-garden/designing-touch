@@ -268,6 +268,9 @@ class OverlayUI:
         self.renaming = None         # name currently being renamed (typing mode)
         self.rename_buf = ""
         self._rename_drawn = False   # the box reached the screen on the last draw
+        self._rename_reveal = False  # box just opened: scroll it into view if hidden
+        self._reveal_scroll = None   # queued scroll correction (applied next draw)
+        self._rename_grace = False   # one-frame token: a reveal was queued THIS draw
         self._del_armed = None       # first x-click arms; second confirms
         self._blink = 0
         self.panel_w = 290           # base (1080p) panel width; scaled by self._s when drawn
@@ -389,45 +392,73 @@ class OverlayUI:
         return self._gui.S(n)
 
     # ----- keyboard (rename typing) -----
+    def begin_rename(self, name, buf=None):
+        """Open the rename box on `name` (the pencil click, and the shell's
+        save flow). The reveal flag covers the box that opens BELOW the fold:
+        save appends the new look's row, and with enough saved looks that row
+        is off-screen — the next draw scrolls it into view instead of letting
+        `expire_offscreen_rename` silently cancel a rename the operator just
+        asked for."""
+        self.renaming = name
+        self.rename_buf = name if buf is None else buf
+        self._rename_reveal = True
+
     def cancel_rename(self):
         """Drop the rename without committing it — what Esc does."""
         self.renaming = None
         self.rename_buf = ""
+        self._rename_reveal = False
+        self._reveal_scroll = None
 
     def expire_offscreen_rename(self):
         """A rename box that did not reach the screen loses the keyboard.
 
         `on_key` below gives the box EVERY key by design — `q` must not quit
         mid-typing (DESIGN.md §6.2) — and that contract is only safe while the
-        box is visible. It was not. Three routes left `renaming` set with
+        box is visible. It was not. Four routes left `renaming` set with
         nothing drawn: collapse the sidebar with the chevron, open the menu
-        from the panel's own `Menu (M)` row, or hide the overlay. The screen
-        then looked like a completely normal instrument, bottom hint and all
-        (`m menu - TAB panel - ? keys` — three dead keys), while TAB, `m`, `?`,
-        space, `0` and both presses of `q` were typed into a field nobody could
-        see. Measured buffer for exactly that sequence: `"classicm? 0qq"`, with
+        from the panel's own `Menu (M)` row, hide the overlay, or scroll the
+        box off the top of the column. The screen then looked like a
+        completely normal instrument, bottom hint and all (`m menu - TAB
+        panel - ? keys` — three dead keys), while TAB, `m`, `?`, space, `0`
+        and both presses of `q` were typed into a field nobody could see.
+        Measured buffer for exactly that sequence: `"classicm? 0qq"`, with
         quit still False. Only Esc got out, and nothing on screen said so.
 
         The rule is visibility, not a list of routes: **the box may hold the
-        keyboard only for as long as it is being painted.** The shell calls
-        this once per composed frame, right after the draw, so `_rename_drawn`
-        is the just-rendered truth — a collapsed sidebar, an open menu, a
-        hidden overlay, or a mode switch that retired the name all cancel it
-        for the same reason and without being enumerated here. Any future way
-        to take the panel off screen is covered the day it is written.
+        keyboard only for as long as it is being painted.** Painted means
+        PIXELS: cv2 clips an off-frame draw silently, so `_rename_drawn` is
+        earned only when the box's rect actually intersects the frame (see
+        `_draw_preset_list`), never merely because the draw walk reached the
+        row. The shell calls this once per composed frame, right after the
+        draw, so the flag is the just-rendered truth — a collapsed sidebar, an
+        open menu, a hidden overlay, a mode switch that retired the name, or a
+        wheel that scrolled the row away all cancel it for the same reason and
+        without being enumerated here. Any future way to take the panel off
+        screen is covered the day it is written.
+
+        One deliberate grace: a box that just OPENED off-screen (save appends
+        the new look's row, which can sit below the fold) has a scroll
+        correction queued (`_reveal_scroll`) — the next draw paints it, so it
+        is not cancelled in the gap. The grace is a one-frame token granted
+        only by the draw walk that queued the reveal: a frame that never runs
+        the walk grants nothing, so a menu or a hidden overlay still expires
+        the box even mid-reveal.
 
         Cancelling is silent on purpose: the click that hid the box is its own
         feedback (the panel visibly collapsed / the menu opened), so a toast
         would be noise, and the rename was never committed — the look keeps
         the name it already had.
         """
-        if self.renaming is not None and not self._rename_drawn:
+        if self.renaming is not None and not self._rename_drawn \
+                and not self._rename_grace:
             self.cancel_rename()
         # consumed, not merely read: on the frames where the panel is not drawn
         # at all — menu open, overlay HIDDEN or HUD — `draw()` never runs, so
-        # this is the only place the flag can go stale, and a stale True is
+        # this is the only place the flags can go stale, and a stale True is
         # exactly the deaf keyboard this exists to prevent.
         self._rename_drawn = False
+        self._rename_grace = False
 
     def on_key(self, key):
         """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
@@ -444,8 +475,9 @@ class OverlayUI:
             if new and new != self.renaming:
                 self.pending_rename = (self.renaming, new)
             self.renaming = None
+            self._rename_reveal, self._reveal_scroll = False, None
         elif key == 27:                  # esc — cancel
-            self.renaming = None
+            self.cancel_rename()
         elif key in (8, 127):            # backspace / delete
             self.rename_buf = self.rename_buf[:-1]
         elif 32 <= key <= 126 and len(self.rename_buf) < 22:
@@ -491,6 +523,11 @@ class OverlayUI:
         frame[:, sx:] = roi
         # the column can be taller than the window (e.g. 720p) — scroll, clamped so it's
         # a no-op when everything fits. content height comes from the previous draw.
+        if self._reveal_scroll is not None:
+            # a rename box opened off-screen last draw: bring its row into
+            # view (queued there, applied here, so the walk below paints it)
+            self.scroll = self._reveal_scroll
+            self._reveal_scroll = None
         self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
         x, cw, y = px + g.S(16), pw - g.S(32), g.S(30) - self.scroll
         g.text(frame, self.panel_title, x, y, self.accent, 0.62, 2)
@@ -577,8 +614,27 @@ class OverlayUI:
         for i, name in enumerate(self.presets):
             if name == self.renaming:
                 g.rename_box(frame, self.rename_buf, self._blink, x, y, cw, px)
-                self._rename_drawn = True    # it is on screen: it may keep the
-                y += g.S(28)                 # keyboard (expire_offscreen_rename)
+                # "painted" means PIXELS, not "the walk got here": cv2 clips an
+                # off-frame draw silently, so a box scrolled past the top was
+                # "drawn" every frame while an invisible field kept the whole
+                # keyboard (TAB - s - a few wheel notches was enough). The
+                # flag — and with it the keyboard (expire_offscreen_rename) —
+                # is earned only when the box's rect intersects the frame.
+                if 0 < y + g.S(24) and y < frame.shape[0]:
+                    self._rename_drawn = True
+                    self._rename_reveal = False
+                elif self._rename_reveal:
+                    # just opened, below the fold (save appends the row):
+                    # queue a scroll that shows it rather than letting the
+                    # rename the operator just asked for silently expire.
+                    # `ty` is the row's unscrolled column offset; the grace
+                    # token buys exactly the one frame the queue needs.
+                    ty = y + self.scroll
+                    self._reveal_scroll = max(
+                        ty - g.S(4) if y < 0
+                        else ty + g.S(28) - frame.shape[0], 0)
+                    self._rename_grace = True
+                y += g.S(28)
                 continue
             r = g.row(frame, name, "preset", x, y, cw,
                       active=(i == self.preset_idx), payload=i)
@@ -704,8 +760,7 @@ class OverlayUI:
                 self.pending_delete = confirmed
             return
         if kind == "ren":
-            self.renaming = payload
-            self.rename_buf = payload    # prefill with the current name
+            self.begin_rename(payload)   # prefill with the current name
             return
         if kind == "slot":
             self.pending_slot = payload  # the shell assigns/clears + persists
