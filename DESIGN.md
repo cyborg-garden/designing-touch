@@ -245,6 +245,20 @@ hint line is part of the layout — `, . move - enter select - esc back`, or
 `, . move - enter select - q quit` at boot, where `esc back` would be a lie —
 and the real mode cards render their titles in CAPS per the sketch.
 
+*(Amended 2026-08-15.)* No key in the menu is silent. `0` and `3`–`9` used to
+do nothing at all: the digit branch mapped a key to `i = int(ch) - 1` and
+returned nothing to hint on when that index was not an enabled card, while `s`,
+`r`, TAB and every other unbound printable key hinted correctly. A digit that
+names the **reserved card** now says so in words (`flocking - coming soon`) —
+that card is on screen and dashed, so deflecting to a key map that cannot
+explain it either was the wrong answer; a digit that names no card at all hints
+`? for keys` like everything else. The **arrow keys** also move the selection,
+because the menu is a row of cards and the first screen anyone meets, and a
+child reaches for arrows long before `,`/`.`. That does not make them
+load-bearing (§6.2): `,`/`.` stay the documented navigation and stay on the
+hint line, the arrow codes here are macOS's masked values, and nothing in the
+menu is reachable only by arrow.
+
 Saving a look (`+ Save current look` row, or the `s` key): creates an
 auto-named look and immediately opens its rename box — naming is one flow —
 and two saves in one second must not collide (suffix on collision). Save,
@@ -298,10 +312,10 @@ dtouch · DITHER GIRL
 - TONE             ← Bits (1–4, int) · Gamma toggle (default ON) · Bias cycle
                      auto/light/dark · Contrast · Scale (30–720, default 72) ·
                      grid readout (ASCII only)
-- PALETTE          ← eleven two-colour pairs, each shipped only if its own
-                     off/on measures ≥ 4.5:1 (§5): white-on-black ·
-                     black-on-white · amber · green phosphor · cyan · magenta ·
-                     ice · blood · gameboy · sepia · hi-vis — plus Hue and Tint
+- PALETTE          ← ten two-colour pairs, each shipped only if its own off/on
+                     measures ≥ 4.5:1 (§5): mono · amber · green phosphor ·
+                     cyan · magenta · ice · blood · gameboy · sepia · hi-vis —
+                     plus an **Invert** toggle, and Hue and Tint
 - SIGNAL   (G)     ← shell rack minus dither row
 ──────────────────
 Sound react (A) · Sens · Record (R) · Menu (M) · Quit
@@ -332,6 +346,40 @@ than hiding it:
   DIM readout under the slider gives the live grid (`grid 160 x 45 chars - cell
   8x16`), and says `cell floor - characters stay legible` once the legibility
   floor is what is setting the cell size and the slider has run out of room.
+
+**Invert** (amended 2026-08-15 — the user's call: "instead of having white on
+black or black on white couldn't any of the pallets just have an invert
+switcher?"). `white-on-black` and `black-on-white` were one palette entered
+twice: which end carries the ink is orthogonal to the hue, so spending two of
+eleven slots on it bought a flip for one palette and denied it to the other
+nine. They collapse to `mono` plus a toggle that flips ANY palette, composing
+with Hue/Tint, the swatch strip, ASCII (where it flips ink and ground for
+free — the glyph ramp is measured against whatever pair it is handed) and the
+matte gate.
+
+It saves and recalls like every other control, and it is `apply="reset"`
+rather than a Toggle's default `apply="keep"`: Invert is part of the picture,
+not a live rig switch, so a look that does not name it must land un-inverted.
+
+The retired names are accepted on load forever, mapping to `mono` + invert
+off/on, and the migration is bit-for-bit: `mono` inverted is the AUTHORED pair
+`black-on-white` shipped with (245 paper, 16 ink, 17.45:1), not the plain swap
+of `mono`'s own 0/255 — the two monochrome palettes were never each other's
+mirror, and a naive swap would have silently re-toned every look that named
+`black-on-white`, `newsprint` included.
+
+**Whole-number sliders** (same amendment — "maybe some sliders are actually
+only whole numbers?"). A control whose engine cannot use a fraction declares
+its quantum in the spec (`Slider.step`, and `Slider.snap` because Bits and
+Scale round while Crush truncates), and the one number it holds is what the
+panel prints, what the OSD and the spec-derived HUD line print, and what the
+engine consumes. Quantised: **Bits** (both racks, 4 settings), **Scale**
+(whole working pixels / whole character rows), **Crush** (whole output bits,
+`int()`), **Hue** (whole degrees — finer than the track can resolve anyway).
+Deliberately NOT quantised: Chroma and Drift, which look like pixel counts but
+are the amplitudes of a per-frame draw that then lands on a whole pixel — the
+fraction is used, so the tooltip says where the whole numbers come in instead
+of the slider pretending to be coarser than it is.
 
 **Hue / Tint** (delivering §4.2's "two-color ramps later"): two sliders rather
 than a longer list, because a list of named pairs cannot be dialled during a
@@ -398,8 +446,37 @@ pinned regression target. Hit targets ≥ 2.75u whole-row.
   blackout is armed** (judge finding: a fading toast alone leaves an operator
   believing the app died; the tick is the one persistent element allowed on a
   blacked-out frame, and blackout output is intentionally not clean-capture).
+
+  *Re-examined 2026-08-15 and kept.* Blackout in HIDDEN lights 1,225 px of
+  2,073,600 at 1080p (the tick), which reads as a broken app rather than an
+  armed one. Two things make it not a dead end, both measured on that exact
+  frame: the tick is the **only** thing separating "armed" from "the app
+  died", so removing it makes the state genuinely indistinguishable from a
+  crash — the opposite of the fix; and the screen is black only while nobody
+  is touching it. Arming it flashes `BLACKOUT` (10,608 px). Any unbound key
+  paints the hint (1,963). A param nudge paints the OSD (4,356). One `TAB`
+  brings the whole HUD back (2,807). Ten seconds hands-off returns to 1,225 —
+  the clean-capture contract intact. The keys that used to answer with nothing
+  here were the arrows and Enter, and that was §6.2's hint window, now fixed.
 - Every state redundantly coded (color + text + shape). Contrast target:
   legible against a white wall. Cursor auto-hides after 2 s idle.
+
+  *Measured 2026-08-15, after the Invert toggle raised the worry that ten
+  palettes can now put a bright ground under the HUD; figures restated
+  2026-08-19 — the first pass idealised the ink as pure white (21.0:1 is
+  pure-white-on-pure-black, a pair this HUD does not draw).* The double-draw
+  holds, and the worry is backwards: the black under-stroke carries the glyph,
+  so the brighter the ground the better it reads. The pair that is present on
+  EVERY ground is the real ink against its own black outline: the status
+  line's INK (215,222,218) measures 15.41:1, the bottom hint's DIM
+  (140,150,145) — the smaller and weaker of the two — 6.95:1. Ground contrast
+  only adds to that: on a white wall the outline itself carries 21.0:1
+  against the ground, and on the weakest case, a flat mid-grey, it still
+  carries 5.32:1. Both inks clear WCAG AA's 4.5:1 on their own, and mid-grey
+  is the ground **Invert moves away from**: over the inverted 1-bit picture
+  the toggle actually produces, both lines render as heavy black outline
+  type. No scrim added — it would put permanent chrome on the picture in HUD,
+  which is a state used for composing shots, for no measured gain.
 
 **Layout discipline:** persistent UI only in the right sidebar and corners;
 title-safe 3.5% inset; frame center reserved for transient toasts. Overlay
@@ -445,14 +522,70 @@ lowercase; an uppercase-only table would silently demand Shift).
 | `r` | `record.toggle` | red dot; filename toast on stop |
 | `v` | `video_bg.toggle` (Particles) | toast |
 | `i` | `debug.toggle` — fps/frame-time/res HUD line (graft: Contract) | HUD line |
-| `?` | `help.overlay` — live key map over scrim; any key closes | — |
+| `?` | `help.overlay` — live key map on a plate over the scrim; any key closes | — |
 | `q` | quit: first press toasts `q again to quit`, second within 2 s quits | toast |
 | `s` | `preset.save` (PANEL state only — edit action) | name toast |
 
 Param nudging without the panel: `,`/`.` select prev/next control in spec
 order (OSD shows name + value + bar), `-`/`=` nudge by 1/40 of range
-(`_`/`+` = ×5). Works in every overlay state. Arrow keys are deliberately not
-load-bearing (`waitKey` platform codes).
+(`_`/`+` = ×5 on a continuous slider; on a whole-number slider whose step is
+coarser than five presses — Bits, Crush — both the small and the big nudge
+move one whole step, and the command label says "big", not "×5", because a
+×5 promise would lie on exactly the controls it moves least). Works in every
+overlay state. Arrow keys are deliberately not
+load-bearing (`waitKey` platform codes) — but not load-bearing means they must
+say so, not vanish. The `? for keys` hint used to fire only for codes 32–126,
+and macOS masks the arrows to 0–3 (Enter 13, Backspace 8, Delete 127), so those
+seven keys did nothing anywhere with no feedback at all while every printable
+unbound key answered correctly (amended 2026-08-15). They hint now. `TAB` and
+`Esc` stay out of that window on purpose — the overlay stepper consumes them
+before dispatch — and so does `waitKey`'s idle code, which is no keypress.
+
+The walk skips any control the perform layer cannot take back (amended
+2026-08-15). Today that is exactly one: **output resolution**. It is a `Cycle`,
+so it was simply the 2nd of 23 stops in Particles and the 3rd of 15 in Dither
+Girl — `.` `.` `=` with no panel open recreated the window at 4K, took the
+frame rate with it, and left `0` with no answer, because panic restores the
+mode's *look* and the window is not in the look. The test is not "is this a
+system setting" and not `save=False` — Dither Girl's `input` cycle is unsaved
+and stays reachable, because stepping it again steps it back. (Mirror is a
+Toggle, so it was never in the walk to begin with — the walk is Sliders and
+Cycles only.) Resolution lives on the edit surface, where changing it is a
+deliberate decision.
+
+**A rename box holds the keyboard only while it is on screen** (amended
+2026-08-15; scroll route closed 2026-08-19). The consumption rule below is
+right and stays, but it was not tied to visibility, and four routes left
+`renaming` set with nothing drawn: collapse the sidebar with the chevron, open
+the menu from the panel's own `Menu (M)` row, hide the overlay — or scroll the
+box off the top of the column, which needs no second control at all (the panel
+column is ~1200 px in a 720 px window; TAB, `s`, a few wheel notches). The
+screen then showed a completely normal instrument — bottom hint still reading
+`m menu - TAB panel - ? keys`, all three dead — while TAB, `m`, `?`, space,
+`0` and both presses of `q` were typed into a field nobody could see. Only
+`Esc` got out, and nothing said so. The shell now cancels any rename box that
+was not painted on the frame just composed, and *painted means pixels*: cv2
+clips off-frame draws silently, so the draw walk reaching the row does not
+count — the box's rect has to intersect the frame. Visibility is the rule, not
+a list of routes, so any future way to take the panel off screen is covered.
+One grace note keeps the rule from eating its own flow: a box that *opens*
+below the fold (save appends the new look's row) is scrolled into view on the
+next frame rather than silently expired — cancelling a rename the operator
+just asked for would send the name they type to the global keys, `q q`
+included.
+
+**The key map sits on a plate** (amended 2026-08-15). The 65% scrim is a
+multiply, so it darkens the picture without flattening it: a 1-bit output is 0
+vs 255, and 65% of that is 0 vs 89 — still hard-edged, still full-contrast, and
+at the same spatial scale as the glyph strokes. Measured over pure 1-bit noise,
+the ground under the table swung 0–89 (std 44.5) and gave white ink only 2.9×
+contrast against the brightest pixel it sat on. The block now gets the panel's
+own ground (PANEL at 0.86) sized to the table: ground 28–40 (std 6.0), worst
+case 6.4×. The scrim stays, so the picture is still visibly there around the
+plate and help never reads as the instrument stopping. It costs 2.2 → 2.9 ms
+per frame at 1080p, and only on the frames the modal is open: help is a modal,
+explicitly outside the ≤1 ms steady-state overlay budget (§5). HIDDEN (0.002
+ms), HUD (0.141) and PANEL (0.74) are unchanged.
 
 **Rename typing consumes every key except `Esc`** (which cancels the rename and
 nothing else). This is the explicit carve-out rule (judge finding: "panic works

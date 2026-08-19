@@ -29,7 +29,7 @@ from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
                     in_rect as _in)
 from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
-                        PresetList, Section)
+                        PresetList, Section, display_fmt, nudge_to, quantise)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
@@ -59,6 +59,19 @@ _RANGES = {
     "chroma": (0.0, 60.0), "drift": (0.0, 40.0), "crush": (0.0, 8.0),
 }
 
+# Sliders whose engine cannot use a fraction, and how a raw value lands on the
+# whole number it will actually be used as (panelspec.Slider.step/snap). The
+# rest of the rack is genuinely continuous and stays so.
+#
+# Crush TRUNCATES rather than rounds because the shell consumes it as
+# `int(ui.crush)` — see dtouch/shell.py's SIGNAL sync. Matching that here is
+# what makes the change invisible to already-saved looks: a stored Crush of
+# 2.92 has always rendered at bit depth 2, it just used to *read* "3".
+_QUANTISED = {
+    "sig_bits": (1.0, "round"),   # int(clip(round(v), 1, 4)) — 4 real settings
+    "crush":    (1.0, "floor"),   # int(v) — whole output bits, 0 = off
+}
+
 _SLIDERS = [
     ("Trails", "fade", "How long particle motion trails linger before fading."),
     ("Glow", "exposure", "Overall brightness and bloom of the particles."),
@@ -84,6 +97,11 @@ _SAVE_KEYS = {"curl": "curl_amp", "dot": "base_size", "reseed": "reseed_frac",
 def _slider_spec(label, attr, tip, **kw):
     lo, hi = _RANGES[attr]
     kw.setdefault("save_key", _SAVE_KEYS.get(attr))
+    if attr in _QUANTISED:
+        step, snap = _QUANTISED[attr]
+        kw.setdefault("step", step)
+        kw.setdefault("snap", snap)
+        kw.setdefault("fmt", ".0f")
     return Slider(label, attr, lo, hi, tip=tip, **kw)
 
 
@@ -98,7 +116,7 @@ def build_particles_sections(palettes, mattes):
             Cycle("matte", "matte_idx", list(mattes), save_key="matte",
                   status="matte {}"),
             Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
-                  key="res", save=False),
+                  key="res", save=False, nudge=False),
             Toggle("Video bg", "video_bg"),
             _slider_spec("Vid mix", "video_mix",
                          "How visible the raw camera footage is behind the particles.",
@@ -137,18 +155,31 @@ def build_signal_section():
             # quality controls grow the rack; a mode that claims them —
             # Dither Girl owns ALL dither quality — hides them)
             Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
+                   step=_QUANTISED["sig_bits"][0],
+                   snap=_QUANTISED["sig_bits"][1],
                    tip="Dither bit depth. 1 = pure two-tone; higher keeps "
-                       "more shades."),
+                       "more shades. Whole numbers only - there are four "
+                       "settings."),
             Toggle("Gamma", "sig_gamma", save_key="gamma",
                    tip="Dither in linear light so mid-tones keep their "
                        "perceived brightness. Off = the crushed retro look."),
             Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias"),
+            # Chroma and Drift look like pixel counts and are not: each is the
+            # AMPLITUDE of a per-frame random draw that then lands on a whole
+            # pixel. The fraction is used — 12.4 and 12.6 are different bleeds
+            # — so the slider stays continuous and the tooltip says where the
+            # whole numbers come in, rather than the panel pretending the
+            # control is coarser than it is (DESIGN.md §4.1: the human
+            # explanation lives in the `i` tooltip).
             _slider_spec("Chroma", "chroma",
-                         "Colour bleed: red and blue drift apart, slowly."),
+                         "Colour bleed: red and blue drift apart, slowly. "
+                         "This is how far they can go; each frame lands on a "
+                         "whole pixel."),
             _slider_spec("Drift", "drift",
-                         "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears."),
+                         "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears. "
+                         "This is the most any row can slip, in whole pixels."),
             _slider_spec("Crush", "crush",
-                         "Hard bit-depth reduction. 0 = off."),
+                         "Hard bit-depth reduction, in whole bits. 0 = off."),
             Toggle("Scanlines", "scanlines", on_text="on"),
         ], open=False, gap=6, store="signal")
 
@@ -236,6 +267,10 @@ class OverlayUI:
         self.pending_rename = None   # (old, new) committed via Enter (live loop applies)
         self.renaming = None         # name currently being renamed (typing mode)
         self.rename_buf = ""
+        self._rename_drawn = False   # the box reached the screen on the last draw
+        self._rename_reveal = False  # box just opened: scroll it into view if hidden
+        self._reveal_scroll = None   # queued scroll correction (applied next draw)
+        self._rename_grace = False   # one-frame token: a reveal was queued THIS draw
         self._del_armed = None       # first x-click arms; second confirms
         self._blink = 0
         self.panel_w = 290           # base (1080p) panel width; scaled by self._s when drawn
@@ -276,6 +311,7 @@ class OverlayUI:
         self._toggles = {}    # hit key -> Toggle
         self._cycles = {}     # hit key -> Cycle
         self._sliders = {}    # attr -> Slider
+        self._quant = {}      # attr -> Slider, for the sliders with a quantum
         for wdg in self.iter_widgets():
             if isinstance(wdg, Toggle):
                 self._toggles[wdg.attr] = wdg
@@ -286,6 +322,51 @@ class OverlayUI:
                 self._cycles[wdg.hit_key] = wdg
             elif isinstance(wdg, Slider):
                 self._sliders[wdg.attr] = wdg
+                if wdg.step:
+                    self._quant[wdg.attr] = wdg
+        # A spec swap (mode switch) can bind a quantum to an attr that is
+        # already carrying an off-grid value from before — land it now, so the
+        # panel never draws a number the engine is not using. Only where the
+        # engine snaps, though: an `engine_snaps=False` slider (Scale, Hue)
+        # can legitimately hold a stored look's fraction — the engine renders
+        # it — and re-gridding it on every mode switch would silently retune
+        # the look the operator is coming back to.
+        for attr, wdg in self._quant.items():
+            if wdg.engine_snaps and hasattr(self, attr):
+                setattr(self, attr, quantise(wdg, getattr(self, attr)))
+
+    def __setattr__(self, name, value):
+        """Quantised sliders (DESIGN.md §4.1/§4.2) land on their own step here
+        rather than at each of the four places that write one.
+
+        Sliders, the nudge keys, preset apply and a mode's seeded defaults all
+        write plain attributes on this object, and only one of them — the
+        panel's own drag — lives in this file. Putting the rule at the write
+        means there is exactly one answer to "what value does this control
+        hold", which is the whole point: the readout, the OSD, the spec-derived
+        HUD line and the engine all read that one number.
+
+        The rule applies only where the ENGINE lands on the grid
+        (`Slider.engine_snaps`, the default): for those, any fractional value
+        would be a readout lie about a picture already rendered at the snapped
+        number. A slider whose engine consumes the value continuously (Scale,
+        Hue) is quantised at its input surfaces instead — the drag in
+        `_set_from_track`, the nudge keys in the shell — because its one other
+        writer, `apply_look`, is a stored look that is the authority on its
+        own value and must pass through exactly (see panelspec's `step`
+        docstring).
+
+        `nudge_to` (not `quantise`) is the rule, so a 1/40-of-range nudge on a
+        four-step slider still moves it; see its docstring for why that cannot
+        misfire on the writers that mean an exact value.
+        """
+        quant = self.__dict__.get("_quant")
+        wdg = quant.get(name) if quant else None
+        if wdg is not None and wdg.engine_snaps \
+                and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            value = nudge_to(wdg, value, self.__dict__.get(name))
+        object.__setattr__(self, name, value)
 
     def iter_widgets(self):
         """Every widget in the spec, sections flattened (spec order)."""
@@ -326,6 +407,74 @@ class OverlayUI:
         return self._gui.S(n)
 
     # ----- keyboard (rename typing) -----
+    def begin_rename(self, name, buf=None):
+        """Open the rename box on `name` (the pencil click, and the shell's
+        save flow). The reveal flag covers the box that opens BELOW the fold:
+        save appends the new look's row, and with enough saved looks that row
+        is off-screen — the next draw scrolls it into view instead of letting
+        `expire_offscreen_rename` silently cancel a rename the operator just
+        asked for."""
+        self.renaming = name
+        self.rename_buf = name if buf is None else buf
+        self._rename_reveal = True
+
+    def cancel_rename(self):
+        """Drop the rename without committing it — what Esc does."""
+        self.renaming = None
+        self.rename_buf = ""
+        self._rename_reveal = False
+        self._reveal_scroll = None
+
+    def expire_offscreen_rename(self):
+        """A rename box that did not reach the screen loses the keyboard.
+
+        `on_key` below gives the box EVERY key by design — `q` must not quit
+        mid-typing (DESIGN.md §6.2) — and that contract is only safe while the
+        box is visible. It was not. Four routes left `renaming` set with
+        nothing drawn: collapse the sidebar with the chevron, open the menu
+        from the panel's own `Menu (M)` row, hide the overlay, or scroll the
+        box off the top of the column. The screen then looked like a
+        completely normal instrument, bottom hint and all (`m menu - TAB
+        panel - ? keys` — three dead keys), while TAB, `m`, `?`, space, `0`
+        and both presses of `q` were typed into a field nobody could see.
+        Measured buffer for exactly that sequence: `"classicm? 0qq"`, with
+        quit still False. Only Esc got out, and nothing on screen said so.
+
+        The rule is visibility, not a list of routes: **the box may hold the
+        keyboard only for as long as it is being painted.** Painted means
+        PIXELS: cv2 clips an off-frame draw silently, so `_rename_drawn` is
+        earned only when the box's rect actually intersects the frame (see
+        `_draw_preset_list`), never merely because the draw walk reached the
+        row. The shell calls this once per composed frame, right after the
+        draw, so the flag is the just-rendered truth — a collapsed sidebar, an
+        open menu, a hidden overlay, a mode switch that retired the name, or a
+        wheel that scrolled the row away all cancel it for the same reason and
+        without being enumerated here. Any future way to take the panel off
+        screen is covered the day it is written.
+
+        One deliberate grace: a box that just OPENED off-screen (save appends
+        the new look's row, which can sit below the fold) has a scroll
+        correction queued (`_reveal_scroll`) — the next draw paints it, so it
+        is not cancelled in the gap. The grace is a one-frame token granted
+        only by the draw walk that queued the reveal: a frame that never runs
+        the walk grants nothing, so a menu or a hidden overlay still expires
+        the box even mid-reveal.
+
+        Cancelling is silent on purpose: the click that hid the box is its own
+        feedback (the panel visibly collapsed / the menu opened), so a toast
+        would be noise, and the rename was never committed — the look keeps
+        the name it already had.
+        """
+        if self.renaming is not None and not self._rename_drawn \
+                and not self._rename_grace:
+            self.cancel_rename()
+        # consumed, not merely read: on the frames where the panel is not drawn
+        # at all — menu open, overlay HIDDEN or HUD — `draw()` never runs, so
+        # this is the only place the flags can go stale, and a stale True is
+        # exactly the deaf keyboard this exists to prevent.
+        self._rename_drawn = False
+        self._rename_grace = False
+
     def on_key(self, key):
         """Feed a cv2.waitKey code. Returns True if consumed (a rename box is open),
         so the caller knows not to treat 'q' as quit while the user is typing.
@@ -341,8 +490,9 @@ class OverlayUI:
             if new and new != self.renaming:
                 self.pending_rename = (self.renaming, new)
             self.renaming = None
+            self._rename_reveal, self._reveal_scroll = False, None
         elif key == 27:                  # esc — cancel
-            self.renaming = None
+            self.cancel_rename()
         elif key in (8, 127):            # backspace / delete
             self.rename_buf = self.rename_buf[:-1]
         elif 32 <= key <= 126 and len(self.rename_buf) < 22:
@@ -357,6 +507,9 @@ class OverlayUI:
         # scale the whole panel by the output resolution, floored at the 1080p baseline so
         # 720p/1080p are unchanged and 4K renders at 2x (same fraction of the frame).
         self._s = max(1.0, h / BASE_H)
+        # cleared here and set again only if the rename box actually gets
+        # painted below — see expire_offscreen_rename()
+        self._rename_drawn = False
         self._hot = g.begin(self._s, self.mouse, self.accent)
         pw = g.S(self.panel_w)
         self._panel_px = pw
@@ -385,6 +538,11 @@ class OverlayUI:
         frame[:, sx:] = roi
         # the column can be taller than the window (e.g. 720p) — scroll, clamped so it's
         # a no-op when everything fits. content height comes from the previous draw.
+        if self._reveal_scroll is not None:
+            # a rename box opened off-screen last draw: bring its row into
+            # view (queued there, applied here, so the walk below paints it)
+            self.scroll = self._reveal_scroll
+            self._reveal_scroll = None
         self.scroll = imgui.clamp_scroll(self.scroll, self._content_h, h)
         x, cw, y = px + g.S(16), pw - g.S(32), g.S(30) - self.scroll
         g.text(frame, self.panel_title, x, y, self.accent, 0.62, 2)
@@ -438,8 +596,11 @@ class OverlayUI:
         g = self._gui
         if isinstance(wdg, Slider):
             val = getattr(self, wdg.attr)
+            # display_fmt, not wdg.fmt: a stored legacy fraction on an
+            # engine-continuous slider is really rendering, so ".0f" would
+            # print "46" over a 45.55-row grid (panelspec.display_fmt)
             y = g.slider(frame, wdg.label, wdg.attr, val, wdg.lo, wdg.hi, x, y, cw,
-                         info=wdg.tip or None, fmt=wdg.fmt)
+                         info=wdg.tip or None, fmt=display_fmt(wdg, val))
             return y + g.S(wdg.gap) if wdg.gap else y
         if isinstance(wdg, Toggle):
             val = bool(getattr(self, wdg.attr))
@@ -471,6 +632,26 @@ class OverlayUI:
         for i, name in enumerate(self.presets):
             if name == self.renaming:
                 g.rename_box(frame, self.rename_buf, self._blink, x, y, cw, px)
+                # "painted" means PIXELS, not "the walk got here": cv2 clips an
+                # off-frame draw silently, so a box scrolled past the top was
+                # "drawn" every frame while an invisible field kept the whole
+                # keyboard (TAB - s - a few wheel notches was enough). The
+                # flag — and with it the keyboard (expire_offscreen_rename) —
+                # is earned only when the box's rect intersects the frame.
+                if 0 < y + g.S(24) and y < frame.shape[0]:
+                    self._rename_drawn = True
+                    self._rename_reveal = False
+                elif self._rename_reveal:
+                    # just opened, below the fold (save appends the row):
+                    # queue a scroll that shows it rather than letting the
+                    # rename the operator just asked for silently expire.
+                    # `ty` is the row's unscrolled column offset; the grace
+                    # token buys exactly the one frame the queue needs.
+                    ty = y + self.scroll
+                    self._reveal_scroll = max(
+                        ty - g.S(4) if y < 0
+                        else ty + g.S(28) - frame.shape[0], 0)
+                    self._rename_grace = True
                 y += g.S(28)
                 continue
             r = g.row(frame, name, "preset", x, y, cw,
@@ -540,9 +721,7 @@ class OverlayUI:
                 self._scroll_drag = (y, self.scroll)   # empty panel area: drag to scroll
         elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
             if self._drag:
-                attr, x0, x1, lo, hi = self._drag
-                t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-                setattr(self, attr, lo + t * (hi - lo))
+                self._set_from_track(self._drag, x)
             elif self._thumb_drag:
                 # the THUMB follows the finger (imgui's convention block)
                 y0, s0, travel, span = self._thumb_drag
@@ -555,6 +734,23 @@ class OverlayUI:
             self._drag = None
             self._scroll_drag = None
             self._thumb_drag = None
+
+    def _set_from_track(self, payload, x):
+        """Turn a mouse x on a slider's track into that slider's value.
+
+        Quantised the EXACT way (`quantise`, not `nudge_to`): a drag is a
+        request for the value under the finger, so it must land on the nearest
+        step and stay there while the finger wanders inside it — a drag that
+        ratcheted a step per mouse-move event would be unusable. It is also
+        what keeps the nudge rule honest: this write arrives already on the
+        grid, so "the write did not move it" can only mean the finger is still
+        inside the same step.
+        """
+        attr, x0, x1, lo, hi = payload
+        t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
+        val = lo + t * (hi - lo)
+        wdg = self._quant.get(attr)
+        setattr(self, attr, quantise(wdg, val) if wdg is not None else val)
 
     def _activate(self, kind, payload, x, y=0):
         """Generic activation: toggles flip their attr, cycles rotate through
@@ -582,8 +778,7 @@ class OverlayUI:
                 self.pending_delete = confirmed
             return
         if kind == "ren":
-            self.renaming = payload
-            self.rename_buf = payload    # prefill with the current name
+            self.begin_rename(payload)   # prefill with the current name
             return
         if kind == "slot":
             self.pending_slot = payload  # the shell assigns/clears + persists
@@ -598,10 +793,8 @@ class OverlayUI:
             wdg = self._cycles[key]
             setattr(self, wdg.attr, (getattr(self, wdg.attr) + d) % len(wdg.options))
         elif kind == "slider":
-            attr, x0, x1, lo, hi = payload
             self._drag = payload
-            t = min(max((x - x0) / max(x1 - x0, 1), 0.0), 1.0)
-            setattr(self, attr, lo + t * (hi - lo))
+            self._set_from_track(payload, x)
         elif kind == "section":
             self.sections[payload] = not self.sections.get(payload, True)
         elif kind in self._toggles:

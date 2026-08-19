@@ -35,14 +35,16 @@ the ramp over the input range maps sRGB mid-grey to ~0.42 apparent instead of
 0.50 and halves the picture's apparent brightness — which is why
 "gamma-correct ASCII looks bad" is folklore too. The 256-entry position LUT
 inverts the ramp's *measured composited luminance* curve, which also makes
-dark-ink palettes (black-on-white) work for free: their measured luminances run
-*downwards*, and the tone target — interpolated between the same two palette
-luminances — runs downwards with them, so the two inversions cancel. The LUT
-stays monotone increasing and a bright input still picks the DENSEST glyph,
-i.e. the most ink. That is exactly the shipped ``_palette_map`` semantic, where
-a white input lands on the palette's ``on`` colour whichever end that is (so
-`black-on-white` draws a bright subject in heavy black ink, as its name says).
-No ``if palette ==`` anywhere.
+dark-ink palettes (any palette under the panel's Invert toggle) work for free:
+their measured luminances run *downwards*, and the tone target — interpolated
+between the same two palette luminances — runs downwards with them, so the two
+inversions cancel. The LUT stays monotone increasing and a bright input still
+picks the DENSEST glyph, i.e. the most ink. That is exactly the shipped
+``_palette_map`` semantic, where a white input lands on the palette's ``on``
+colour whichever end that is (so inverted `mono` draws a bright subject in
+heavy black ink on paper). No ``if palette ==`` anywhere — which is why Invert
+needed no code here at all: the mode hands over an already-swapped pair and
+every measurement downstream is made on the pair it is given.
 
 Cost (measured, M-series, cv2 4.13): 0.61-1.17 ms/frame at 720p and 1.29-1.79
 ms at 1080p for the whole step — the ordered-dither class, and 3-5x cheaper
@@ -266,7 +268,7 @@ def build_atlas(ramp, cell_w: int, cell_h: int, off_rgb, on_rgb,
     luminance is not quite the same number: it is computed through sRGB
     encode/decode on 8-bit tiles, and measured over (resolution x rows x n x
     palette) it goes backwards by one step in some combinations — including 4K
-    at the default 45 rows for nine of the eleven shipped palettes. The
+    at the default 45 rows for nine of the eleven pairs shipped at the time. The
     magnitude is small and ``pos_lut`` still came out monotone, but np.interp
     requires an increasing x and a silent violation costs a tone somewhere in
     the ramp. So the ramp is re-sorted here, tiles and luminances together, and

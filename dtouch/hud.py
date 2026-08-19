@@ -30,6 +30,8 @@ ACC = (120, 215, 140)
 RED = (70, 70, 235)
 AMBER = (0, 191, 255)          # armed / warning / transient (DESIGN.md §5)
 OUTLINE = (0, 0, 0)
+PLATE = (34, 32, 30)           # == imgui.PANEL — the panel's own chrome ground
+HELP_PLATE_ALPHA = 0.86        # ...and the panel's own opacity over it
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 _CAP_PX = 22.0                 # Hershey simplex cap height at fontScale 1.0
@@ -224,10 +226,50 @@ def draw_help(img, rows, accent=ACC):
     h, w = img.shape[:2]
     np.copyto(img, cv2.convertScaleAbs(img, alpha=0.35))   # 65% scrim
     title_org, title_px, px, placed = help_layout(w, h, rows)
+    _help_plate(img, title_org, title_px, px, placed)
     put_outlined(img, "KEYS", title_org, title_px, accent)
     for key, label, kx, lx, y in placed:
         put_outlined(img, key, (kx, y), px, accent)
         put_outlined(img, label, (lx, y), px, INK)
+
+
+def _help_plate(img, title_org, title_px, px, placed):
+    """A flat ground under the key table, the panel's own (PANEL at 0.86).
+
+    The frame scrim above is a multiply, so it darkens the picture without
+    flattening it: a 1-bit output is 0 vs 255, and 65% of that is 0 vs 89 —
+    still hard-edged, still full-contrast, and at 720p the dither cells land
+    at the same spatial scale as the glyph strokes. The table stayed legible
+    but fought the background the whole time, and this is the screen that
+    teaches the keys, so it has to be readable over ANY output, not most.
+
+    The menu does not have this problem because its content sits on drawn
+    chrome. The panel does not either — it lays PANEL at 0.86 under its whole
+    column. This is that same plate, sized to the block, so help reads the
+    same over a 1-bit Floyd-Steinberg picture as over a still.
+
+    Cost is a blend of the block's rect only, on the frames where the modal is
+    open. The steady-state overlay budget is untouched — nothing here runs
+    unless `?` put the map on screen.
+    """
+    if not placed:
+        return
+    x0, ty = title_org
+    left = min([x0] + [kx for _k, _l, kx, _lx, _y in placed])
+    right = max(lx + text_size(label, px)[0] for _k, label, _kx, lx, _y in placed)
+    top = ty - title_px
+    bottom = max(y for *_r, y in placed) + int(0.35 * px)
+    pad = int(0.9 * px)
+    h, w = img.shape[:2]
+    x_a, y_a = max(0, left - pad), max(0, top - pad)
+    x_b, y_b = min(w, right + pad), min(h, bottom + pad)
+    if x_b <= x_a or y_b <= y_a:
+        return
+    roi = img[y_a:y_b, x_a:x_b]
+    plate = np.empty_like(roi)
+    plate[:] = PLATE
+    cv2.addWeighted(plate, HELP_PLATE_ALPHA, roi, 1.0 - HELP_PLATE_ALPHA, 0,
+                    dst=roi)
 
 
 @dataclass

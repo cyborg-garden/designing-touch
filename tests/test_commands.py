@@ -82,6 +82,14 @@ def test_key_routing(bound, pressed, hits):
 @pytest.mark.parametrize("code,fires", [
     (ord("z"), True),     # printable, unbound
     (ord("?"), True),
+    (0, True),            # up arrow    (macOS 63232 & 0xFF)
+    (1, True),            # down arrow  (63233 & 0xFF)
+    (2, True),            # left arrow  (63234 & 0xFF)
+    (3, True),            # right arrow (63235 & 0xFF)
+    (13, True),           # Enter
+    (10, True),           # LF
+    (8, True),            # Backspace
+    (127, True),          # Delete
     (9, False),           # TAB — not printable, caller's business
     (27, False),          # ESC
     (255, False),         # waitKey's no-key sentinel
@@ -92,6 +100,33 @@ def test_unknown_key_hook(code, fires):
     reg.on_unknown = unknown.append
     assert reg.dispatch(code) is False
     assert (unknown == [code]) is fires
+
+
+def test_the_keys_people_press_first_get_an_answer():
+    """The hook only fired for 32..126, so the arrows, Enter, Backspace and
+    Delete did nothing ANYWHERE with no feedback at all — 40 of the 58 silent
+    key x state cells per mode. Every printable unbound key hinted correctly,
+    so the instrument was inconsistent rather than uniformly quiet, and the
+    arrows and Enter are the first two things a child tries.
+
+    Silence-on-input is a bug (DESIGN.md principle 4). These keys are still
+    deliberately not load-bearing (§6.2 — their waitKey codes are
+    platform-dependent); not load-bearing means they must SAY so, not vanish.
+    """
+    reg = _reg(("app.quit", "q"))
+    answered = []
+    reg.on_unknown = answered.append
+    for code in (0, 1, 2, 3, 8, 10, 13, 127):
+        reg.dispatch(code)
+    assert answered == [0, 1, 2, 3, 8, 10, 13, 127]
+
+    # ...and the two codes that must stay quiet still do: TAB and Esc are
+    # consumed by the overlay stepper before dispatch is ever reached, and 255
+    # is no keypress at all — hinting it would toast three times a second.
+    answered.clear()
+    for code in (9, 27, 255):
+        reg.dispatch(code)
+    assert answered == []
 
 
 def test_bound_key_does_not_fire_unknown_hook():

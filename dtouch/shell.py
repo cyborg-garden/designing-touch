@@ -36,7 +36,8 @@ from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
                          build_signal_section, build_global_rows)
-from .panelspec import Cycle, Section, Slider, apply_look, capture_look
+from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
+                        display_fmt, nudge_to, nudgeable)
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
@@ -191,12 +192,16 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     # ----- param nudging without the panel (DESIGN.md §6.2) -----
     # ','/'.' select prev/next nudgeable control (Sliders + Cycles from the
     # composed spec, spec order); '-'/'=' nudge by 1/40 of range ('_'/'+' =
-    # x5; cycles rotate by one option). The OSD (name + value + bar) is the
+    # x5 on a continuous slider, one whole step where the quantum is coarser
+    # than that — Bits, Crush; cycles rotate by one option). The OSD (name +
+    # value + bar) is the
     # feedback, and it works in every overlay state. Inside the open menu
     # ','/'.' move card selection instead — the menu consumes keys before the
     # registry (Host._route_key), so priority is already right.
     def _nudgeables():
-        return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+        # `nudgeable`, not "every Slider and Cycle": output resolution opts out
+        # (see its docstring — one key must not resize the show).
+        return [w for w in ui.iter_widgets() if nudgeable(w)]
 
     def _osd_show(w):
         val = getattr(ui, w.attr)
@@ -204,8 +209,10 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             opts = list(w.options)
             hud.osd.show(w.label, str(opts[int(val) % len(opts)]))
         else:
+            # display_fmt: a stored legacy fraction on an engine-continuous
+            # slider shows one honest decimal instead of a rounded-up lie
             hud.osd.show(w.label, float(val), w.lo, w.hi,
-                         fmt="{:%s}" % w.fmt)
+                         fmt="{:%s}" % display_fmt(w, val))
 
     def nudge_select(d):
         ws = _nudgeables()
@@ -224,8 +231,16 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
             opts = list(w.options)
             setattr(ui, w.attr, (int(getattr(ui, w.attr)) + d) % len(opts))
         else:
+            cur = float(getattr(ui, w.attr))
             step = (w.hi - w.lo) / 40.0 * (5.0 if big else 1.0)
-            val = min(max(float(getattr(ui, w.attr)) + d * step, w.lo), w.hi)
+            val = min(max(cur + d * step, w.lo), w.hi)
+            if w.step:
+                # the nudge is an input surface, so it snaps here explicitly:
+                # OverlayUI.__setattr__ only does it for engine-snapped
+                # sliders, and Scale/Hue (engine-continuous, quantised for
+                # control feel) must not drift onto fractions under the keys.
+                # Idempotent for the engine-snapped ones.
+                val = nudge_to(w, val, cur)
             setattr(ui, w.attr, val)
         _osd_show(w)
 
@@ -233,9 +248,12 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     reg.add("param.next", "Select next param", ".", lambda: nudge_select(+1))
     reg.add("param.down", "Nudge param down", "-", lambda: nudge(-1))
     reg.add("param.up", "Nudge param up", "=", lambda: nudge(+1))
-    reg.add("param.down.big", "Nudge param down x5", "_",
+    # "big", not "x5": on the whole-number sliders whose step is coarser than
+    # five presses (Bits, Crush) a big nudge moves one whole step, so a label
+    # promising x5 would lie on exactly the controls it moves least.
+    reg.add("param.down.big", "Big nudge param down", "_",
             lambda: nudge(-1, big=True))
-    reg.add("param.up.big", "Nudge param up x5", "+",
+    reg.add("param.up.big", "Big nudge param up", "+",
             lambda: nudge(+1, big=True))
 
     reg.add("output.blackout", "Blackout", " ", blackout)
@@ -680,6 +698,10 @@ class Host:
                 self._menu_commit(mode_id, from_boot)
             elif action == "quit":
                 self.reg.dispatch(ord("q"))     # first press toasts (§6.2)
+            elif action == "soon":
+                # the reserved card is on screen and dashed: name it, rather
+                # than deflect to a key map that cannot explain it either
+                self.hud.toasts.hint(f"{mode_id.lower()} - coming soon")
             elif action == "unknown":
                 self.hud.toasts.hint("? for keys")
             return
@@ -921,8 +943,7 @@ class Host:
                 names = self._reload_presets()
                 if name in names:
                     ui.preset_idx = names.index(name)
-                ui.renaming = name
-                ui.rename_buf = name
+                ui.begin_rename(name)
                 self.hud.toasts.hint("saved - " + name)
                 print("saved preset", name)
             elif ok:
@@ -1261,6 +1282,13 @@ class Host:
             raise
         except Exception as e:                       # noqa: BLE001 — §6.4
             self._frame_error(e, internal=True)
+        # Only what is on screen may hold the keyboard. Every branch above is
+        # a way to take the rename box off it — the menu, a non-PANEL overlay,
+        # a collapsed sidebar inside ui.draw, a mode switch that retired the
+        # name — and one that draws it is the only one that keeps it. Runs
+        # after the draw and before the waitKey that routes the next key, so
+        # no key can land in a box the frame just stopped showing.
+        ui.expire_offscreen_rename()
         return bgr
 
     # ----- the loop -----

@@ -185,6 +185,61 @@ def test_the_key_map_holds_full_size_type_at_the_shipped_row_count():
         assert len({p[2] for p in placed}) == 2
 
 
+def test_the_key_map_is_readable_over_a_1_bit_picture():
+    """The scrim is a MULTIPLY, so it darkens the picture without flattening
+    it: a 1-bit output is 0 vs 255, and 65% of that is 0 vs 89 — still hard
+    edges, still full contrast, at the same spatial scale as the glyph
+    strokes. The table stayed legible but fought the ground the whole time,
+    and this is the screen that teaches the keys, so it has to read over ANY
+    output. Measured on pure 1-bit noise, in a strip of the block's padding
+    where no glyph ever lands: the ground swung 0..89 (std 44.5), giving white
+    ink only 2.9x contrast against the brightest pixel it sat on.
+    """
+    rows = [("%d" % i, "Row number %d" % i) for i in range(18)]
+    w, h = 1920, 1080
+    rng = np.random.default_rng(1)
+    img = np.repeat(((rng.random((h, w)) > 0.5) * 255).astype(np.uint8)[:, :, None],
+                    3, axis=2)
+    _org, _tpx, px, placed = H.help_layout(w, h, rows)
+    kx = min(p[2] for p in placed)
+    ys, ye = placed[0][4], placed[-1][4]
+    strip = (slice(ys, ye), slice(kx - int(0.8 * px), kx - 3))
+
+    draw_help(img, rows)
+    ground = img[strip]
+    assert ground.std() < 12.0, "the key table still sits on a 1-bit checkerboard"
+    assert ground.max() < 70, f"brightest ground pixel {ground.max()} fights white ink"
+    # ...and the plate is a plate, not a blackout: the picture is still there
+    # around it, so help never looks like the instrument stopped.
+    assert img[:ys // 2].std() > 20.0
+
+
+def test_the_help_plate_opacity_is_the_panels_own():
+    """Mutation check: only the plate's EXISTENCE was pinned — its opacity
+    could drift anywhere from a wash to a near-blackout and the 1-bit test
+    above would keep passing. Recover the effective alpha from pixels: on a
+    flat grey ground the blend solves for it per channel, and it must be the
+    panel's own 0.86 (HELP_PLATE_ALPHA == imgui's panel scrim), so help reads
+    exactly like the sidebar it borrows the plate from."""
+    rows = [("%d" % i, "Row number %d" % i) for i in range(18)]
+    w, h = 1920, 1080
+    ground = 200
+    img = np.full((h, w, 3), ground, np.uint8)
+    _org, _tpx, px, placed = H.help_layout(w, h, rows)
+    kx = min(p[2] for p in placed)
+    ys, ye = placed[0][4], placed[-1][4]
+    strip = (slice(ys, ye), slice(kx - int(0.8 * px), kx - 3))
+
+    draw_help(img, rows)
+    # the 65% scrim multiplies first: the plate blends over THAT ground
+    scrimmed = round(ground * 0.35)
+    plate_b = H.PLATE[0]
+    got = float(img[strip][:, :, 0].mean())
+    alpha = (scrimmed - got) / (scrimmed - plate_b)
+    assert abs(alpha - H.HELP_PLATE_ALPHA) < 0.02   # pixels obey the constant
+    assert abs(alpha - 0.86) < 0.02                 # ...and the constant is 0.86
+
+
 def test_draw_help_takes_the_mode_accent():
     """DESIGN.md §5 one-accent rule: help renders in the ACTIVE mode's accent,
     not a hard-coded green."""
@@ -332,11 +387,55 @@ def test_unknown_key_hints_question_mark():
     assert "? for keys" in r.hints()
 
 
+@pytest.mark.parametrize("code,name", [
+    (0, "up"), (1, "down"), (2, "left"), (3, "right"),
+    (13, "enter"), (10, "lf"), (8, "backspace"), (127, "delete"),
+])
+@pytest.mark.parametrize("state", [OverlayState.HIDDEN, OverlayState.HUD,
+                                   OverlayState.PANEL])
+def test_the_arrows_and_enter_answer_in_every_overlay_state(code, name, state):
+    """These did nothing, anywhere, silently — the hint window was 32..126 and
+    macOS masks the arrows to 0..3, Enter is 13, Backspace 8, Delete 127. They
+    stay not-load-bearing (DESIGN.md §6.2); they just stop pretending they are
+    not there."""
+    r = Rig()
+    r.overlay = state
+    r.press(code)
+    assert "? for keys" in r.hints(), f"{name} is silent in {state}"
+
+
 # ---------- param nudging + OSD (DESIGN.md §6.2) ----------
 
 def _nudgeables(ui):
-    from dtouch.panelspec import Cycle, Slider
-    return [w for w in ui.iter_widgets() if isinstance(w, (Slider, Cycle))]
+    from dtouch.panelspec import nudgeable
+    return [w for w in ui.iter_widgets() if nudgeable(w)]
+
+
+def test_the_nudge_keys_cannot_reach_the_output_resolution():
+    """`.` `.` `=` used to resize the live window (DESIGN.md §6.2 nudging).
+
+    `output` is a Cycle, so it was simply the 2nd of 23 stops in Particles and
+    the 3rd of 15 in Dither Girl — two keys from the default selection, with no
+    panel open. One `=` there recreated the window at 4K and took the frame
+    rate with it, and `0` (panic) could not put it back: panic restores the
+    mode's look, and the window size is not in the look. Nothing else the nudge
+    keys can reach is unrecoverable like that, so nothing else opts out."""
+    from dtouch.panelspec import Cycle, nudgeable, walk_spec
+    from dtouch.modes.dithergirl import DitherGirlMode
+
+    both = (("particles", list(Rig().ui.iter_widgets())),
+            ("dithergirl", [w for _s, w in
+                            walk_spec(DitherGirlMode().panel_spec())]))
+    for label, widgets in both:
+        cycles = [w for w in widgets if isinstance(w, Cycle)]
+        assert "res_idx" in [w.attr for w in cycles], \
+            f"{label}: the control must still exist on the edit surface"
+        assert "res_idx" not in [w.attr for w in widgets if nudgeable(w)], \
+            f"{label}: a bare key still resizes the window"
+        # ...and it is the ONLY opt-out: everything else a bare key can reach,
+        # a bare key can also take back.
+        assert [w.attr for w in cycles if not nudgeable(w)] == ["res_idx"], \
+            f"{label}: something else quietly left the nudge walk"
 
 
 def test_nudge_selection_walks_the_spec_order_and_wraps():

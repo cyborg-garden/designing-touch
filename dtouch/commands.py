@@ -24,6 +24,26 @@ class Command:
     run: Callable[[], None]
 
 
+# waitKey codes that are a REAL keypress but are not printable characters, and
+# so would fall outside the 32..126 hint window (DESIGN.md principle 4:
+# silence-on-input is a bug).
+#
+# The four arrows are the first thing anyone tries on a menu or a slider and
+# they are deliberately not load-bearing (DESIGN.md §6.2 — their waitKey codes
+# are platform-dependent), so they must SAY that rather than do nothing: macOS
+# reports them as 63232..63235, which the loop masks with `& 0xFF` to 0..3.
+# Enter is 13 (LF 10), Backspace 8, Delete 127.
+#
+# `waitKey`'s idle code (-1 masked to 255) is deliberately NOT here: no key was
+# pressed, so a hint would be a toast nobody asked for, three times a second.
+HINTABLE_NONPRINTING = frozenset({0, 1, 2, 3, 8, 10, 13, 127})
+
+
+def hintable(keycode: int) -> bool:
+    """Is this code a keypress an operator would expect an answer to?"""
+    return 32 <= keycode <= 126 or keycode in HINTABLE_NONPRINTING
+
+
 @dataclass
 class CommandRegistry:
     _by_name: dict = field(default_factory=dict)
@@ -61,12 +81,13 @@ class CommandRegistry:
 
     def dispatch(self, keycode: int) -> bool:
         """Route one cv2.waitKey code. Returns True when a command ran.
-        Unbound printable keys go to the unknown-key hook (gentle toast)."""
+        Unbound keys go to the unknown-key hook (gentle toast) — printable
+        ones and the non-printing keys people actually press (`hintable`)."""
         cmd = self._by_key.get(keycode)
         if cmd is not None:
             cmd.run()
             return True
-        if self.on_unknown is not None and 32 <= keycode <= 126:
+        if self.on_unknown is not None and hintable(keycode):
             self.on_unknown(keycode)
         return False
 
