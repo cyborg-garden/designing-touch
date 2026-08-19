@@ -218,7 +218,8 @@ def test_the_atlas_luminance_curve_cannot_go_backwards():
     x. The ramp is monotone in COVERAGE by construction, but composited
     luminance is a different number (sRGB encode/decode on 8-bit tiles) and it
     goes backwards by a step in some (res x rows x n x palette) combos — nine
-    of the eleven shipped palettes at 4K and the default 45 rows. The
+    of the eleven pairs shipped at the time (the roster is ten palettes plus
+    mono's authored inverse now) at 4K and the default 45 rows. The
     magnitude is small and pos_lut still came out monotone, but a silent
     violation costs a tone, so build_atlas sorts instead of hoping."""
     from dtouch.modes.dithergirl import PALETTES

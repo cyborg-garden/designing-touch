@@ -192,7 +192,9 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     # ----- param nudging without the panel (DESIGN.md §6.2) -----
     # ','/'.' select prev/next nudgeable control (Sliders + Cycles from the
     # composed spec, spec order); '-'/'=' nudge by 1/40 of range ('_'/'+' =
-    # x5; cycles rotate by one option). The OSD (name + value + bar) is the
+    # x5 on a continuous slider, one whole step where the quantum is coarser
+    # than that — Bits, Crush; cycles rotate by one option). The OSD (name +
+    # value + bar) is the
     # feedback, and it works in every overlay state. Inside the open menu
     # ','/'.' move card selection instead — the menu consumes keys before the
     # registry (Host._route_key), so priority is already right.
@@ -246,9 +248,12 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     reg.add("param.next", "Select next param", ".", lambda: nudge_select(+1))
     reg.add("param.down", "Nudge param down", "-", lambda: nudge(-1))
     reg.add("param.up", "Nudge param up", "=", lambda: nudge(+1))
-    reg.add("param.down.big", "Nudge param down x5", "_",
+    # "big", not "x5": on the whole-number sliders whose step is coarser than
+    # five presses (Bits, Crush) a big nudge moves one whole step, so a label
+    # promising x5 would lie on exactly the controls it moves least.
+    reg.add("param.down.big", "Big nudge param down", "_",
             lambda: nudge(-1, big=True))
-    reg.add("param.up.big", "Nudge param up x5", "+",
+    reg.add("param.up.big", "Big nudge param up", "+",
             lambda: nudge(+1, big=True))
 
     reg.add("output.blackout", "Blackout", " ", blackout)

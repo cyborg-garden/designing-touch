@@ -197,10 +197,12 @@ def nudgeable(w):
     Every Slider and Cycle, minus the ones that declare `nudge=False`.
 
     The rule for opting out is NOT "this widget is a system setting" and it is
-    not `save=False` either — `Mirror` and `input` are both unsaved and both
-    stay reachable, because pressing the key again undoes them and the picture
-    is the only thing that moved. The rule is narrower: **a control the perform
-    layer cannot take back does not belong on a bare key.**
+    not `save=False` either — Dither Girl's `input` cycle is unsaved and stays
+    reachable, because stepping it again steps it back and the picture is the
+    only thing that moved. (Mirror used to be the second example here, but
+    Mirror is a Toggle and was never in the walk — only Sliders and Cycles
+    are.) The rule is narrower: **a control the perform layer cannot take back
+    does not belong on a bare key.**
 
     Output resolution is the one that fails it. It was the 3rd of 15 stops in
     Dither Girl and the 2nd of 23 in Particles — `.` `.` `=`, with no panel

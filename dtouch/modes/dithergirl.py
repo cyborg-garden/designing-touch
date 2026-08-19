@@ -451,10 +451,15 @@ class DitherGirlMode:
                 # (panelspec's step docstring).
                 Slider("Scale", "dg_scale", SCALE_LO, SCALE_HI, fmt=".0f",
                        save_key="scale", step=1.0, engine_snaps=False,
-                       tip="Working height: whole pixels for the dithers, "
-                           "whole character rows for ASCII. Low = big chunky "
-                           "cells; high = fine grain (slow for the diffusion "
-                           "dithers)."),
+                       # "requested", not "whole character rows": the cell
+                       # rounds to whole pixels, so the delivered row count
+                       # can differ from the request — the grid note below
+                       # the slider is the truth about what you got.
+                       tip="Working height: whole pixels for the dithers; "
+                           "for ASCII, the character rows requested - the "
+                           "grid note shows the rows you actually get. Low "
+                           "= big chunky cells; high = fine grain (slow for "
+                           "the diffusion dithers)."),
                 Readout(self._draw_grid_note),
                 Readout(self._draw_perf_note),
             ]),

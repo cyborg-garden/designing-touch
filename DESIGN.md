@@ -462,16 +462,21 @@ pinned regression target. Hit targets ≥ 2.75u whole-row.
   legible against a white wall. Cursor auto-hides after 2 s idle.
 
   *Measured 2026-08-15, after the Invert toggle raised the worry that ten
-  palettes can now put a bright ground under the HUD.* The double-draw holds,
-  and the worry is backwards: the black under-stroke carries the glyph, so the
-  brighter the ground the better it reads. Status line — white 21.0:1, 235-grey
-  17.6:1, mid-grey 5.32:1, black 14.7:1. Bottom hint (DIM, the smaller and
-  weaker of the two) — white 21.0:1, 220-grey 15.3:1, mid-grey 5.32:1, dark
-  40-grey 4.74:1. The weakest ground is a flat mid-grey, which still clears
-  WCAG AA, and it is the ground **Invert moves away from**: over the inverted
-  1-bit picture the toggle actually produces, both lines render as heavy black
-  outline type. No scrim added — it would put permanent chrome on the picture
-  in HUD, which is a state used for composing shots, for no measured gain.
+  palettes can now put a bright ground under the HUD; figures restated
+  2026-08-19 — the first pass idealised the ink as pure white (21.0:1 is
+  pure-white-on-pure-black, a pair this HUD does not draw).* The double-draw
+  holds, and the worry is backwards: the black under-stroke carries the glyph,
+  so the brighter the ground the better it reads. The pair that is present on
+  EVERY ground is the real ink against its own black outline: the status
+  line's INK (215,222,218) measures 15.41:1, the bottom hint's DIM
+  (140,150,145) — the smaller and weaker of the two — 6.95:1. Ground contrast
+  only adds to that: on a white wall the outline itself carries 21.0:1
+  against the ground, and on the weakest case, a flat mid-grey, it still
+  carries 5.32:1. Both inks clear WCAG AA's 4.5:1 on their own, and mid-grey
+  is the ground **Invert moves away from**: over the inverted 1-bit picture
+  the toggle actually produces, both lines render as heavy black outline
+  type. No scrim added — it would put permanent chrome on the picture in HUD,
+  which is a state used for composing shots, for no measured gain.
 
 **Layout discipline:** persistent UI only in the right sidebar and corners;
 title-safe 3.5% inset; frame center reserved for transient toasts. Overlay
@@ -523,7 +528,11 @@ lowercase; an uppercase-only table would silently demand Shift).
 
 Param nudging without the panel: `,`/`.` select prev/next control in spec
 order (OSD shows name + value + bar), `-`/`=` nudge by 1/40 of range
-(`_`/`+` = ×5). Works in every overlay state. Arrow keys are deliberately not
+(`_`/`+` = ×5 on a continuous slider; on a whole-number slider whose step is
+coarser than five presses — Bits, Crush — both the small and the big nudge
+move one whole step, and the command label says "big", not "×5", because a
+×5 promise would lie on exactly the controls it moves least). Works in every
+overlay state. Arrow keys are deliberately not
 load-bearing (`waitKey` platform codes) — but not load-bearing means they must
 say so, not vanish. The `? for keys` hint used to fire only for codes 32–126,
 and macOS masks the arrows to 0–3 (Enter 13, Backspace 8, Delete 127), so those
@@ -538,9 +547,11 @@ so it was simply the 2nd of 23 stops in Particles and the 3rd of 15 in Dither
 Girl — `.` `.` `=` with no panel open recreated the window at 4K, took the
 frame rate with it, and left `0` with no answer, because panic restores the
 mode's *look* and the window is not in the look. The test is not "is this a
-system setting" and not `save=False` — `Mirror` and `input` are unsaved and
-stay reachable, because pressing the key again undoes them. Resolution lives
-on the edit surface, where changing it is a deliberate decision.
+system setting" and not `save=False` — Dither Girl's `input` cycle is unsaved
+and stays reachable, because stepping it again steps it back. (Mirror is a
+Toggle, so it was never in the walk to begin with — the walk is Sliders and
+Cycles only.) Resolution lives on the edit surface, where changing it is a
+deliberate decision.
 
 **A rename box holds the keyboard only while it is on screen** (amended
 2026-08-15; scroll route closed 2026-08-19). The consumption rule below is
