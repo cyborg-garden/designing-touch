@@ -214,6 +214,32 @@ def test_the_key_map_is_readable_over_a_1_bit_picture():
     assert img[:ys // 2].std() > 20.0
 
 
+def test_the_help_plate_opacity_is_the_panels_own():
+    """Mutation check: only the plate's EXISTENCE was pinned — its opacity
+    could drift anywhere from a wash to a near-blackout and the 1-bit test
+    above would keep passing. Recover the effective alpha from pixels: on a
+    flat grey ground the blend solves for it per channel, and it must be the
+    panel's own 0.86 (HELP_PLATE_ALPHA == imgui's panel scrim), so help reads
+    exactly like the sidebar it borrows the plate from."""
+    rows = [("%d" % i, "Row number %d" % i) for i in range(18)]
+    w, h = 1920, 1080
+    ground = 200
+    img = np.full((h, w, 3), ground, np.uint8)
+    _org, _tpx, px, placed = H.help_layout(w, h, rows)
+    kx = min(p[2] for p in placed)
+    ys, ye = placed[0][4], placed[-1][4]
+    strip = (slice(ys, ye), slice(kx - int(0.8 * px), kx - 3))
+
+    draw_help(img, rows)
+    # the 65% scrim multiplies first: the plate blends over THAT ground
+    scrimmed = round(ground * 0.35)
+    plate_b = H.PLATE[0]
+    got = float(img[strip][:, :, 0].mean())
+    alpha = (scrimmed - got) / (scrimmed - plate_b)
+    assert abs(alpha - H.HELP_PLATE_ALPHA) < 0.02   # pixels obey the constant
+    assert abs(alpha - 0.86) < 0.02                 # ...and the constant is 0.86
+
+
 def test_draw_help_takes_the_mode_accent():
     """DESIGN.md §5 one-accent rule: help renders in the ACTIVE mode's accent,
     not a hard-coded green."""

@@ -281,6 +281,20 @@ def test_no_key_in_the_menu_is_silent(tmp_path):
         assert moved or _hints(host), f"digit {ch} did nothing and said nothing"
 
 
+def test_zero_in_the_menu_lands_on_the_for_keys_hint(tmp_path):
+    """`0` (panic everywhere else, so the likeliest stray digit) names no
+    card. The no-silence sweep above only asserts something happened; this
+    pins the actual answer through the real key route: the same `? for keys`
+    hint every unknown printable gets."""
+    host = _booted(tmp_path)
+    host._wire_keys()
+    host.menu.show("dithergirl")
+    host.hud.toasts._hints.clear()
+    host._route_key(ord("0"))
+    assert host.menu.open is True
+    assert any("? for keys" in t for t in _hints(host))
+
+
 def test_the_reserved_card_names_itself_in_the_menu(tmp_path):
     host = _booted(tmp_path)
     host._wire_keys()

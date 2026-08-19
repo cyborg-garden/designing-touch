@@ -1020,27 +1020,37 @@ def test_the_first_palettes_are_unchanged():
 
 def test_tint_zero_is_an_exact_no_op():
     """Tint COMPOSES with the named palettes rather than replacing them: at 0
-    every palette must be bit-identical to its shipped pair, at every hue."""
+    every palette must be bit-identical to its shipped pair, at every hue —
+    inverted included, because mono's inverse is an AUTHORED pair
+    (245/16, not a swap) and a sweep over PALETTES alone never touches it."""
     from dtouch.modes.dithergirl import tinted_palette
 
     for name, pair in PALETTES.items():
         for hue in (0.0, 137.0, 359.0):
             assert tinted_palette(name, hue, 0.0) == pair
+            assert (tinted_palette(name, hue, 0.0, invert=True)
+                    == palette_pair(name, True))
 
 
 def test_tint_cannot_push_any_palette_below_the_contrast_floor():
     """The luminance floor exists for exactly this: pure blue is 7% of white's
     luminance, so an unfloored hue rotation could quietly turn any palette
-    into an unreadable navy-on-black."""
+    into an unreadable navy-on-black. Swept inverted too: the nine plain
+    swaps keep their ratio by symmetry, but mono's AUTHORED inverse
+    (245/16) is a pair of its own that a PALETTES-only sweep never
+    measures — and Tint steers the pair the operator is looking at."""
     from dtouch.modes.dithergirl import tinted_palette
 
     worst = min(
-        (_contrast(*tinted_palette(name, hue, amt)), name, hue, amt)
+        (_contrast(*tinted_palette(name, hue, amt, invert)),
+         name, invert, hue, amt)
         for name in PALETTES
+        for invert in (False, True)
         for hue in range(0, 360, 5)
         for amt in (0.25, 0.5, 0.75, 1.0))
-    assert worst[0] >= 4.5, "tint broke %s at hue %s tint %s (%.2f:1)" % (
-        worst[1], worst[2], worst[3], worst[0])
+    assert worst[0] >= 4.5, (
+        "tint broke %s (invert=%s) at hue %s tint %s (%.2f:1)"
+        % (worst[1], worst[2], worst[3], worst[4], worst[0]))
 
 
 def test_tint_steers_toward_the_hue_and_keeps_black_black():

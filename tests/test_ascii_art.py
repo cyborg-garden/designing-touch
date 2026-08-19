@@ -221,16 +221,24 @@ def test_the_atlas_luminance_curve_cannot_go_backwards():
     of the eleven pairs shipped at the time (the roster is ten palettes plus
     mono's authored inverse now) at 4K and the default 45 rows. The
     magnitude is small and pos_lut still came out monotone, but a silent
-    violation costs a tone, so build_atlas sorts instead of hoping."""
-    from dtouch.modes.dithergirl import PALETTES
+    violation costs a tone, so build_atlas sorts instead of hoping.
 
+    The sweep covers the authored inverses too: `mono` inverted is its own
+    pair (245/16, not a swap of 0/255), renderable by any look that says
+    `invert: true`, and a PALETTES-only sweep never rasterised it."""
+    from dtouch.modes.dithergirl import AUTHORED_INVERSE, PALETTES
+
+    assert "mono" in AUTHORED_INVERSE       # the sweep must include it; an
+    pairs = list(PALETTES.items()) + [      # emptied dict would silently
+        (name + " (inverted)", pair)        # shrink the coverage back
+        for name, pair in AUTHORED_INVERSE.items()]
     reordered = 0
     for res in ((1280, 720), (1920, 1080), (3840, 2160)):
         for rows in (30, 45, 72):
             cw, ch, _cols, _rows, _c = grid_for(res[0], res[1], rows)
             for n in (2, 4, 8, 16):
                 ramp = build_ramp(n, cw, ch)
-                for name, (off, on) in PALETTES.items():
+                for name, (off, on) in pairs:
                     out, tiles, lum = build_atlas(list(ramp), cw, ch, off, on)
                     d = np.diff(lum.astype(np.float64))
                     assert (d >= 0).all() or (d <= 0).all(), (

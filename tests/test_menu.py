@@ -28,6 +28,22 @@ def _menu():
     return m
 
 
+def _menu4():
+    """Four ENABLED cards. The shipped registry has only two, and with two,
+    `move(-1)` and `move(+1)` land on the same card from any start — so any
+    direction test against the real cards passes even with the directions
+    swapped. Left and right are only distinguishable with three or more
+    reachable stops."""
+    m = Menu(cards=[
+        Card("alpha", "Alpha", "", (10, 20, 30), "a"),
+        Card("beta", "Beta", "", (40, 50, 60), "b"),
+        Card("gamma", "Gamma", "", (70, 80, 90), "g"),
+        Card("delta", "Delta", "", (100, 110, 120), "e"),
+    ])
+    m.show()
+    return m
+
+
 # ---------- cards from the registry ----------
 
 def test_registry_cards_cover_registry_plus_reserved_flocking():
@@ -177,6 +193,18 @@ def test_no_digit_in_the_menu_is_silent():
         assert m.open is True, f"digit {ch} left the menu"
 
 
+def test_zero_in_the_menu_is_unknown_so_the_shell_hints():
+    """`0` is the panic key everywhere else, so it is the digit most likely to
+    be pressed here — and it names no card (digits map to `i = int(ch) - 1`).
+    The generic no-silence sweep only pins that SOMETHING happens; this pins
+    WHAT: ("unknown", None), which the shell turns into the `? for keys`
+    hint — not a (None, None) silence and not a "soon" for a card that does
+    not exist."""
+    m = _menu()
+    assert m.key(ord("0")) == ("unknown", None)
+    assert m.open is True
+
+
 def test_the_reserved_card_says_what_it_is_instead_of_deflecting():
     """`3` names a card that is right there on screen and dashed. "? for keys"
     would point at a key map that cannot explain it either."""
@@ -198,12 +226,18 @@ def test_the_arrow_keys_move_the_menu_selection(code, delta):
     documented navigation, the menu's own hint line still names them, and
     these four codes are macOS's masked arrows — elsewhere they fall through
     to the same hint as before. Nothing is reachable only by arrow.
+
+    Against the synthetic FOUR-card registry (`_menu4`): with the two shipped
+    enabled cards this test was vacuous — both directions land on the same
+    neighbour, so swapped arrow mappings passed. Four cards make left and
+    right land on different cards from the start.
     """
-    m, ref = _menu(), _menu()
+    m, ref = _menu4(), _menu4()
     assert m.key(code) == (None, None)                   # the selection moved
     assert m.open is True
     ref.move(delta)
     assert m.sel == ref.sel
+    assert m.sel != 0                                    # ...and it really moved
 
 
 def test_the_arrows_skip_the_reserved_card_like_the_commas_do():
