@@ -633,7 +633,10 @@ class Host:
         # and the key path are one implementation (DESIGN.md principle 7)
         self.reg.add(PANEL_OPEN, "Open the panel", None, self._open_panel)
         for cls in REGISTRY:
-            self.reg.add(f"mode.{cls.id}", f"Switch to {cls.title}", cls.id[:1],
+            # a mode whose id starts with a taken letter declares its own
+            # `key` class attr (Physarum can't have 'p' — Particles owns it)
+            self.reg.add(f"mode.{cls.id}", f"Switch to {cls.title}",
+                         getattr(cls, "key", cls.id[:1]),
                          lambda mid=cls.id: self.request_mode(mid))
 
     def _open_panel(self):

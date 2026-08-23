@@ -59,20 +59,26 @@ menu entirely.
 
 ## Modes
 
-Two instruments share the window, the presets, the keys and the recorder:
+Three instruments share the window, the presets, the keys and the recorder:
 
 - **Particles** (`p`) — camera → matte → a flowing cloud of glowing particles. The original.
 - **Dither Girl** (`d`) — the dither pipeline as the picture itself (see below).
+- **Physarum** (`o`) — a slime-mold simulation that eats the live video: the matte blends
+  every sim parameter between a "field" behavior and a "body" behavior (whoever is in frame
+  runs different physics than the room), and the footage's light is food the veins grow
+  toward. `X` swaps body/field mid-set. Inspired by Sage Jenson's *36 Points* and Etienne
+  Jacob's *interactive-physarum* (independent implementation of the Jones model).
 
 `m` opens the **home menu** — the same one you booted into: your camera behind a scrim,
 rendered through 1-bit blue-noise dither, with a card per mode. `,`/`.` move, `Enter`
 commits, or just click a card. `Esc` leaves the running mode alone — except at boot, where
 there's nothing behind the menu to go back to, so it commits the selection instead of
-dropping you into a mode you never chose. You never need the menu mid-set: `p` and `d`
+dropping you into a mode you never chose. You never need the menu mid-set: `p`, `d` and `o`
 switch directly from any state. Switching draws a still boot card rather than a gray flash,
 and coming back to a mode you've already used finds it exactly as you left it.
 
-From the command line, `--mode dithergirl` boots into Dither Girl and `--still photo.jpg`
+From the command line, `--mode dithergirl` boots into Dither Girl, `--mode physarum` boots
+into Physarum, and `--still photo.jpg`
 loads a still image and implies it; `--flock` and `--glitch` boot Particles with those layers
 already on.
 

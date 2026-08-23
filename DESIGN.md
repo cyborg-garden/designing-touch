@@ -512,9 +512,10 @@ lowercase; an uppercase-only table would silently demand Shift).
 |---|---|---|
 | `1`–`9` | `preset.recall.N` (current mode's bank) | toast `3 - embers` (ASCII hyphen: Hershey has no middle dot) |
 | `[` / `]` | `preset.prev` / `preset.next` (setlist) | same toast |
-| `p` / `d` | `mode.particles` / `mode.dithergirl` | boot card + center flash |
+| `p` / `d` / `o` | `mode.particles` / `mode.dithergirl` / `mode.physarum` | boot card + center flash |
 | `m` | `menu.open` | menu |
 | `f` | `layer.flock` (Particles) | toast |
+| `x` | `physarum.swap` (Physarum) — body/field points trade places | toast |
 | `g` | `layer.glitch` (rack) | toast |
 | `Space` | `output.blackout` toggle (recorded too; UI responsive) | toast + amber corner tick while armed |
 | `0` | `preset.panic` — mode's `safe_look()` in <1 s; disarms blackout AND the SIGNAL rack (glitch off) — panic must restore a known-good *picture*, not just known-good params | amber `RESET` |
