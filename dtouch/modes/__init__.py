@@ -28,8 +28,9 @@ mode to the menu, key table, and preset store.
 """
 from .dithergirl import DitherGirlMode
 from .particles import ParticlesMode
+from .physarum import PhysarumMode
 
-REGISTRY = [ParticlesMode, DitherGirlMode]
+REGISTRY = [ParticlesMode, DitherGirlMode, PhysarumMode]
 
 
 def mode_by_id(mode_id):

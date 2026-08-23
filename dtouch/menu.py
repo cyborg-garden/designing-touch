@@ -72,7 +72,8 @@ class Card:
 def registry_cards():
     """One card per registered mode, plus the dimmed reserved Flocking card
     (DESIGN.md §2.5 — 'coming soon', not selectable)."""
-    cards = [Card(m.id, m.title, getattr(m, "blurb", ""), m.accent, m.id[:1])
+    cards = [Card(m.id, m.title, getattr(m, "blurb", ""), m.accent,
+                  getattr(m, "key", m.id[:1]))
              for m in REGISTRY]
     cards.append(Card(None, "FLOCKING", "coming soon", DIM, None, enabled=False))
     return cards

@@ -16,6 +16,7 @@ Mode 'grid' is the older luminance-displaced grid.
     python run.py --glitch              # start with the circuit-bent signal chain on
 
     python run.py --mode dithergirl     # boot into Dither Girl (live dithering)
+    python run.py --mode physarum       # boot into Physarum (slime-mold veins eat the light)
     python run.py --still photo.jpg     # load a still and imply dithergirl
 
 Launching with no mode-implying flag opens the home menu with the live camera
@@ -46,6 +47,7 @@ from dtouch.live import live
 from dtouch.modes import REGISTRY, mode_by_id
 from dtouch.modes.dithergirl import DitherGirlMode
 from dtouch.modes.particles import ParticlesMode
+from dtouch.modes.physarum import PhysarumMode
 from dtouch.shell import Host
 
 
@@ -88,7 +90,7 @@ def boot_mode_name(mode_arg, still_arg, particles_flags=False):
 # run.py's --mode spellings vs Mode.id — the launcher predates the registry,
 # so 'flow' is the CLI name for the particles mode ('grid' is the legacy
 # non-shell path and owns no looks).
-MODE_ARG = {"particles": "flow", "dithergirl": "dithergirl"}
+MODE_ARG = {"particles": "flow", "dithergirl": "dithergirl", "physarum": "physarum"}
 MODE_ID = {v: k for k, v in MODE_ARG.items()}
 
 
@@ -148,7 +150,7 @@ def resolve_preset(name, boot, path="presets.json"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default=None,
-                    choices=["flow", "grid", "dithergirl"])
+                    choices=["flow", "grid", "dithergirl", "physarum"])
     ap.add_argument("--still", default=None, metavar="PATH",
                     help="load a still image (implies --mode dithergirl)")
     ap.add_argument("--ui", default="panel", choices=["panel", "keys"],
@@ -185,8 +187,12 @@ def main():
     given = engine_flags_given(args)
     boot = boot_mode_name(args.mode, args.still, particles_flags=bool(given))
     if given and boot != "flow":
-        # a higher-precedence flag won; say so instead of dropping the flag
-        print("note: %s ignored - booting %s" % (", ".join(given), boot))
+        # a higher-precedence flag won; say so instead of dropping the flag —
+        # but only for flags the boot mode really drops (physarum eats --matte)
+        used = {"physarum": {"--matte"}}.get(boot, set())
+        ignored = [f for f in given if f not in used]
+        if ignored:
+            print("note: %s ignored - booting %s" % (", ".join(ignored), boot))
     # --preset resolves against a mode's real looks; with no mode-implying
     # flag, the mode that owns the named look is the one that boots
     boot, preset = resolve_preset(args.preset, boot)
@@ -198,6 +204,8 @@ def main():
         mode = None      # shell opens the home menu over the last-used mode (§3)
     elif boot == "dithergirl":
         mode = DitherGirlMode(still=bool(args.still))
+    elif boot == "physarum":
+        mode = PhysarumMode(matte=args.matte)
     else:
         mode = ParticlesMode(matte=args.matte, grid=parse_wh(args.grid),
                              n=args.particles, flock=args.flock, glitch=args.glitch)
