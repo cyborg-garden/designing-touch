@@ -22,7 +22,9 @@ void main() {
     float acc = 0.0;
     for (int i = -u_radius; i <= u_radius; i++) {
         ivec2 q = c + u_dir * i;
-        q = ((q % u_grid) + u_grid) % u_grid;
+        // wrap via floor, not integer %: GLSL ES 3.00 leaves % undefined
+        // when an operand is negative, and q is negative at the low edge
+        q -= u_grid * ivec2(floor(vec2(q) / vec2(u_grid)));
         acc += texelFetch(u_src, q, 0).r;
         if (u_use_add == 1) acc += texelFetch(u_add, q, 0).r;
     }
