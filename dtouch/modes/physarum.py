@@ -134,6 +134,7 @@ class PhysarumMode:
         self.seed = seed
         self.engine_pref = engine
         self.engine = None           # "gl" / "cpu" once started
+        self._px_scale = 1.0         # grid-px per CPU-ground-truth-px (set per engine)
         self.host = None
         self.pf = None
         self.mat = None
@@ -165,6 +166,16 @@ class PhysarumMode:
             try:
                 pf = PhysarumFieldGL(n=self.n, gw=gw, gh=gh, seed=self.seed)
                 self.engine = "gl"
+                # The look/point parameters (sense, step — and the blur that
+                # sets vein thickness) are calibrated in CPU-grid pixels. On
+                # the GL grid a pixel covers ~1/2.2 as much of the frame, so
+                # driving the raw values halved the mold's relative scale:
+                # every look collapsed into the same fine wire-mesh and the
+                # veins fell below what the projector/dither stage resolves.
+                # Scale lengths by the grid ratio so the GL field renders the
+                # CPU field's composition at higher fidelity.
+                self._px_scale = gw / self.CPU_GRID[0]
+                pf.diffuse = max(1, round(pf.diffuse * self._px_scale))
                 return pf
             except Exception as e:                   # noqa: BLE001 — §6.4
                 msg = f"GPU physarum unavailable, running on CPU: {e}"
@@ -174,6 +185,7 @@ class PhysarumMode:
         self.n = self._n or self.CPU_N
         gw, gh = self.grid
         self.engine = "cpu"
+        self._px_scale = 1.0
         return PhysarumField(n=self.n, gw=gw, gh=gh, seed=self.seed)
 
     def stop(self):
@@ -309,7 +321,9 @@ class PhysarumMode:
             sens = float(self._ui("sens", 1.0))
             exposure *= 1.0 + 1.6 * sens * audio_levels["bass"]
             gain *= 1.0 + 0.8 * sens * audio_levels["treble"]
-        pf.gain = gain
+        # gain multiplies sense + step (both in grid px) in either engine, so
+        # it doubles as the length-unit conversion onto the GL grid
+        pf.gain = gain * self._px_scale
         pf.exposure = exposure
 
         small = cv2.resize(frame_bgr, (MATTE_W, MATTE_H))
@@ -330,7 +344,8 @@ class PhysarumMode:
             else:
                 px_c, py_c = gw / 2.0, gh / 2.0
             if self._burst_pending:
-                pf.spawn_burst(px_c, py_c)
+                # the burst's footprint is sized in CPU-grid pixels too
+                pf.spawn_burst(px_c, py_c, radius=6.0 * self._px_scale)
             if self._wave_pending:
                 pf.wave(px_c, py_c)
             self._burst_pending = self._wave_pending = False
