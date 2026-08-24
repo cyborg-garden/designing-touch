@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from dtouch.modes import REGISTRY, mode_by_id
-from dtouch.modes.physarum import ACCENT, PALETTES_PH, PhysarumMode, _palette_lut
+from dtouch.modes.physarum import (ACCENT, PALETTES_PH, PhysarumMode, _fmt_agents,
+                                   _palette_lut)
 from dtouch.physarum import POINT_NAMES, POINTS, PhysarumField
 from dtouch.shell import Host
 
@@ -86,11 +87,15 @@ def test_step_without_ui_uses_defaults(tmp_path):
 
 
 def test_status_line_is_spec_derived_and_ascii(tmp_path):
+    """The tail names the engine that actually booted (gl on a GPU box, cpu
+    on CI after the fallback) and its agent count."""
     host = _booted(tmp_path)
     s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
+    m = host.mode
+    assert m.engine in ("gl", "cpu")
     assert s == ("PHYSARUM  matte auto  body fingers  field veins  arctic"
-                 "  cam synthetic")
+                 f"  {m.engine} {_fmt_agents(m.n)}  cam synthetic")
 
 
 def test_panel_sections():

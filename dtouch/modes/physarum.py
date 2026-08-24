@@ -6,7 +6,11 @@ every simulation parameter between a "field" behavior point and a "body"
 behavior point (whoever is in frame runs different physics than the room), and
 the footage's luminance is food the sensors are drawn toward.
 
-Pure numpy/cv2 like Dither Girl — no GL, headless-testable. The mode owns its
+Two engines run the same model behind the same contract: the GPU field
+(dtouch.physarum_gl — millions of agents on the full grid, moderngl
+ping-pong) is tried first and the numpy field (dtouch.physarum) is the
+fallback when no GL context can be had, toasted in amber (DESIGN.md §6.4: the
+show still has to start). Headless-testable either way. The mode owns its
 engine + matte, its panel sections (TEMPLATES / SOURCE / MOLD / LOOK), one
 mode-local command (X swaps the two behavior points, the single most
 theatrical move the instrument has), and its defaults + built-in looks.
@@ -17,9 +21,11 @@ import cv2
 import numpy as np
 
 from ..commands import Command
+from ..hud import AMBER
 from ..matte import MatteUnavailable, make_matte, select_matte
 from ..panelspec import Cycle, PresetList, Section, Slider, Toggle
 from ..physarum import POINT_NAMES, PhysarumField
+from ..physarum_gl import PhysarumFieldGL
 from .particles import MATTE_H, MATTE_W, MATTES, composite_video_bg
 
 ACCENT = (40, 190, 250)          # BGR — amber, the color of the reference mold
@@ -39,6 +45,13 @@ _PALETTE_STOPS = {
 _LUT_CACHE = {}
 
 
+def _fmt_agents(n):
+    """400000 -> '400k', 2000000 -> '2.0M' — the status line's agent count."""
+    if n >= 1_000_000:
+        return f"{n / 1e6:.1f}M"
+    return f"{n // 1000}k"
+
+
 def _palette_lut(name):
     """256x3 uint8 RGB ramp for a named palette, cached forever (tiny)."""
     lut = _LUT_CACHE.get(name)
@@ -50,6 +63,18 @@ def _palette_lut(name):
                        axis=1).astype(np.uint8)
         _LUT_CACHE[name] = lut
     return lut
+
+
+def _colorize(lum, name):
+    """lum float32 [0,1] (h, w) -> uint8 RGB (h, w, 3) through the palette.
+
+    cv2.applyColorMap with the ramp as a user colormap, not `lut[idx]`:
+    numpy's fancy index costs 4.4 ms on the GPU engine's 1280x736 grid,
+    more than the whole simulation; applyColorMap is 0.09 ms and
+    pixel-identical (it indexes the 256 triplets as given, no channel swap).
+    """
+    idx = (lum * 255.0).astype(np.uint8)
+    return cv2.applyColorMap(idx, _palette_lut(name).reshape(256, 1, 3))
 
 
 class PhysarumMode:
@@ -91,11 +116,24 @@ class PhysarumMode:
                         ph_gain=1.0, ph_decay=0.94, ph_palette_idx=0,
                         ph_exposure=3.5, ph_grain=0.5)
 
-    def __init__(self, matte="auto", grid=(576, 324), n=400_000, seed=1):
+    # Per-engine sizing. The CPU field is budgeted at ~21 ms/frame on the
+    # working grid; the GPU field runs 2M agents on a 1280x736 grid in ~8 ms
+    # (experiments/08-physarum-gl). An explicit grid / n overrides both.
+    ENGINES = ("auto", "gl", "cpu")
+    CPU_GRID, CPU_N = (576, 324), 400_000
+    GL_GRID, GL_N = (1280, 736), 2_000_000
+
+    def __init__(self, matte="auto", grid=None, n=None, seed=1, engine="auto"):
+        if engine not in self.ENGINES:
+            raise ValueError(f"engine must be one of {self.ENGINES}, got {engine!r}")
         self.matte_kind = matte
-        self.grid = tuple(grid)
-        self.n = n
+        self._grid = tuple(grid) if grid is not None else None
+        self._n = n
+        self.grid = self._grid or self.CPU_GRID
+        self.n = self._n or self.CPU_N
         self.seed = seed
+        self.engine_pref = engine
+        self.engine = None           # "gl" / "cpu" once started
         self.host = None
         self.pf = None
         self.mat = None
@@ -105,7 +143,6 @@ class PhysarumMode:
     # ----- lifecycle -----
     def start(self, host):
         self.host = host
-        gw, gh = self.grid
         try:
             self.mat = make_matte(self.matte_kind)
         except MatteUnavailable as e:
@@ -114,9 +151,35 @@ class PhysarumMode:
             host.hud.toasts.flash(str(e))
             self.matte_kind = "auto"
             self.mat = make_matte(self.matte_kind)
-        self.pf = PhysarumField(n=self.n, gw=gw, gh=gh, seed=self.seed)
+        self.pf = self._build_field(host)
+
+    def _build_field(self, host):
+        """The GPU field when it can be had, else the CPU field — sized per
+        engine unless the caller fixed grid / n. GL failing to come up is
+        not a reason to lose the show (DESIGN.md §6.4): it is toasted in
+        amber, printed for the headless log, and the mold runs on numpy."""
+        if self.engine_pref != "cpu":
+            self.grid = self._grid or self.GL_GRID
+            self.n = self._n or self.GL_N
+            gw, gh = self.grid
+            try:
+                pf = PhysarumFieldGL(n=self.n, gw=gw, gh=gh, seed=self.seed)
+                self.engine = "gl"
+                return pf
+            except Exception as e:                   # noqa: BLE001 — §6.4
+                msg = f"GPU physarum unavailable, running on CPU: {e}"
+                host.hud.toasts.flash(msg[:80], AMBER)
+                print(msg)
+        self.grid = self._grid or self.CPU_GRID
+        self.n = self._n or self.CPU_N
+        gw, gh = self.grid
+        self.engine = "cpu"
+        return PhysarumField(n=self.n, gw=gw, gh=gh, seed=self.seed)
 
     def stop(self):
+        """Release the GPU field if that is what booted; idempotent."""
+        if self.pf is not None:
+            self.pf.release()
         self.pf = None
         self.mat = None
 
@@ -202,7 +265,7 @@ class PhysarumMode:
         return "veinwork"
 
     def status_tail(self, cam_name):
-        return f"cam {cam_name[:16]}"
+        return f"{self.engine or 'cpu'} {_fmt_agents(self.n)}  cam {cam_name[:16]}"
 
     def _ui(self, attr, default):
         """Read a live value defensively — step() can run before the shell
@@ -282,7 +345,7 @@ class PhysarumMode:
                                  cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             out_small = (lum[..., None] * (0.25 + 0.75 * color) * 255.0).astype(np.uint8)
         else:
-            out_small = _palette_lut(pal)[(lum * 255.0).astype(np.uint8)]
+            out_small = _colorize(lum, pal)
         out = cv2.resize(out_small, (rw, rh), interpolation=cv2.INTER_LINEAR)
 
         if bool(self._ui("ph_video_bg", False)):
