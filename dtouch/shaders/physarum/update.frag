@@ -24,6 +24,9 @@ uniform float u_food;      // how strongly luma is added to what sensors read
 uniform float u_reseed;    // per-agent respawn probability this frame
 uniform float u_wmax;      // upper bound of matte*clamp(gray,.05,1); <= 0: respawn uniformly
 uniform uint u_salt;       // per-frame random salt
+uniform float u_satcap;    // sensed-trail soft cap (absolute units); <= 0 = off
+uniform float u_jitter;    // per-step heading wobble, rad; 0 = off
+uniform float u_hetero;    // 0..1 blend toward the 3-sub-population sense split
 
 layout(location = 0) out vec4 f_agent;
 
@@ -39,7 +42,11 @@ ivec2 cell(vec2 p) { return ivec2(mod(floor(p), vec2(u_grid))); }
 
 float food(vec2 p) {
     ivec2 c = cell(p);
-    return texelFetch(u_trail, c, 0).r + u_food * texelFetch(u_gray, c, 0).r;
+    float t = texelFetch(u_trail, c, 0).r;
+    // sensor saturation: softly cap the sensed trail so a fat vein reads the
+    // same as a merely strong thin one (anti-thoroughfare; see dtouch.physarum)
+    if (u_satcap > 0.0) t = u_satcap * (1.0 - exp(-t / u_satcap));
+    return t + u_food * texelFetch(u_gray, c, 0).r;
 }
 
 void main() {
@@ -53,6 +60,14 @@ void main() {
     // the pen: blend field -> body by the matte under the agent
     float t = texelFetch(u_matte, cell(p), 0).r;
     float sense = mix(u_sense.x, u_sense.y, t) * u_gain;
+    if (u_hetero > 0.0) {
+        // 3 sub-populations by agent index (float mod — ES 3.00 has no
+        // integer % for this): short / mid / long sense ranges, blended in
+        // by u_hetero. Multi-scale sensing grows multi-scale structure.
+        float g3 = mod(float(idx), 3.0);
+        float m = (g3 < 0.5) ? 0.45 : (g3 < 1.5) ? 1.0 : 1.9;
+        sense *= 1.0 + (m - 1.0) * u_hetero;
+    }
     float spread = mix(u_spread.x, u_spread.y, t);
     float turn = mix(u_turn.x, u_turn.y, t);
     float stp = mix(u_step.x, u_step.y, t) * u_gain;
@@ -67,6 +82,9 @@ void main() {
     else if (fc < fl && fc < fr) dir = (rnd(s) < 0.5) ? -1.0 : 1.0;
     else dir = (fl > fr) ? -1.0 : 1.0;
     h += dir * turn;
+    // per-step heading wobble: highways stop being perfectly straight
+    // attractors and the mold keeps probing sideways
+    if (u_jitter > 0.0) h += (rnd(s) * 2.0 - 1.0) * u_jitter;
 
     p += vec2(cos(h), sin(h)) * stp;
     p = mod(p, vec2(u_grid));

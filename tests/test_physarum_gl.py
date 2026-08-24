@@ -89,7 +89,9 @@ def test_matte_is_the_pen_blends_toward_body_point(gl_field):
     """Same assertion as the CPU field: matte=0 runs the field point, matte=1
     the body point, and mean per-frame displacement follows the step."""
     def mean_step(matte_value):
-        f = gl_field(point_bg="haze", point_fg="fingers")
+        # reseed off: teleports are displacement noise on top of the stride
+        # being measured (haze's 0.35 px stride would drown in them)
+        f = gl_field(point_bg="haze", point_fg="fingers", reseed_frac=0.0)
         m, g = _flat(f, matte_value), _flat(f)
         f.update(m, g)
         px, py, _ = f.agents()

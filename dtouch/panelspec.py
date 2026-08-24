@@ -119,6 +119,7 @@ class Cycle:
     # silently ignores a value it does not recognise.
     legacy: Optional[dict] = None
     nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
+    tip: str = ""                    # `i` tooltip, same contract as Slider.tip
 
     @property
     def hit_key(self):

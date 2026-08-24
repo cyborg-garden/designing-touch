@@ -152,7 +152,9 @@ def test_matte_is_the_pen_blends_toward_body_point():
     haze steps 0.7/frame, fingers 2.0, so mean per-frame displacement must
     roughly double between the two (wrap-aware distance)."""
     def mean_step(matte_value):
-        f = _field(point_bg="haze", point_fg="fingers")
+        # reseed off: teleports are displacement noise on top of the stride
+        # being measured (haze's 0.35 px stride would drown in them)
+        f = _field(point_bg="haze", point_fg="fingers", reseed_frac=0.0)
         m = _flat(f, matte_value)
         g = _flat(f)
         f.update(m, g)                       # warm-up (headings settle)
