@@ -264,9 +264,20 @@ class Gui:
         self.hot.append((rect, "section", title))
         return y + self.S(16), is_open
 
-    def cycle(self, img, label, value, key, x, y, w):
-        """< value > cycle control. Hits are ("cycle", (key, ±1)). Returns next y."""
-        self.text(img, label, x, y + self.S(10), DIM, 0.42)
+    def cycle(self, img, label, value, key, x, y, w, info=None):
+        """< value > cycle control with an optional `i` tooltip badge (same
+        contract as slider's). Hits are ("cycle", (key, ±1)). Returns next y."""
+        lx = x
+        if info:
+            ic = (x + self.S(8), y + self.S(6))
+            irect = (x - self.S(2), y - self.S(4), x + self.S(18), y + self.S(16))
+            cv2.circle(img, ic, self.S(8), (90, 110, 150), -1, cv2.LINE_AA)
+            self.text(img, "i", ic[0] - self.S(2), ic[1] + self.S(5),
+                      (235, 240, 245), 0.42, 1)
+            if in_rect(irect, self.mouse):
+                self.tooltip = (info, x, y)
+            lx = x + self.S(22)
+        self.text(img, label, lx, y + self.S(10), DIM, 0.42)
         ry = y + self.S(16)
         bw, bh = self.S(28), self.S(24)
         lb = (x, ry, x + bw, ry + bh)
