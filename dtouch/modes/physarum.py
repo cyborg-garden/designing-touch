@@ -479,7 +479,11 @@ class PhysarumMode:
             self._hcy, self._hcx = np.mgrid[0:(gh + 1) // 2, 0:(gw + 1) // 2]
             self._hcy = (self._hcy * 2).astype(np.float32)
             self._hcx = (self._hcx * 2).astype(np.float32)
-        motion = np.abs(gray - self._prev_gray)
+        # deadband under the diff: real cameras hold ~0.01-0.03 of per-pixel
+        # sensor noise, which would otherwise read as permanent full-frame
+        # "motion" and fire gather pulses at the frame centroid forever
+        motion = np.maximum(np.abs(gray - self._prev_gray) - np.float32(0.04),
+                            np.float32(0.0))
         self._prev_gray = gray
         np.maximum(self._motion * np.float32(0.975),
                    np.minimum(motion * np.float32(3.0), np.float32(1.0)),
