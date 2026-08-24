@@ -1542,6 +1542,15 @@ class Host:
                         cb.dither_mode = (None if "dither" in claimed
                                           or ui.dither_name == "off"
                                           else ui.dither_name)
+                        # dither working resolution: the rack's default 72
+                        # rows is the lo-fi block look; a mode may declare
+                        # `signal_dither_rows(out_h)` to scale it with the
+                        # output (Physarum: its smooth veins read the fixed
+                        # 72 rows as boulder-sized grain). Kept as rows so a
+                        # GPU port mirrors it as a quantized-UV cell count.
+                        rows_fn = getattr(mode, "signal_dither_rows", None)
+                        cb.dither_size = (rows_fn(self.res[1])
+                                          if callable(rows_fn) else 72)
                         out = cb.process(out)
                     if self.ps.blackout:
                         # Hard black AFTER mode render/composite/glitch, BEFORE
