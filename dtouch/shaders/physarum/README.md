@@ -30,10 +30,10 @@ and GLSL ES 3.00:
 | `update.frag`     | one Jones step per agent (sense, turn, move, respawn) |
 | `deposit.vert`    | attribute-less GL_POINTS, agent i by `gl_VertexID`    |
 | `deposit.frag`    | blended deposit weight, ONE/ONE additive              |
-| `blur.frag`       | one axis of the box blur; adds laid, applies decay    |
+| `blur.frag`       | one axis of the box blur; adds laid, applies decay (scalar `u_decay`, optionally per-pixel via the `u_keep` map) |
 | `stats.frag`      | stride-4 subsample of (trail, laid) for p95 / mean    |
 | `tonemap.frag`    | `1 - exp(-exposure * x)` luminance                    |
-| `impulse.frag`    | burst (gaussian respawn) / wave (radial headings)     |
+| `impulse.frag`    | burst (gaussian respawn) / wave (radial headings) / gather (local rush) |
 | `looks.json`      | behavior points, built-in looks, palettes + 256-LUTs  |
 
 `looks.json` is generated from the Python source of truth by
@@ -44,3 +44,15 @@ the ES-3.00 rules above and compiles each one under `#version 330 core`.
 
 Changing a uniform name, a texture layout, or the agent texture format here
 is an API change for the browser page — say so in the PR.
+
+**2026-08 uniform additions** (the browser port must set these):
+
+- `update.frag`: `u_satcap` (sensed-trail soft cap, absolute units; host
+  feeds `sat x` last frame's p95, `<= 0` off), `u_jitter` (rad, 0 off),
+  `u_hetero` (0-1 sub-population sense split, 0 off).
+- `blur.frag`: decay moved out of `u_scale` into a new `u_decay`
+  (H pass: `u_scale = 1/k`, `u_decay = 1`; V pass: `u_scale = 1/k`,
+  `u_decay = decay`); new `u_keep` sampler + `u_use_keep` flag raise decay
+  toward 0.995 per pixel where the keep map is 1 (react's linger).
+- `impulse.frag`: `u_mode == 3` (gather) teleports only agents within
+  `u_radius` of `u_center` (torus distance) into a 0.15 x radius gaussian.
