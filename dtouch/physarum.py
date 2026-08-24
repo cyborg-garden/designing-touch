@@ -174,6 +174,24 @@ class PhysarumField:
         return ((gx_i + self._rng.random(k)).astype(np.float32),
                 (gy_i + self._rng.random(k)).astype(np.float32))
 
+    # ----- interactions -----
+    def spawn_burst(self, x, y, frac=0.08, radius=6.0):
+        """Teleport a fraction of the pool into a tight gaussian at (x, y)
+        with fresh random headings — Bleuje-style particle spawning, the
+        theatrical 'pour more mold HERE' move."""
+        k = int(frac * self.n)
+        if k <= 0:
+            return
+        pick = self._rng.integers(0, self.n, k)
+        self.px[pick] = (x + self._rng.normal(0, radius, k)).astype(np.float32) % self.gw
+        self.py[pick] = (y + self._rng.normal(0, radius, k)).astype(np.float32) % self.gh
+        self.heading[pick] = self._rng.uniform(0, 2 * np.pi, k).astype(np.float32)
+
+    def wave(self, x, y):
+        """Point every agent's heading away from (x, y) — one radial impulse
+        that ripples the whole organism outward, then the mold reknits."""
+        self.heading = np.arctan2(self.py - y, self.px - x).astype(np.float32)
+
     # ----- picture -----
     def luminance(self):
         """Tonemapped trail in [0,1] float32 (gh, gw) — the mode colorizes it.

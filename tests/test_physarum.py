@@ -204,3 +204,40 @@ def test_builtin_points_and_palettes_are_wired():
         if pal != "video":
             lut = _palette_lut(pal)
             assert lut.shape == (256, 3) and lut.dtype == np.uint8
+
+
+# ---------- cheap-wins round: burst / wave / palettes ----------
+
+def test_spawn_burst_concentrates_agents():
+    f = _field()
+    f.spawn_burst(20.0, 20.0, frac=0.5, radius=2.0)
+    d = np.hypot(f.px - 20.0, f.py - 20.0)
+    assert (d < 8.0).mean() > 0.4          # half the pool landed on the point
+
+
+def test_wave_points_everyone_outward():
+    f = _field()
+    f.wave(f.gw / 2, f.gh / 2)
+    dx, dy = f.px - f.gw / 2, f.py - f.gh / 2
+    outward = np.cos(f.heading) * dx + np.sin(f.heading) * dy
+    assert (outward >= 0).mean() > 0.99
+
+
+def test_burst_and_wave_commands_land_on_next_step(tmp_path):
+    host = _booted(tmp_path)
+    m = host.mode
+    m.start(host)
+    cmds = m.commands()
+    cmds["physarum.burst"].run()
+    cmds["physarum.wave"].run()
+    assert m._burst_pending and m._wave_pending
+    m.step(_white(), None, 1 / 30)
+    assert not m._burst_pending and not m._wave_pending
+    m.stop()
+
+
+def test_mode_keys_do_not_collide_with_new_commands():
+    host_keys = {"x", "b", "w"}
+    mode_switch = {getattr(m, "key", m.id[:1]) for m in REGISTRY}
+    assert not host_keys & mode_switch
+    assert not host_keys & set("sgariqm")

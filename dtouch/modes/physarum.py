@@ -24,7 +24,7 @@ from .particles import MATTE_H, MATTE_W, MATTES, composite_video_bg
 
 ACCENT = (40, 190, 250)          # BGR — amber, the color of the reference mold
 
-PALETTES_PH = ["arctic", "fire", "aurora", "violet", "mono", "video"]
+PALETTES_PH = ["arctic", "fire", "aurora", "violet", "toxic", "rose", "mono", "video"]
 
 # gradient stops (RGB), interpolated to a 256-entry LUT per palette
 _PALETTE_STOPS = {
@@ -32,6 +32,8 @@ _PALETTE_STOPS = {
     "fire":   [(0, 0, 0), (80, 10, 0), (200, 60, 10), (255, 160, 20), (255, 250, 180)],
     "aurora": [(0, 0, 0), (8, 60, 48), (20, 180, 120), (140, 120, 220), (240, 240, 255)],
     "violet": [(0, 0, 0), (58, 10, 88), (160, 40, 180), (255, 120, 220), (255, 255, 255)],
+    "toxic":  [(0, 0, 0), (6, 40, 8), (30, 140, 30), (150, 240, 80), (240, 255, 220)],
+    "rose":   [(0, 0, 0), (70, 12, 40), (190, 40, 90), (255, 120, 150), (255, 235, 240)],
     "mono":   [(0, 0, 0), (255, 255, 255)],
 }
 _LUT_CACHE = {}
@@ -89,7 +91,7 @@ class PhysarumMode:
                         ph_gain=1.0, ph_decay=0.94, ph_palette_idx=0,
                         ph_exposure=3.5, ph_grain=0.5)
 
-    def __init__(self, matte="auto", grid=(480, 270), n=250_000, seed=1):
+    def __init__(self, matte="auto", grid=(576, 324), n=400_000, seed=1):
         self.matte_kind = matte
         self.grid = tuple(grid)
         self.n = n
@@ -97,6 +99,8 @@ class PhysarumMode:
         self.host = None
         self.pf = None
         self.mat = None
+        self._burst_pending = False
+        self._wave_pending = False
 
     # ----- lifecycle -----
     def start(self, host):
@@ -166,7 +170,10 @@ class PhysarumMode:
         ]
 
     def commands(self):
-        """X swaps body/field behavior points — the whole frame reorganizes."""
+        """X swaps body/field points; B pours agents onto the subject;
+        W ripples the whole organism outward. Burst/wave land at the matte's
+        bright centroid, resolved on the next step (commands run between
+        frames, and the shell owns the mouse)."""
         ui, toasts = self.host.ui, self.host.hud.toasts
         pts = self.points
 
@@ -176,8 +183,20 @@ class PhysarumMode:
             toasts.flash("SWAP  body %s / field %s"
                          % (pts[ui.ph_point_fg_idx % len(pts)],
                             pts[ui.ph_point_bg_idx % len(pts)]))
+
+        def _burst():
+            self._burst_pending = True
+            toasts.flash("BURST")
+
+        def _wave():
+            self._wave_pending = True
+            toasts.flash("WAVE")
         return {"physarum.swap": Command("physarum.swap",
-                                         "Swap body/field points", "x", _swap)}
+                                         "Swap body/field points", "x", _swap),
+                "physarum.burst": Command("physarum.burst",
+                                          "Spawn burst on the subject", "b", _burst),
+                "physarum.wave": Command("physarum.wave",
+                                         "Radial wave", "w", _wave)}
 
     def safe_look(self):
         return "veinwork"
@@ -235,6 +254,23 @@ class PhysarumMode:
         gray = cv2.resize(
             cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0,
             (gw, gh))
+
+        if self._burst_pending or self._wave_pending:
+            # land the impulse on the lit subject: weighted centroid of
+            # matte*luma, falling back to frame center on an empty matte
+            w = m * np.clip(gray, 0.05, 1.0)
+            tot = float(w.sum())
+            if tot > 1e-3:
+                cy, cx = np.mgrid[0:gh, 0:gw]
+                px_c = float((cx * w).sum() / tot)
+                py_c = float((cy * w).sum() / tot)
+            else:
+                px_c, py_c = gw / 2.0, gh / 2.0
+            if self._burst_pending:
+                pf.spawn_burst(px_c, py_c)
+            if self._wave_pending:
+                pf.wave(px_c, py_c)
+            self._burst_pending = self._wave_pending = False
 
         pf.update(m, gray)
         lum = pf.luminance()
