@@ -29,13 +29,15 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from ..circuit_bent import CircuitBent
 from ..commands import Command
 from ..hud import AMBER
 from ..matte import MatteUnavailable, make_matte, select_matte
-from ..overlay_ui import RES_OPTIONS
+from ..overlay_ui import RES_OPTIONS, sync_signal
 from ..panelspec import Cycle, PresetList, Section, Slider, Toggle
 from ..physarum import POINT_NAMES, PhysarumField
 from ..physarum_gl import PhysarumFieldGL
+from ..rack_gl import PhysarumOutGL
 from .particles import MATTE_H, MATTE_W, MATTES, composite_video_bg
 
 ACCENT = (40, 190, 250)          # BGR — amber, the color of the reference mold
@@ -176,6 +178,13 @@ class PhysarumMode:
         self._t = 0.0                # evolve clock (sums clamped dt)
         self._prev_gray = None       # last grid-res luma (react's motion diff)
         self._motion = None          # lingering motion-energy map (react)
+        # SIGNAL-on-GPU state (dtouch.rack_gl): the output composer + rack
+        # on the field's context, and the per-frame flag telling the shell
+        # its CPU rack already ran here (DESIGN.md §2.4)
+        self._glout = None
+        self._glout_key = None
+        self._rack_gl_ok = True      # one GL failure disables the path (§6.4)
+        self.signal_done = False
 
     # ----- lifecycle -----
     def start(self, host):
@@ -195,6 +204,9 @@ class PhysarumMode:
         engine unless the caller fixed grid / n. GL failing to come up is
         not a reason to lose the show (DESIGN.md §6.4): it is toasted in
         amber, printed for the headless log, and the mold runs on numpy."""
+        # any prior GL output composer belonged to the old field/context
+        self._glout = None
+        self._glout_key = None
         if self.engine_pref != "cpu":
             q_grid, q_n = self.QUALITY.get(self._quality, self.QUALITY["perform"])
             self.grid = self._grid or q_grid
@@ -231,9 +243,11 @@ class PhysarumMode:
     def stop(self):
         """Release the GPU field if that is what booted; idempotent."""
         if self.pf is not None:
-            self.pf.release()
+            self.pf.release()      # the composer's objects die with the ctx
         self.pf = None
         self.mat = None
+        self._glout = None
+        self._glout_key = None
 
     def on_resize(self, w, h):
         pass                     # everything derives from host.res per frame
@@ -544,9 +558,23 @@ class PhysarumMode:
             self._burst_pending = self._wave_pending = False
 
         pf.update(m, gray, keep)
-        lum = pf.luminance()
 
         pal = self.palettes[int(self._ui("ph_palette_idx", 0)) % len(self.palettes)]
+        # SIGNAL on the GPU (DESIGN.md §2.4; PR #26's measured port list):
+        # with the GL engine and the rack ON, tonemap + colorize + upscale +
+        # video composite + the whole rack run as fragment passes on the
+        # field's own context — the trail never round-trips through numpy,
+        # and the ONE readback is the final composed uint8 frame.
+        # signal_done tells the shell its CPU rack already happened here.
+        self.signal_done = False
+        if (self.engine == "gl" and self._rack_gl_ok and self.host is not None
+                and bool(self._ui("glitch", False))):
+            out = self._step_gpu_rack(small, frame_bgr, pal)
+            if out is not None:
+                self.signal_done = True
+                return out
+
+        lum = pf.luminance()
         if pal == "video":
             # veins lit by the footage's own color — the mold as a lampshade
             color = cv2.cvtColor(cv2.resize(small, (gw, gh)),
@@ -560,3 +588,63 @@ class PhysarumMode:
             out = composite_video_bg(out, frame_bgr,
                                      float(self._ui("ph_video_mix", 0.5)))
         return np.ascontiguousarray(out)
+
+    # ----- SIGNAL on the GPU -----
+    def _ensure_glout(self, rw, rh):
+        """The GL output composer + rack, rebuilt when the field, grid, or
+        output resolution changes (all of them size its textures). Must be
+        called with the field's context bound."""
+        key = (id(self.pf), self.grid, (rw, rh))
+        if self._glout is not None and self._glout_key != key:
+            if self._glout.ctx is self.pf.ctx:
+                self._glout.release()   # same live ctx: free the old textures
+            self._glout = None
+        if self._glout is None:
+            gw, gh = self.grid
+            self._glout = PhysarumOutGL(self.pf.ctx, gw, gh, rw, rh)
+            self._glout_key = key
+        return self._glout
+
+    def _step_gpu_rack(self, small, frame_bgr, pal):
+        """One frame of the ported output path: tonemap into the field's
+        luminance texture, colorize + upscale + video composite, then the
+        SIGNAL rack, all as fragment passes — one uint8 RGB readback at
+        output res. Uses the shell's own CircuitBent (host.cb) for the
+        rack's stochastic plan, so toggling engines stays continuous.
+
+        Returns None on any GL failure and disables the path — the CPU
+        rack takes over, toasted in amber (DESIGN.md §6.4: the show still
+        has to start)."""
+        host = self.host
+        try:
+            rw, rh = host.res
+            cb = getattr(host, "cb", None)
+            if cb is None:
+                cb = CircuitBent(seed=getattr(host, "seed", 0))
+                host.cb = cb
+            sync_signal(cb, host.ui, self, rh)
+            video_small = (cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                           if pal == "video" else None)
+            cam, mix = None, 0.0
+            if bool(self._ui("ph_video_bg", False)):
+                mix = float(self._ui("ph_video_mix", 0.5))
+                if mix > 0.0:
+                    cam = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            pf = self.pf
+            with pf.ctx:
+                glout = self._ensure_glout(rw, rh)
+                pf.luminance_into_tex()
+                lut = None if pal == "video" else _palette_lut(pal)
+                src = glout.compose(pf.tex_lum, lut, video_small, cam, mix)
+                glout.rack.run(cb, cb.plan(rh, rw), src)
+                return glout.rack.read()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:               # noqa: BLE001 — §6.4
+            self._rack_gl_ok = False
+            self._glout = None
+            msg = f"GPU rack unavailable, rack running on CPU: {e}"
+            if host is not None:
+                host.hud.toasts.flash(msg[:80], AMBER)
+            print(msg)
+            return None

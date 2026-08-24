@@ -42,6 +42,34 @@ DITHERS = ["bayer", "blue", "fs", "riemersma", "off"]
 SIGNAL_BIASES = ["auto", "light", "dark"]
 SIGNAL_BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
 
+
+def sync_signal(cb, ui, mode, out_h):
+    """Copy the SIGNAL section's live values onto a CircuitBent — the one
+    source of truth for the rack's per-frame configuration. The shell's CPU
+    rack and PhysarumMode's GPU rack both call it, so the two backends can
+    never drift apart on what the panel means.
+
+    Includes the suppression rule (DESIGN.md §2.4: a mode that claims
+    "dither" owns dithering — the rack runs minus its dither) and the
+    per-mode dither working resolution (`signal_dither_rows(out_h)`;
+    default 72 rows, the lo-fi block look)."""
+    cb.chroma_shift = ui.chroma
+    cb.scan_drift = ui.drift
+    cb.bit_crush = int(ui.crush)
+    cb.scanlines = ui.scanlines
+    # dither-quality controls (DESIGN.md §4.1: Bits int-snapped 1-4,
+    # Gamma default ON, Bias auto/light/dark)
+    cb.dither_bits = int(np.clip(round(ui.sig_bits), 1, 4))
+    cb.dither_gamma = bool(ui.sig_gamma)
+    cb.dither_invert = SIGNAL_BIAS_INVERT[
+        SIGNAL_BIASES[int(ui.sig_bias_idx) % len(SIGNAL_BIASES)]]
+    claimed = frozenset(getattr(mode, "claims", ()))
+    cb.dither_mode = (None if "dither" in claimed or ui.dither_name == "off"
+                      else ui.dither_name)
+    rows_fn = getattr(mode, "signal_dither_rows", None)
+    cb.dither_size = rows_fn(out_h) if callable(rows_fn) else 72
+
+
 RES_OPTIONS = [("720p", 1280, 720), ("1080p", 1920, 1080),
                ("1440p", 2560, 1440), ("4K", 3840, 2160)]
 

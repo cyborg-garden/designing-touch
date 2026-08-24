@@ -409,27 +409,46 @@ class PhysarumFieldGL:
         s = np.frombuffer(raw, np.float32).reshape(self.sh, self.sw, 2)
         return float(np.percentile(s[..., 0], 95.0)), float(s[..., 1].mean())
 
+    def luminance_into_tex(self):
+        """Tonemap the trail into self.tex_lum on the GPU — no readback.
+
+        Returns False when the trail is empty (tex_lum is cleared to black
+        instead, matching luminance()'s zeros). The GL output path
+        (dtouch.rack_gl) composes tex_lum onward without the picture ever
+        leaving the GPU; luminance() is this plus the uint8 readback.
+
+        The CALLER holds the context binding (like _deposit / _blur_decay):
+        moderngl's save/restore of the previously-current context is a
+        single slot, so a nested `with self.ctx:` here would clobber the
+        outer scope's restore and hand a later foreign context our GL
+        calls (the test_field_survives_a_foreign_context failure mode)."""
+        gl = self._gl
+        norm, lmean = self._stats()
+        self._last_norm = norm      # feedback for the `sat` sensing cap
+        if norm <= 0:
+            self.fbo_lum.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+            return False
+        gnorm = lmean * 4.0
+        p = self.p_tonemap
+        p["u_inv_norm"].value = 1.0 / norm
+        p["u_grain"].value = float(self.grain) if gnorm > 0 else 0.0
+        p["u_inv_gnorm"].value = (1.0 / gnorm) if gnorm > 0 else 0.0
+        p["u_exposure"].value = float(self.exposure)
+        self.fbo_lum.use()
+        self.tex_trail_a.use(0)
+        self.tex_laid.use(1)
+        self.vao_tonemap.render(gl.TRIANGLES, vertices=3)
+        return True
+
     def luminance(self):
         """Tonemapped trail in [0,1] float32 (gh, gw) — same curve as the CPU
         field (trail normalized by its 95th percentile, `grain` mixing this
         frame's raw deposits over it, 1 - exp(-exposure * x)), evaluated on
         the GPU and read back as 8-bit."""
-        gl = self._gl
         with self.ctx:
-            norm, lmean = self._stats()
-            self._last_norm = norm      # feedback for the `sat` sensing cap
-            if norm <= 0:
+            if not self.luminance_into_tex():
                 return np.zeros((self.gh, self.gw), np.float32)
-            gnorm = lmean * 4.0
-            p = self.p_tonemap
-            p["u_inv_norm"].value = 1.0 / norm
-            p["u_grain"].value = float(self.grain) if gnorm > 0 else 0.0
-            p["u_inv_gnorm"].value = (1.0 / gnorm) if gnorm > 0 else 0.0
-            p["u_exposure"].value = float(self.exposure)
-            self.fbo_lum.use()
-            self.tex_trail_a.use(0)
-            self.tex_laid.use(1)
-            self.vao_tonemap.render(gl.TRIANGLES, vertices=3)
             raw = self.fbo_lum.read(components=1)
         lum = np.frombuffer(raw, np.uint8).reshape(self.gh, self.gw)
         return lum.astype(np.float32) * np.float32(1.0 / 255.0)
