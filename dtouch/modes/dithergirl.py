@@ -1,4 +1,4 @@
-"""Dither Girl — the dither pipeline as the primary image (DESIGN.md §4.2).
+"""Dither — the dither pipeline as the primary image (DESIGN.md §4.2).
 
 camera or still → optional matte gate → gamma-correct dither at the chosen
 working scale → palette. The SIGNAL rack is available on top, minus its dither
@@ -248,11 +248,11 @@ class DitherGirlMode:
     """Live + still dithering as a shell plugin (Mode protocol, DESIGN.md §2.2)."""
 
     id = "dithergirl"
-    title = "Dither Girl"
+    title = "Dither"
     accent = ACCENT
     accepts_still = True
     blurb = "live + still\ndithering"      # home-menu card copy (DESIGN.md §3)
-    # §2.4: the rack hides what we own — Dither Girl owns ALL dither quality
+    # §2.4: the rack hides what we own — Dither owns ALL dither quality
     # controls (dither row + Bits/Gamma/Bias), not just the dither cycle; two
     # visible dither subsystems in one panel is the bolted-features
     # incoherence the overhaul exists to kill.

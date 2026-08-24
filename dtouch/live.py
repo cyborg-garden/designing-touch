@@ -47,7 +47,7 @@ def live(device="builtin", res=(1024, 576), grid=(130, 73), depth=1.3, mirror=Tr
     g = make_grid(gx, gy); s = random_scale(n, 0); e = random_euler(n, 1)
     r = Renderer(rw, rh, n, base_size=0.8 / max(gx, gy), depth_scale=depth)
     if show:
-        cv2.namedWindow("dtouch - grid", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("lighteater - grid", cv2.WINDOW_NORMAL)
     count = 0; out = None
     try:
         while True:
@@ -59,8 +59,8 @@ def live(device="builtin", res=(1024, 576), grid=(130, 73), depth=1.3, mirror=Tr
             luma = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (gx, gy)).astype(np.float32) / 255.0
             out = r.render(pack_instances(displace_z(g, luma, depth), s, e))
             if show:
-                cv2.imshow("dtouch - grid", cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
-                if cv2.getWindowProperty("dtouch - grid", cv2.WND_PROP_VISIBLE) < 1:
+                cv2.imshow("lighteater - grid", cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
+                if cv2.getWindowProperty("lighteater - grid", cv2.WND_PROP_VISIBLE) < 1:
                     break
                 cv2.waitKey(1)
             count += 1

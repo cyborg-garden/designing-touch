@@ -146,7 +146,7 @@ def test_boot_menu_hint_names_the_resume_not_the_doors(tmp_path):
     issue #18, on the very same baseline)."""
     host = _booted(tmp_path)
     hints = _hints(host)
-    assert "enter resumes DITHER GIRL" in hints
+    assert "enter resumes DITHER" in hints
     assert DOORS_HINT not in hints
 
 
@@ -236,7 +236,7 @@ def test_entering_the_pre_selected_mode_flashes_its_title(tmp_path):
     host = _booted(tmp_path)
     host._route_key(13)
     assert host.hud.toasts._center is not None
-    assert host.hud.toasts._center.text == "Dither Girl"
+    assert host.hud.toasts._center.text == "Dither"
 
 
 def test_picking_a_different_card_at_boot_switches(tmp_path):

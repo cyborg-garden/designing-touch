@@ -539,9 +539,9 @@ def test_menu_row_action_opens_the_menu(tmp_path):
 
 
 def test_panel_title_carries_the_mode(tmp_path):
-    """DESIGN.md §4.1/§4.2 sketch: panel title is 'dtouch - MODE TITLE'."""
+    """DESIGN.md §4.1/§4.2 sketch: panel title is 'lighteater - MODE TITLE'."""
     host = _booted(tmp_path)
-    assert host.ui.panel_title == "dtouch - DITHER GIRL"
+    assert host.ui.panel_title == "lighteater - DITHER"
 
 
 def test_i_in_hidden_posts_the_debug_line_as_a_toast(tmp_path):

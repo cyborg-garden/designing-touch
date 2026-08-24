@@ -36,7 +36,7 @@ from dtouch.sources import SyntheticSource
 
 
 _DITHER_MODES = ["bayer", "fs", None]
-_WIN = "dtouch - circuit bent"
+_WIN = "lighteater - circuit bent"
 
 
 def _read_camera(cap):

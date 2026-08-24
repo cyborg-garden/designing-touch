@@ -1,4 +1,4 @@
-# designing-touch
+# lighteater
 
 Turn **video and sound into flowing particle visuals**, in real time — a modular,
 code-first take on the kind of generative effects you'd build in TouchDesigner, but driven from a terminal or a simple control panel instead of a GUI node graph.
@@ -13,8 +13,8 @@ Dance, play music, and it moves with you.
 ## Quick start
 
 ```bash
-git clone https://github.com/NimbleCoAI/designing-touch
-cd designing-touch
+git clone https://github.com/cyborg-garden/lighteater
+cd lighteater
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install --upgrade pip   # stock macOS pip (21.2) can't do editable installs
 pip install -e ".[person]"        # engine + person segmentation
@@ -37,7 +37,7 @@ the person matte, `portrait` and `sigil`, fall back to another matte.
 
 One window, and it opens on the **home menu** — with the mode you used last already running
 live behind it and already selected, so `Enter` is a one-key resume. A hint says so
-(`enter resumes DITHER GIRL`), and once you're in, a second one names the three doors:
+(`enter resumes DITHER`), and once you're in, a second one names the three doors:
 `m menu - TAB panel - ? keys`. A fourth door isn't in the hint: there's a small chevron in
 the top-right corner, and clicking it opens the panel. It's there for as long as the HUD is,
 so the mouse is never a dead end.
@@ -62,7 +62,7 @@ menu entirely.
 Three instruments share the window, the presets, the keys and the recorder:
 
 - **Particles** (`p`) — camera → matte → a flowing cloud of glowing particles. The original.
-- **Dither Girl** (`d`) — the dither pipeline as the picture itself (see below).
+- **Dither** (`d`) — the dither pipeline as the picture itself (see below).
 - **Physarum** (`o`) — a slime-mold simulation that eats the live video: the matte blends
   every sim parameter between a "field" behavior and a "body" behavior (whoever is in frame
   runs different physics than the room), and the footage's light is food the veins grow
@@ -78,7 +78,7 @@ dropping you into a mode you never chose. You never need the menu mid-set: `p`, 
 switch directly from any state. Switching draws a still boot card rather than a gray flash,
 and coming back to a mode you've already used finds it exactly as you left it.
 
-From the command line, `--mode dithergirl` boots into Dither Girl, `--mode physarum` boots
+From the command line, `--mode dithergirl` boots into Dither, `--mode physarum` boots
 into Physarum, and `--still photo.jpg`
 loads a still image and implies it; `--flock` and `--glitch` boot Particles with those layers
 already on.
@@ -133,7 +133,7 @@ generated from the commands themselves, so it can't go stale. The ones worth mem
 | `Space` | blackout — hard black out, with an amber corner tick so you know it's you |
 | `0` | panic: the mode's known-good look, blackout off, glitch off |
 | `TAB` / `Esc` | show more overlay / step back toward none |
-| `p` / `d` / `m` | Particles / Dither Girl / home menu |
+| `p` / `d` / `m` | Particles / Dither / home menu |
 | `f` `g` `v` `a` `r` | flock, glitch, video background, sound react, record |
 | `s` | save the current look (panel only — saving is an edit, not a move) |
 | `,` `.` then `-` `=` | pick a control and nudge it without opening the panel (`_`/`+` = ×5) |
@@ -143,9 +143,9 @@ Every key answers with a big momentary toast, so you can play in the dark withou
 panel. Your saved looks live in `presets.json`, and the mode, bank and current look autosave to
 `state.json` — both next to the app, both gitignored, so a restart lands you where you were.
 
-## Dither Girl
+## Dither
 
-<img alt="Dither Girl mode: Riemersma dithering, magenta palette, with the control panel open" src="docs/dither-girl-panel.png" />
+<img alt="Dither mode: Riemersma dithering, magenta palette, with the control panel open" src="docs/dither-panel.png" />
 
 The same camera (or a still, via `--still photo.jpg`) run through the dither pipeline as the
 *primary* image rather than as an effect on top:

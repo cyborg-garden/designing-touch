@@ -162,7 +162,7 @@ def test_a_mode_flag_still_wins_but_an_alien_preset_is_called_out(
     What changes is that the preset is not silently dropped onto index 0."""
     host = launch("--mode", "dithergirl", "--preset", "embers")
     out = capsys.readouterr().out
-    assert 'preset "embers" is not a Dither Girl look' in out
+    assert 'preset "embers" is not a Dither look' in out
     assert "booting classic" in out
     assert host.kw["preset"] == "classic"           # the mode's safe look
 
@@ -193,7 +193,7 @@ def test_a_name_both_modes_own_names_the_one_it_picked(launch, empty_store,
                  mode="dithergirl")
     host = launch("--preset", "twin")
     out = capsys.readouterr().out
-    assert "Particles and Dither Girl" in out and "booting Particles" in out
+    assert "Particles and Dither" in out and "booting Particles" in out
     assert host.kw["preset"] == "twin"
 
 

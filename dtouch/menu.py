@@ -246,7 +246,7 @@ def hint_baseline(h):
 
 def draw_menu(img, cam_bgr, cards, sel, boot=False):
     """Render the menu over `img` (BGR, in place): 1-bit blue-noise-dithered
-    live camera under a 65% scrim, 'dtouch' top-left, a centered row of mode
+    live camera under a 65% scrim, 'lighteater' top-left, a centered row of mode
     cards. Returns the click rects [(rect, card), ...]."""
     h, w = img.shape[:2]
     uu = u(h)
@@ -269,7 +269,7 @@ def draw_menu(img, cam_bgr, cards, sel, boot=False):
 
     ix, iy = int(w * TITLE_SAFE), int(h * TITLE_SAFE)
     tpx = int(1.4 * uu)
-    put_outlined(img, "dtouch", (ix, iy + tpx), tpx, INK)
+    put_outlined(img, "lighteater", (ix, iy + tpx), tpx, INK)
 
     # centered row of cards
     n = len(cards)

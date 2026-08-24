@@ -1,5 +1,5 @@
 #!/bin/bash
-# Double-click this file (Finder) to launch the designing-touch live preview.
+# Double-click this file (Finder) to launch the lighteater live preview.
 # It sets up the Python environment on first run, then opens the window.
 
 cd "$(dirname "$0")" || exit 1

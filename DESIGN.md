@@ -1,6 +1,6 @@
-# designing-touch — DESIGN
+# lighteater — DESIGN
 
-**Thesis:** designing-touch is a stage rig, not a settings panel. Every performance
+**Thesis:** lighteater is a stage rig, not a settings panel. Every performance
 action is one bare key with big momentary feedback, the output frame is sacred, and
 modes are plugins racked into a shell that owns the show.
 
@@ -86,9 +86,9 @@ construction; hand-written per-mode preset code is how KEYS drifted the first ti
 ```python
 class Mode(Protocol):
     id: str              # "particles", "dithergirl" — preset + command namespace
-    title: str           # "Particles", "Dither Girl" — menu + toast display
+    title: str           # "Particles", "Dither" — menu + toast display
     accent: tuple        # per-mode accent hue (graft: Cartridges) — see §5
-    accepts_still: bool  # Dither Girl: True
+    accepts_still: bool  # Dither: True
 
     def start(self, host: "Host") -> None: ...   # build engines; may raise — shell
                                                  # catches, toasts, reinstates previous mode
@@ -139,7 +139,7 @@ delete, tooltip, scroll) lift out of `OverlayUI` into `dtouch/imgui.py`;
 `OverlayUI` becomes a generic walker over `panel_spec()` plus the shell's global
 rows. The home menu draws with the same toolkit. The HUD status line renders
 from the same spec (mode title + the widgets marked `status=True`), e.g.
-`DITHER GIRL · blue noise · 3-bit · bias auto`.
+`DITHER · blue noise · 3-bit · bias auto`.
 
 ### 2.4 The SIGNAL rack (where Glitch lives)
 
@@ -150,7 +150,7 @@ the most-used combo. The rack contributes a `Section("SIGNAL", …)` appended to
 every mode's panel; its state saves *inside each mode's looks* under
 `"signal": {…}` so a glitched look recalls on one keystroke. `G` toggles it.
 
-**In Dither Girl the rack's dither row is suppressed** — Dither Girl owns
+**In Dither the rack's dither row is suppressed** — Dither owns
 dithering as the primary image; two visible dither subsystems in one panel is
 exactly the bolted-features incoherence this overhaul exists to kill. (Judge
 finding, fixed by rule: the rack hides any control the active mode claims.)
@@ -208,12 +208,12 @@ does not jump as toasts come and go).
 **Layout:** live camera behind the menu, rendered through 1-bit blue-noise
 dither and dimmed under a 65% scrim (graft from Cartridges: the menu proves the
 camera works and demos the newest feature before a single click). Title
-`dtouch` top-left. Centered row of mode cards from the REGISTRY, each card in
+`lighteater` top-left. Centered row of mode cards from the REGISTRY, each card in
 its mode's accent:
 
 ```
 ┌──────────────┐   ┌──────────────┐   ┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
-│  PARTICLES   │   │ DITHER GIRL  │   ┆   FLOCKING   ┆
+│  PARTICLES   │   │    DITHER    │   ┆   FLOCKING   ┆
 │ webcam-matte │   │ live + still │   ┆ coming soon  ┆
 │  instrument  │   │  dithering   │   ┆              ┆
 │     [P]      │   │     [D]      │   └╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
@@ -291,14 +291,14 @@ changes only: slot badges, key hints on section headers, SIGNAL's new dither-
 quality controls. Boids sliders keep their labels; their tooltips say the human
 thing ("how tightly the swarm pulls together", etc.).
 
-### 4.2 Dither Girl
+### 4.2 Dither
 
 The dither pipeline as the *primary* image: camera or still → optional matte
 gate → gamma-correct dither at chosen working scale → palette. SIGNAL rack
 available on top (minus its dither row, §2.4).
 
 ```
-dtouch · DITHER GIRL
+lighteater · DITHER
 - SOURCE           ← input cycle: camera / still… · matte cycle (dither the
                      subject only) · output res · Mirror
 - ALGORITHM        ← big active-algorithm label (1.4u, accent) · cycle: Bayer /
@@ -549,7 +549,7 @@ so it was simply the 2nd of 23 stops in Particles and the 3rd of 15 in Dither
 Girl — `.` `.` `=` with no panel open recreated the window at 4K, took the
 frame rate with it, and left `0` with no answer, because panic restores the
 mode's *look* and the window is not in the look. The test is not "is this a
-system setting" and not `save=False` — Dither Girl's `input` cycle is unsaved
+system setting" and not `save=False` — Dither's `input` cycle is unsaved
 and stays reachable, because stepping it again steps it back. (Mirror is a
 Toggle, so it was never in the walk to begin with — the walk is Sliders and
 Cycles only.) Resolution lives on the edit surface, where changing it is a
@@ -685,7 +685,7 @@ tests pin: every v1 fixture applies to identical engine state before and after.
 7. **Preset v2** (spec-derived schema, migration + backup + round-trip pins,
    banks/setlist, slot badges).
 8. **Home menu + mode switching** (menu state, cards, boot card, `p`/`d`/`m`).
-9. **Dither Girl mode** (`dtouch/modes/dithergirl.py`) per §4.2.
+9. **Dither mode** (`dtouch/modes/dithergirl.py`) per §4.2.
 10. **Dark-room test + polish:** lights off, projector/TV across the room, one
     hand, 10-minute scripted set including a yanked camera. Any traceback, lost
     mode, needed mouse, or needed second hand = release blocker.

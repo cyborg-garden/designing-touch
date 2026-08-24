@@ -400,7 +400,7 @@ class Host:
     source), then ``run()`` — returns ``(frame_count, last_rgb_frame)`` exactly
     like live_flow did."""
 
-    WIN = "dtouch - flow"
+    WIN = "lighteater - flow"
 
     def __init__(self, mode, source=None, device="builtin", res=(1920, 1080),
                  mirror=True, seed=1, preset="abstract", audio=False,
@@ -498,7 +498,7 @@ class Host:
             mk = getattr(mode, "matte_kind", None)
             ui.matte_idx = ui.mattes.index(mk) if mk in ui.mattes else 0
             ui.accent = mode.accent
-            ui.panel_title = "dtouch - " + mode.title.upper()
+            ui.panel_title = "lighteater - " + mode.title.upper()
             ui.set_spec(self.compose_spec(mode))
             mode.configure_ui(ui)
             self._reload_presets()
@@ -514,14 +514,14 @@ class Host:
 
         Suppression rule (DESIGN.md §2.4, judge finding): the rack hides any
         control the active mode claims — a mode declares `claims` (a set of
-        store keys, e.g. Dither Girl claims all the dither quality controls
+        store keys, e.g. Dither claims all the dither quality controls
         because it owns dithering as the primary image; two visible dither
         subsystems in one panel is the bolted-features incoherence the
         overhaul exists to kill).
 
         Duplicate-control rule (DESIGN.md §4.2, same principle, generic): a
         global row whose `attr` the mode's own sections already declare is
-        omitted — e.g. Dither Girl's SOURCE has its own Mirror row, so the
+        omitted — e.g. Dither's SOURCE has its own Mirror row, so the
         global Mirror would be a second face on the same state. Derived from
         the spec itself (no per-mode claims needed): both faces would set the
         same ui attr, so the attr IS the identity."""
@@ -780,7 +780,7 @@ class Host:
     # ----- spec-derived HUD status (DESIGN.md §2.3) -----
     def _status_line(self):
         """'MODE TITLE  <status-marked widget values in spec order>  <tail>'
-        — e.g. 'DITHER GIRL  blue noise  3-bit  bias auto  src still'. The
+        — e.g. 'DITHER  blue noise  3-bit  bias auto  src still'. The
         body renders from the composed spec's `status` flags (the single
         schema authority); the mode contributes only the cam/src tail."""
         parts = [self.mode.title.upper()]
@@ -1343,7 +1343,7 @@ class Host:
                                  matte=getattr(mode, "matte_kind", mattes[0]),
                                  palette=boot_palette)
         ui.accent = mode.accent
-        ui.panel_title = "dtouch - " + mode.title.upper()
+        ui.panel_title = "lighteater - " + mode.title.upper()
         ui.set_spec(self.compose_spec(mode))
         ui.mirror = self.mirror
         ui.audio = self._boot_audio

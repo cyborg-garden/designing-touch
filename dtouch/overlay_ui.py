@@ -153,7 +153,7 @@ def build_signal_section():
             Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
             # dither-quality controls (DESIGN.md §2.4/§4.1: the audit's
             # quality controls grow the rack; a mode that claims them —
-            # Dither Girl owns ALL dither quality — hides them)
+            # Dither owns ALL dither quality — hides them)
             Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
                    step=_QUANTISED["sig_bits"][0],
                    snap=_QUANTISED["sig_bits"][1],
@@ -286,10 +286,10 @@ class OverlayUI:
         # the active mode. Default ACC green = the shipped Particles chrome, so
         # a bare OverlayUI (goldens, tests) renders identical pixels.
         self.accent = ACC
-        # panel title (DESIGN.md §4.1/§4.2 sketch: 'dtouch - MODE TITLE',
+        # panel title (DESIGN.md §4.1/§4.2 sketch: 'lighteater - MODE TITLE',
         # ASCII hyphen). The shell sets it per mode; the bare default matches
         # the goldens' Particles panel.
-        self.panel_title = "dtouch - PARTICLES"
+        self.panel_title = "lighteater - PARTICLES"
         # still-image mailbox (DESIGN.md §2.1: the shell owns still sources) —
         # a path posted here is loaded by the shell's mailbox pump.
         self.pending_still_path = None

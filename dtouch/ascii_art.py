@@ -1,4 +1,4 @@
-"""ASCII as a quantiser — the fifth entry in Dither Girl's ALGORITHM cycle.
+"""ASCII as a quantiser — the fifth entry in Dither's ALGORITHM cycle.
 
 ASCII art is not a separate engine; it answers the same question the four
 dithers answer: *given an output alphabet smaller than the input's tonal

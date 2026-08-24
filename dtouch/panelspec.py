@@ -197,7 +197,7 @@ def nudgeable(w):
     Every Slider and Cycle, minus the ones that declare `nudge=False`.
 
     The rule for opting out is NOT "this widget is a system setting" and it is
-    not `save=False` either — Dither Girl's `input` cycle is unsaved and stays
+    not `save=False` either — Dither's `input` cycle is unsaved and stays
     reachable, because stepping it again steps it back and the picture is the
     only thing that moved. (Mirror used to be the second example here, but
     Mirror is a Toggle and was never in the walk — only Sliders and Cycles
@@ -205,7 +205,7 @@ def nudgeable(w):
     does not belong on a bare key.**
 
     Output resolution is the one that fails it. It was the 3rd of 15 stops in
-    Dither Girl and the 2nd of 23 in Particles — `.` `.` `=`, with no panel
+    Dither and the 2nd of 23 in Particles — `.` `.` `=`, with no panel
     open — and one press recreated the window at 4K, dropped the frame rate
     through the floor, and left `0` (panic) with no answer, because panic
     restores the mode's look and the window is not in the look. So the show
@@ -339,7 +339,7 @@ def migrate_legacy(spec, cfg: dict) -> dict:
     """Rewrite a look's retired option names into their current spelling.
 
     Declared per Cycle (`Cycle.legacy`), because a retired option can mean
-    more than a rename: Dither Girl's "black-on-white" is now the mono palette
+    more than a rename: Dither's "black-on-white" is now the mono palette
     with Invert ON, so the substitution writes TWO store keys and only the
     retired name knows to. Substitutions land in the same nesting scope the
     cycle serializes into (the SIGNAL rack's block, or the top level).
