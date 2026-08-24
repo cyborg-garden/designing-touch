@@ -10,6 +10,8 @@ The engine tests mirror tests/test_physarum.py's CPU assertions so the two
 fields are held to the same contract: deposit + bounded luminance, the matte
 as the pen, luminance as food, determinism, burst, wave.
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -90,6 +92,7 @@ def test_matte_is_the_pen_blends_toward_body_point(gl_field):
         px, py, _ = f.agents()
         f.update(m, g)
         qx, qy, _ = f.agents()
+        f.release()                       # one live field at a time
         dx = np.minimum(np.abs(qx - px), f.gw - np.abs(qx - px))
         dy = np.minimum(np.abs(qy - py), f.gh - np.abs(qy - py))
         return float(np.hypot(dx, dy).mean())
@@ -135,11 +138,42 @@ def test_trail_rows_and_columns_are_grid_coordinates(gl_field):
 
 
 def test_same_seed_same_trail(gl_field):
-    a, b = gl_field(), gl_field()
+    """Fields are built one at a time, each released before the next: with
+    two live standalone contexts moderngl issues every GL call on the last
+    one created, so two live fields alias one set of textures and this
+    test compared a field with itself. A different seed must differ, so the
+    equality is a real read and not an empty one."""
+    def trail_for(seed):
+        f = gl_field(seed=seed)
+        for _ in range(3):
+            f.update(_flat(f), _flat(f))
+        t = f.trail
+        f.release()
+        return t
+
+    a, b, c = trail_for(7), trail_for(7), trail_for(8)
+    assert a.sum() > 0 and np.array_equal(a, b)
+    assert not np.array_equal(a, c)
+
+
+def test_readbacks_stay_true_after_luminance(gl_field):
+    """Regression: on Apple GL, after the tonemap rendered into the uint8
+    target the second and later reads of the float targets returned the
+    uint8 target's contents (agents ~1.0, trail all ones) with no GL error.
+    trail / agents() must keep reading true after luminance(), repeatedly."""
+    f = gl_field()
     for _ in range(3):
-        a.update(_flat(a), _flat(a))
-        b.update(_flat(b), _flat(b))
-    assert np.array_equal(a.trail, b.trail)
+        f.update(_flat(f), _flat(f))
+    t0 = f.trail
+    px0, py0, h0 = f.agents()
+    assert t0.sum() > 0 and float(px0.max()) > 1.0
+    for _ in range(2):
+        f.luminance()
+        for _ in range(2):
+            assert np.array_equal(f.trail, t0)
+            px, py, h = f.agents()
+            assert np.array_equal(px, px0) and np.array_equal(py, py0)
+            assert np.array_equal(h, h0)
 
 
 def test_spawn_burst_concentrates_agents(gl_field):
@@ -309,6 +343,12 @@ def test_shader_stays_inside_glsl_es_300(name):
               "gl_PrimitiveID", "gl_Layer")
     for tok in banned:
         assert tok not in code, f"{name} uses {tok!r}, outside ES 3.00"
+    # integer % is undefined in ES 3.00 when an operand is negative; the one
+    # allowed use is on gl_VertexID (never negative). Wrap with floor().
+    for m in re.finditer(r"%", code):
+        assert code[:m.start()].rstrip().endswith("gl_VertexID"), (
+            f"{name}: integer % on a possibly negative operand is undefined in "
+            "ES 3.00 — wrap with floor() as blur.frag does")
     if name.endswith(".frag"):
         assert "layout(location = 0) out vec4" in code, \
             f"{name}: fragment output needs an explicit layout(location = 0)"

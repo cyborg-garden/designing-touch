@@ -88,7 +88,12 @@ class PhysarumFieldGL:
     """PhysarumField's contract on a moderngl standalone context.
 
     Raises PhysarumGLUnavailable when the context or the float render
-    targets cannot be created; releases whatever it built first."""
+    targets cannot be created; releases whatever it built first.
+
+    One live field at a time (the same rule as GlowRenderer): moderngl
+    issues GL calls on whichever standalone context was created last, so a
+    second live field silently aliases the first one's textures and
+    programs. Release a field before building another."""
 
     def __init__(self, n=1_000_000, gw=1280, gh=736, seed=0,
                  point_bg="veins", point_fg="fingers",
@@ -378,16 +383,27 @@ class PhysarumFieldGL:
         return lum.astype(np.float32) * np.float32(1.0 / 255.0)
 
     # ----- readbacks (slow; tests and diagnostics) -----
+    def _read_f4(self, fbo, components):
+        """fbo's contents as float32, binding it with use() first. Apple's GL
+        needs the bind: once the tonemap has rendered into the uint8 target,
+        the second and every later glReadPixels of a float target returns
+        the uint8 target's contents (all ones / [0,1] values) with no GL
+        error, until some framebuffer is bound for drawing again. The
+        per-frame path never hit it — luminance() reads each target right
+        after rendering into it — but trail / agents() after luminance()
+        did."""
+        fbo.use()
+        raw = fbo.read(components=components, dtype="f4")
+        return np.frombuffer(raw, np.float32).copy()
+
     @property
     def trail(self):
         """The full float trail, read back from the GPU (gh, gw) float32."""
-        raw = self.fbo_trail_a.read(components=1, dtype="f4")
-        return np.frombuffer(raw, np.float32).reshape(self.gh, self.gw).copy()
+        return self._read_f4(self.fbo_trail_a, 1).reshape(self.gh, self.gw)
 
     def agents(self):
         """(px, py, heading) float32 arrays of length n, read back."""
-        raw = self.fbo_agents_a.read(components=4, dtype="f4")
-        a = np.frombuffer(raw, np.float32).reshape(self.ah * self.aw, 4)[:self.n]
+        a = self._read_f4(self.fbo_agents_a, 4).reshape(self.ah * self.aw, 4)[:self.n]
         return a[:, 0].copy(), a[:, 1].copy(), a[:, 2].copy()
 
     @property
