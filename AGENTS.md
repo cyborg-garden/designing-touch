@@ -48,6 +48,7 @@ modes rack into it):
 | `modes/dithergirl.py` | Dither Girl mode: dithering as the primary image (§4.2)          |
 | `modes/physarum.py` | Physarum mode: video-driven slime mold, trail map as the image      |
 | `physarum.py`      | `PhysarumField` — Jones-model mold; matte-blended params, luma food |
+| `physarum_gl.py`   | `PhysarumFieldGL` — the same mold on moderngl ping-pong (millions of agents); the mode falls back to `PhysarumField` without GL |
 | `commands.py`      | `Command`/`CommandRegistry` — every action is named and bindable    |
 | `hud.py`           | overlay states, toasts, OSD, status line, `?` key map, u-unit text  |
 | `menu.py`          | home menu + boot cards (a shell overlay state, not a Mode)          |
