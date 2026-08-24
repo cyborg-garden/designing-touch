@@ -5,10 +5,14 @@
 //      u_scale = 1 / (2r+1), u_decay = 1                     -> tmp
 //   V: u_src = tmp,    u_use_add = 0,            u_dir = (0,1),
 //      u_scale = 1 / (2r+1), u_decay = decay                 -> next trail
-// The V pass may also carry a per-pixel "keep" map (u_use_keep = 1): where
-// keep is 1 the effective decay is raised to 0.995, so trails linger — the
-// react machinery paints it from motion history (swept paths hold their
-// veins). Edges wrap (the agents already do). Only .r is read and written.
+// The V pass may also carry a per-pixel signed "keep" map (u_use_keep = 1):
+// where keep is +1 the effective decay is raised to 0.995, so trails linger
+// (react paints it from motion history — swept paths hold their veins);
+// where keep is -1 the decay is LOWERED by up to 0.12 (floored at 0.70), so
+// the trail re-fluidizes (evolve paints it over stale regions — locked
+// structure dissolves and regrows instead of ossifying). Semantics mirror
+// dtouch.physarum's KEEP_HOLD / MELT_DROP / MELT_FLOOR.
+// Edges wrap (the agents already do). Only .r is read and written.
 
 uniform sampler2D u_src;
 uniform sampler2D u_add;
@@ -36,8 +40,9 @@ void main() {
     }
     float d = u_decay;
     if (u_use_keep == 1) {
-        float k = clamp(texelFetch(u_keep, c, 0).r, 0.0, 1.0);
-        d = mix(u_decay, 0.995, k);
+        float k = clamp(texelFetch(u_keep, c, 0).r, -1.0, 1.0);
+        d = u_decay + (0.995 - u_decay) * max(k, 0.0) - 0.12 * max(-k, 0.0);
+        d = clamp(d, 0.70, 0.995);
     }
     f_color = vec4(acc * u_scale * d, 0.0, 0.0, 1.0);
 }

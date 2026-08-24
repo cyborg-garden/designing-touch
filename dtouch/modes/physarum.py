@@ -6,14 +6,21 @@ every simulation parameter between a "field" behavior point and a "body"
 behavior point (whoever is in frame runs different physics than the room), and
 the footage's luminance is food the sensors are drawn toward.
 
-Three feel knobs sit on top of the model (MOLD section): **Weave** drives the
-engine's anti-thoroughfare levers (sensor saturation, heading jitter,
-sub-population sense split, reseed churn, diffuse trim) so the picture leans
-reticulated-network instead of a few fat canals; **Evolve** breathes the
-point geometry on slow incommensurate sine walks and marches a phantom food
-blob around the frame so a still scene keeps reorganizing; **React** turns
-motion into carving — motion history feeds the sensors, holds trail decay
-where you swept, and fires local gather impulses at the gesture.
+Three feel knobs sit on top of the model (MOLD section), each riding a
+perceptual value**0.6 curve so the bottom third of the slider is already
+clearly audible: **Weave** drives the engine's anti-thoroughfare levers
+(sensor saturation, heading jitter, sub-population sense split, reseed churn,
+diffuse trim) so the picture leans reticulated-network instead of a few fat
+canals; **Evolve** hops the mold between REGIMES — distinct growth characters
+(trunk highways, lace, shatter, flood, drift) with decisive crossfades and
+randomized 15-45 s dwells — breathes lightly between hops, marches a phantom
+food blob around the frame, and MELTS whatever stops changing (staleness =
+low temporal variance -> local decay boost), so equilibrium is structurally
+impossible; **React** turns motion into carving — motion history feeds the
+sensors, holds trail decay where you swept, and fires local gather impulses
+at the gesture. Z casts a random regime (points + look params from the
+validated bands) with a forced hop and melt surge — the slot machine that
+always pays.
 
 Two engines run the same model behind the same contract: the GPU field
 (dtouch.physarum_gl — millions of agents on the full grid, moderngl
@@ -41,6 +48,49 @@ from ..rack_gl import PhysarumOutGL
 from .particles import MATTE_H, MATTE_W, MATTES, composite_video_bg
 
 ACCENT = (40, 190, 250)          # BGR — amber, the color of the reference mold
+
+# ----- evolve's regime table -----------------------------------------------
+# The instrument must never settle (org design principle: magic and play over
+# control). Instead of only breathing every parameter on gentle sines, evolve
+# now hops between REGIMES — bundles of multipliers on the blended point
+# parameters, each a distinct growth character — with decisive crossfades and
+# randomized dwell. Our own regimes, derived from this mode's own points and
+# offline sweeps; no external parameter tables.
+#   sense/turn/spread/step/deposit — multipliers on the blended point params
+#   gain/food — multipliers on the live slider values
+#   jitter — ADDITIVE heading wobble (rad) on top of weave's
+REGIMES = {
+    "cruise":  dict(),                                       # the sliders as set
+    "surge":   dict(sense=2.5, turn=0.70, spread=0.85, step=1.45,
+                    deposit=1.6, gain=1.20, food=0.60),      # fat trunk highways
+    "shatter": dict(sense=0.55, turn=1.80, spread=1.70, step=1.20,
+                    deposit=0.75, gain=1.15, food=0.45, jitter=0.40),  # re-melt
+    "knit":    dict(sense=0.45, turn=1.30, spread=0.60, step=0.65,
+                    deposit=0.70, gain=0.90, food=1.40),     # fine local lace
+    "flood":   dict(sense=1.3, turn=0.90, spread=1.25,
+                    deposit=1.2, food=2.5),                  # chase the light
+    "drift":   dict(sense=1.9, turn=1.50, spread=1.40, step=0.85,
+                    food=0.20),                              # unmoored wander
+}
+REGIME_NAMES = list(REGIMES)
+REGIME_KEYS = ("sense", "turn", "spread", "step", "deposit", "gain", "food")
+REGIME_FADE = 3.0                # crossfade, seconds — decisive, not a jump cut
+REGIME_DWELL = (15.0, 45.0)      # dwell range, seconds, order randomized
+
+# Staleness melt: regions whose (blurred) picture stops changing start to
+# dissolve — decay is locked-structure's predator, so equilibrium is
+# structurally impossible while evolve is up. VAR floor is on blurred
+# half-res luminance (grain dust averaged out); MELT_GAIN feeds the signed
+# keep map's negative side (see dtouch.physarum MELT_DROP).
+MELT_VAR = 3e-4
+MELT_GAIN = 0.55
+
+
+def _regime_mults(name):
+    """(sense, turn, spread, step, deposit, gain, food, jitter) for a regime."""
+    b = REGIMES[name]
+    return np.array([b.get(k, 1.0) for k in REGIME_KEYS] + [b.get("jitter", 0.0)],
+                    np.float32)
 
 PALETTES_PH = ["arctic", "fire", "aurora", "violet", "toxic", "rose", "mono", "video"]
 
@@ -185,6 +235,20 @@ class PhysarumMode:
         self._glout_key = None
         self._rack_gl_ok = True      # one GL failure disables the path (§6.4)
         self.signal_done = False
+        # regime scheduler (evolve): decisive hops between growth characters
+        self._reg_rng = np.random.default_rng(seed * 7919 + 17)
+        self._reg_from = "cruise"
+        self._reg_to = "cruise"
+        self._reg_t = 0.0
+        # first dwell samples the low end of the range so evolve's first
+        # decisive hop arrives within the first half-minute of a session
+        self._reg_dwell = float(self._reg_rng.uniform(REGIME_DWELL[0], 25.0))
+        # staleness tracker (melt): EMA mean/var of blurred half-res luminance
+        self._ema = None
+        self._var = None
+        self._last_lum = None        # last frame's luminance (staleness input)
+        self._melt_pulse = 0.0       # extra melt right after a cast (random)
+        self._cast_rng = np.random.default_rng(seed * 104729 + 31)
 
     # ----- lifecycle -----
     def start(self, host):
@@ -224,8 +288,11 @@ class PhysarumMode:
                 # Scale lengths by the grid ratio so the GL field renders the
                 # CPU field's composition at higher fidelity.
                 self._px_scale = gw / self.CPU_GRID[0]
-                pf.diffuse = max(1, round(pf.diffuse * self._px_scale))
-                self._base_diffuse = pf.diffuse
+                # keep the scaled base as FLOAT — the weave diffuse trim
+                # rounds once, at the end, so it bites the same fraction at
+                # every quality tier
+                self._base_diffuse = pf.diffuse * self._px_scale
+                pf.diffuse = max(1, round(self._base_diffuse))
                 return pf
             except Exception as e:                   # noqa: BLE001 — §6.4
                 msg = f"GPU physarum unavailable, running on CPU: {e}"
@@ -237,7 +304,7 @@ class PhysarumMode:
         self.engine = "cpu"
         self._px_scale = 1.0
         pf = PhysarumField(n=self.n, gw=gw, gh=gh, seed=self.seed)
-        self._base_diffuse = pf.diffuse
+        self._base_diffuse = float(pf.diffuse)
         return pf
 
     def stop(self):
@@ -323,11 +390,47 @@ class PhysarumMode:
             ]),
         ]
 
+    def cast_random(self):
+        """Z: decisive jump to a coherent randomized regime — random point
+        pairing plus look-space params drawn from the validated regime
+        machinery, landed with a forced regime hop and a melt surge so the
+        old composition visibly dissolves into the new one. A slot machine
+        that always pays: every draw comes from bands the builtin looks and
+        REGIMES already live in, never uniform noise over raw parameter
+        space (magic and play over control)."""
+        ui = self.host.ui
+        rng = self._cast_rng
+        pts = self.points
+        cur = (int(getattr(ui, "ph_point_bg_idx", 0)) % len(pts),
+               int(getattr(ui, "ph_point_fg_idx", 2)) % len(pts))
+        while True:
+            pair = (int(rng.integers(len(pts))), int(rng.integers(len(pts))))
+            if pair != cur and pair[0] != pair[1]:
+                break
+        ui.ph_point_bg_idx, ui.ph_point_fg_idx = pair
+        # validated bands: the envelope the builtin looks span, slightly
+        # widened — never a degenerate corner (weave/evolve floors keep the
+        # picture woven and moving; decay/gain bands keep it legible)
+        ui.ph_weave = round(float(rng.uniform(0.35, 0.90)), 2)
+        ui.ph_evolve = round(float(rng.uniform(0.45, 0.90)), 2)
+        ui.ph_react = round(float(rng.uniform(0.40, 0.90)), 2)
+        ui.ph_decay = round(float(rng.uniform(0.88, 0.96)), 3)
+        ui.ph_gain = round(float(rng.uniform(0.80, 1.60)), 2)
+        ui.ph_palette_idx = int(rng.integers(len(self.palettes)))
+        # decisive landing: force a regime hop now + a melt surge
+        self._reg_from = self._reg_to
+        others = [n for n in REGIME_NAMES if n != self._reg_to]
+        self._reg_to = others[int(rng.integers(len(others)))]
+        self._reg_t = 0.0
+        self._reg_dwell = float(self._reg_rng.uniform(*REGIME_DWELL))
+        self._melt_pulse = 1.0
+        return pair
+
     def commands(self):
         """X swaps body/field points; B pours agents onto the subject;
-        W ripples the whole organism outward. Burst/wave land at the matte's
-        bright centroid, resolved on the next step (commands run between
-        frames, and the shell owns the mouse)."""
+        W ripples the whole organism outward; Z casts a random regime.
+        Burst/wave land at the matte's bright centroid, resolved on the next
+        step (commands run between frames, and the shell owns the mouse)."""
         ui, toasts = self.host.ui, self.host.hud.toasts
         pts = self.points
 
@@ -345,12 +448,20 @@ class PhysarumMode:
         def _wave():
             self._wave_pending = True
             toasts.flash("WAVE")
+
+        def _random():
+            bg_i, fg_i = self.cast_random()
+            toasts.flash("RANDOM  body %s / field %s"
+                         % (pts[fg_i], pts[bg_i]))
         return {"physarum.swap": Command("physarum.swap",
                                          "Swap body/field points", "x", _swap),
                 "physarum.burst": Command("physarum.burst",
                                           "Spawn burst on the subject", "b", _burst),
                 "physarum.wave": Command("physarum.wave",
-                                         "Radial wave", "w", _wave)}
+                                         "Radial wave", "w", _wave),
+                "physarum.random": Command("physarum.random",
+                                           "Random regime (always pays)", "z",
+                                           _random)}
 
     def safe_look(self):
         return "veinwork"
@@ -431,45 +542,74 @@ class PhysarumMode:
             exposure *= 1.0 + 1.6 * sens * audio_levels["bass"]
             gain *= 1.0 + 0.8 * sens * audio_levels["treble"]
 
-        # evolve: the mold drifts through its own parameter space on slow,
-        # incommensurate sine walks (13-31 s periods — never repeats), so the
-        # field visibly reorganizes over ~10-30 s even on a still scene. The
-        # structural multipliers (sense / turn / spread geometry) are what
-        # actually re-knit the topology; gain/food/decay breathe on top.
-        # Our own design: continuous modulation of THIS mode's own
-        # parameters, no external parameter tables.
+        # Perceptual slider mapping (owner playtest 2026-08-24: 0.3 on every
+        # MOLD slider read as nothing): the sliders' bottom third has to
+        # already be clearly audible, so the levers ride value**0.6 —
+        # 0.3 -> 0.49, 0.6 -> 0.74, 1.0 -> 1.0 (wild) — instead of linear.
+        e = evolve ** 0.6
+
+        # evolve: the mold hops between REGIMES — decisive crossfaded
+        # transitions (REGIME_FADE seconds) between distinct growth
+        # characters, dwelling REGIME_DWELL seconds in each, order
+        # randomized — plus light incommensurate-sine breathing between
+        # hops and the staleness melt below. The old gentle sine walks
+        # alone read as a lava lamp: plenty of pixel drift, but the
+        # network's CHARACTER (vein width, mesh scale) never changed.
+        # Our own design: this mode's own parameters, no external tables.
         self._t += dt
         weave_base = weave
+        extra_jitter = 0.0
+        reg_fade_pulse = 0.0
         if evolve > 0:
             tau = self._t * (2.0 * np.pi)
-            # the structural movers ride sqrt(evolve): a woven mesh anchors
-            # itself hard (measured: mid evolve barely decorrelated a dense
-            # web at 10 s lag), so mid-slider needs near-full reorganizing
-            # strength while the top stays the same
-            es = float(np.sqrt(evolve))
-            gain *= 1.0 + 0.22 * evolve * np.sin(tau / 19.0)
-            food *= 1.0 + 0.45 * evolve * np.sin(tau / 23.0 + 4.2)
-            decay = min(max(decay + 0.02 * evolve * np.sin(tau / 29.0 + 2.1),
+            self._reg_t += dt
+            if self._reg_t >= self._reg_dwell:
+                self._reg_from = self._reg_to
+                others = [n for n in REGIME_NAMES if n != self._reg_to]
+                self._reg_to = others[int(self._reg_rng.integers(len(others)))]
+                self._reg_t = 0.0
+                self._reg_dwell = float(self._reg_rng.uniform(*REGIME_DWELL))
+            f = min(self._reg_t / REGIME_FADE, 1.0)
+            fade = f * f * (3.0 - 2.0 * f)               # smoothstep
+            reg_fade_pulse = 4.0 * fade * (1.0 - fade)   # peaks mid-crossfade
+            ra = _regime_mults(self._reg_from)
+            rb = _regime_mults(self._reg_to)
+            rm = ra + (rb - ra) * np.float32(fade)
+            # perceptual amp: multipliers pulled toward 1 at low evolve
+            rm[:7] = 1.0 + (rm[:7] - 1.0) * e
+            extra_jitter = float(rm[7]) * e
+            # breathing between hops (small — the regimes are the movers)
+            gain *= float(rm[5]) * (1.0 + 0.18 * e * np.sin(tau / 19.0))
+            food *= float(rm[6]) * (1.0 + 0.25 * e * np.sin(tau / 23.0 + 4.2))
+            decay = min(max(decay + 0.015 * e * np.sin(tau / 29.0 + 2.1),
                             0.80), 0.995)
-            weave = min(max(weave + 0.30 * evolve * np.sin(tau / 31.0 + 1.0),
+            weave = min(max(weave + 0.20 * e * np.sin(tau / 31.0 + 1.0),
                             0.0), 1.0)
-            pf.mod_sense = 1.0 + 0.50 * es * np.sin(tau / 17.0 + 0.7)
-            pf.mod_turn = 1.0 + 0.35 * es * np.sin(tau / 27.0 + 3.4)
-            pf.mod_spread = 1.0 + 0.30 * es * np.sin(tau / 13.0 + 5.5)
+            pf.mod_sense = float(rm[0]) * (1.0 + 0.50 * e * np.sin(tau / 17.0 + 0.7))
+            pf.mod_turn = float(rm[1]) * (1.0 + 0.35 * e * np.sin(tau / 27.0 + 3.4))
+            pf.mod_spread = float(rm[2]) * (1.0 + 0.30 * e * np.sin(tau / 13.0 + 5.5))
+            pf.mod_step = float(rm[3])
+            pf.mod_deposit = float(rm[4])
         else:
             pf.mod_sense = pf.mod_turn = pf.mod_spread = 1.0
+            pf.mod_step = pf.mod_deposit = 1.0
 
         # weave: one knob onto the engine's anti-thoroughfare levers, tuned
         # offline (junction density several-x between 0 and 1 on a static
         # scene while veins stay coherent). 0 is the legacy bold-canal
-        # behavior. The diffuse trim rides the SLIDER value, not the evolve-
-        # modulated one — an integer blur radius popping mid-oscillation
-        # would beat visibly.
-        pf.sat = 0.25 * weave
-        pf.jitter = 0.38 * weave
-        pf.hetero = weave
-        pf.reseed_frac = 0.004 + 0.022 * weave * weave
-        pf.diffuse = max(1, round(self._base_diffuse * (1.0 - 0.45 * weave_base)))
+        # behavior; tops raised 2026-08 so weave 1.0 is properly wild.
+        # The diffuse trim rides the SLIDER value, not the evolve-modulated
+        # one — an integer blur radius popping mid-oscillation would beat
+        # visibly — and is computed in float from the unrounded base so the
+        # trim bites identically at every quality tier (rounding the base
+        # first made 'quality' veins relatively thinner than 'perform').
+        w = weave ** 0.6
+        pf.sat = 0.30 * w
+        pf.jitter = 0.50 * w + extra_jitter
+        pf.hetero = w
+        pf.reseed_frac = 0.004 + 0.022 * w * w
+        pf.diffuse = max(1, round(self._base_diffuse
+                                  * (1.0 - 0.45 * weave_base ** 0.6)))
 
         pf.decay = decay
         pf.food = food
@@ -520,25 +660,73 @@ class PhysarumMode:
             sig = 0.16 * min(gw, gh)
             blob = np.exp(((self._hcx - fx) ** 2 + (self._hcy - fy) ** 2)
                           * np.float32(-1.0 / (2.0 * sig * sig)))
-            # sqrt(evolve), same reasoning as the structural movers above
-            gray = gray + (1.1 * np.sqrt(evolve)) * cv2.resize(blob, (gw, gh))
+            # perceptual amp, same mapping as the structural movers above.
+            # 0.7: strong enough to drag veins across the frame, soft enough
+            # that the drag reads as reorganization, not a global slosh —
+            # the reference profile is calm at 2 s and big at 30 s
+            gray = gray + (0.7 * e) * cv2.resize(blob, (gw, gh))
+
+        # staleness tracker: EMA mean/variance of the (blurred) picture at
+        # half res. Tracked ALWAYS (cheap), applied as melt only when evolve
+        # is up — so the moment evolve rises it already knows what is stale.
+        # Grain dust is blurred out first or it would hide stasis.
+        if self._last_lum is not None:
+            # input is either the full luminance (CPU path) or the GL stats
+            # subsample (GPU-rack path) — either resizes to the half grid
+            lh = cv2.resize(self._last_lum, ((gw + 1) // 2, (gh + 1) // 2),
+                            interpolation=cv2.INTER_AREA)
+            lh = cv2.blur(lh, (5, 5))
+            if self._ema is None or self._ema.shape != lh.shape:
+                self._ema = lh.copy()
+                # warm start above the stale floor: nothing reads stale
+                # until the estimate has genuinely settled low (~3 s)
+                self._var = np.full_like(lh, 10.0 * MELT_VAR)
+            d = lh - self._ema
+            self._ema += np.float32(0.06) * d
+            self._var = self._var * np.float32(0.97) + np.float32(0.03) * d * d
 
         self._burst_cool = max(getattr(self, "_burst_cool", 0.0) - dt, 0.0)
-        keep = None
+        self._melt_pulse = max(0.0, self._melt_pulse - dt / 2.5)
+        r = react ** 0.6             # perceptual mapping, same as the others
+        keep_pos = None
         if react > 0:
-            gray = gray + (5.0 * react) * self._motion
+            gray = gray + (5.0 * r) * self._motion
             # swept paths linger: motion history becomes a per-pixel decay
             # boost, so the veins you carve stay painted for a few seconds
-            keep = react * self._motion
+            keep_pos = r * self._motion
             energy = float(motion.mean())
             if energy > 8e-4 and self._burst_cool <= 0.0:
                 tot = float(motion.sum())
                 mx = float((self._cx * motion).sum() / tot)
                 my = float((self._cy * motion).sum() / tot)
                 pf.gather(mx, my,
-                          frac=min(0.9, react * (0.3 + 60.0 * energy)),
+                          frac=min(0.9, r * (0.4 + 60.0 * energy)),
                           radius=40.0 * self._px_scale)
-                self._burst_cool = 0.5
+                self._burst_cool = 0.4
+
+        # melt: bright structure whose picture stopped changing dissolves —
+        # the signed keep map's negative side. Strength rides evolve, and
+        # surges mid-crossfade and right after a random cast, so a regime
+        # change visibly re-fluidizes the old composition instead of
+        # painting the new regime under it.
+        melt = None
+        if evolve > 0 and self._var is not None:
+            stale = (np.clip(1.0 - self._var * np.float32(1.0 / MELT_VAR),
+                             0.0, 1.0)
+                     * np.clip((self._ema - np.float32(0.25)) * np.float32(5.0),
+                               0.0, 1.0))
+            m_gain = MELT_GAIN * e * (1.0 + 1.5 * reg_fade_pulse
+                                      + 2.0 * self._melt_pulse)
+            melt = cv2.resize(stale * np.float32(m_gain), (gw, gh),
+                              interpolation=cv2.INTER_LINEAR)
+
+        keep = None
+        if keep_pos is not None or melt is not None:
+            keep = keep_pos if keep_pos is not None \
+                else np.zeros((gh, gw), np.float32)
+            if melt is not None:
+                keep = keep - melt
+            keep = np.clip(keep, -1.0, 1.0)
 
         if self._burst_pending or self._wave_pending:
             # land the impulse on the lit subject: weighted centroid of
@@ -572,9 +760,15 @@ class PhysarumMode:
             out = self._step_gpu_rack(small, frame_bgr, pal)
             if out is not None:
                 self.signal_done = True
+                # staleness input without leaving the GPU path: the stats
+                # subsample is already read back every frame
+                samp = pf.lum_sample()
+                if samp is not None:
+                    self._last_lum = samp
                 return out
 
         lum = pf.luminance()
+        self._last_lum = lum         # staleness tracker input, next frame
         if pal == "video":
             # veins lit by the footage's own color — the mold as a lampshade
             color = cv2.cvtColor(cv2.resize(small, (gw, gh)),

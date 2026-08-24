@@ -134,6 +134,8 @@ class PhysarumFieldGL:
         self.mod_sense = 1.0
         self.mod_turn = 1.0
         self.mod_spread = 1.0
+        self.mod_step = 1.0
+        self.mod_deposit = 1.0
         self.seed = seed
         self.frame = 0
         self._last_norm = 0.0     # last luminance() percentile (sat cap ref)
@@ -329,10 +331,11 @@ class PhysarumFieldGL:
             a, b = self._points()
             p = self.p_update
             ms, mt, msp = self.mod_sense, self.mod_turn, self.mod_spread
+            mst = self.mod_step
             p["u_sense"].value = (a["sense"] * ms, b["sense"] * ms)
             p["u_spread"].value = (a["spread"] * msp, b["spread"] * msp)
             p["u_turn"].value = (a["turn"] * mt, b["turn"] * mt)
-            p["u_step"].value = (a["step"], b["step"])
+            p["u_step"].value = (a["step"] * mst, b["step"] * mst)
             p["u_gain"].value = float(self.gain)
             p["u_food"].value = max(float(self.food), 0.0)
             p["u_reseed"].value = float(self.reseed_frac)
@@ -358,7 +361,8 @@ class PhysarumFieldGL:
             self.vao_update.render(gl.TRIANGLES, vertices=3)
             self._swap_agents()
 
-            self._deposit(a["deposit"], b["deposit"])
+            md = self.mod_deposit
+            self._deposit(a["deposit"] * md, b["deposit"] * md)
             self._blur_decay(use_keep=keep is not None)
         self.frame += 1
 
@@ -407,7 +411,21 @@ class PhysarumFieldGL:
         self.vao_stats.render(gl.TRIANGLES, vertices=3)
         raw = self.fbo_stats.read(components=2, dtype="f4")
         s = np.frombuffer(raw, np.float32).reshape(self.sh, self.sw, 2)
+        self._last_stats = s        # free spatial subsample (lum_sample)
         return float(np.percentile(s[..., 0], 95.0)), float(s[..., 1].mean())
+
+    def lum_sample(self):
+        """Tonemapped luminance on the stats subsample grid, (sh, sw)
+        float32 in [0,1], or None before the first stats pass / on an empty
+        trail. Zero extra GL work: the stats readback already happens every
+        frame — this is the staleness tracker's input on the GPU-rack path,
+        where the full picture never leaves the GPU (no grain term: the
+        tracker blurs dust away anyway)."""
+        s = getattr(self, "_last_stats", None)
+        if s is None or self._last_norm <= 0:
+            return None
+        x = s[..., 0] * np.float32(1.0 / self._last_norm)
+        return (1.0 - np.exp(-self.exposure * x)).astype(np.float32)
 
     def luminance_into_tex(self):
         """Tonemap the trail into self.tex_lum on the GPU — no readback.
