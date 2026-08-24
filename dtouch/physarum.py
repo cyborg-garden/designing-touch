@@ -56,6 +56,15 @@ POINT_NAMES = list(POINTS)
 
 _PARAM_KEYS = ("sense", "spread", "turn", "step", "deposit")
 
+# Signed keep map semantics (both engines): keep > 0 raises the effective
+# decay toward KEEP_HOLD (trails linger — react's swept paths); keep < 0
+# lowers it by up to MELT_DROP (trail re-fluidizes — evolve's stale-region
+# melt), floored at MELT_FLOOR so a melt never hard-erases a region in one
+# frame, it dissolves over a second or two.
+KEEP_HOLD = 0.995
+MELT_DROP = 0.12
+MELT_FLOOR = 0.70
+
 # Sense-range multipliers for the `hetero` sub-populations: a third of the
 # pool feels close, a third mid, a third far. Multi-scale sensing grows
 # multi-scale structure — filigree between the trunk lines.
@@ -101,12 +110,14 @@ class PhysarumField:
         self.hetero = hetero            # 0..1 blend toward a 3-sub-population
                                         # sense-range split (short/mid/long)
         # slow structural modulation (the mode's `evolve` drives these):
-        # multipliers on the blended point parameters — oscillating the
-        # sense/turn/spread geometry re-organizes the network topology,
+        # multipliers on the blended point parameters — moving the
+        # sense/turn/spread/step geometry re-organizes the network topology,
         # where gain alone only re-scales its tempo
         self.mod_sense = 1.0
         self.mod_turn = 1.0
         self.mod_spread = 1.0
+        self.mod_step = 1.0
+        self.mod_deposit = 1.0
         self._rng = rng
         self._laid = np.zeros((gh, gw), np.float32)
         self._norm = 0.0                # last luminance() percentile (sat cap ref)
@@ -128,6 +139,10 @@ class PhysarumField:
             out["turn"] = out["turn"] * np.float32(self.mod_turn)
         if self.mod_spread != 1.0:
             out["spread"] = out["spread"] * np.float32(self.mod_spread)
+        if self.mod_step != 1.0:
+            out["step"] = out["step"] * np.float32(self.mod_step)
+        if self.mod_deposit != 1.0:
+            out["deposit"] = out["deposit"] * np.float32(self.mod_deposit)
         return out
 
     def swap_points(self):
@@ -208,9 +223,12 @@ class PhysarumField:
         if keep is None:
             self.trail *= self.decay
         else:
-            self.trail *= (np.float32(self.decay)
-                           + np.float32(0.995 - self.decay)
-                           * np.clip(keep, 0.0, 1.0).astype(np.float32))
+            k = np.clip(keep, -1.0, 1.0).astype(np.float32)
+            eff = (np.float32(self.decay)
+                   + np.float32(KEEP_HOLD - self.decay) * np.maximum(k, 0.0)
+                   - np.float32(MELT_DROP) * np.maximum(-k, 0.0))
+            self.trail *= np.clip(eff, np.float32(MELT_FLOOR),
+                                  np.float32(KEEP_HOLD))
 
         # recycle a trickle of agents onto the lit subject, so the network
         # keeps finding whoever is in frame instead of ossifying
