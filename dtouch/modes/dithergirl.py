@@ -80,6 +80,32 @@ PALETTES = {
     "sepia": ((236, 224, 198), (54, 36, 24)),                # 11.28:1
     # --- the stream-safe pair: luma-dominant, chroma cheap to encode ---
     "hi-vis": ((8, 8, 10), (255, 214, 10)),                  # 14.17:1
+    # --- multi-colour (owner's call, 2026-08-25: "opinionated multi color,
+    # --- not just a monochrome shade of one colour"). A palette here is a
+    # --- tuple of N gradient stops; the dither's quantisation levels walk
+    # --- them, so each level lands on its OWN hue instead of a shade of
+    # --- one. They come alive from Bits 2 up (1-bit uses only the ends —
+    # --- which is why every ramp still keeps ink-dark ends against a
+    # --- bright top, same 4.5:1 floor as the duotones). Register models:
+    # --- physarum's aurora (the pretty one), and the owner's CCCCCC look
+    # --- (magenta steered blue-violet + chroma bleed — a duotone faking
+    # --- multi-colour; these stop faking it). Contrast noted is ends.
+    "aurora": ((0, 0, 0), (8, 60, 48), (20, 180, 120),       # 18.36:1
+               (140, 120, 220), (240, 240, 255)),
+    "ultraviolet": ((14, 0, 28), (122, 22, 162),             # 16.32:1
+                    (224, 64, 222), (96, 112, 255), (236, 226, 255)),
+    "vaporwave": ((16, 8, 28), (96, 42, 160), (244, 86, 184),  # 17.72:1
+                  (84, 220, 236), (250, 246, 255)),
+    "sunset": ((10, 10, 42), (46, 58, 138), (232, 96, 64),   # 15.85:1
+               (255, 182, 72), (255, 240, 198)),
+    "oil slick": ((10, 8, 14), (24, 118, 92), (128, 62, 178),  # 18.60:1
+                  (226, 178, 64), (244, 244, 234)),
+    # the one 4-stop: at Bits 2 each of the four levels IS one of the four
+    # classic CGA colours (their canonical RGBI values — hardware history,
+    # not anyone's design). Deliberately tone-disordered in the middle,
+    # like the real card.
+    "cga": ((0, 0, 0), (85, 255, 255), (255, 85, 255),       # 21.00:1
+            (255, 255, 255)),
 }
 
 # Invert = swap the ink and the ground. One exception, and it is authored, not
@@ -111,12 +137,26 @@ LEGACY_PALETTES = {
 }
 
 
-def palette_pair(name, invert=False):
-    """The (off, on) pair for a named palette, flipped or not."""
-    off, on = PALETTES[name]
+def palette_stops(name, invert=False):
+    """The full stop tuple for a named palette, flipped or not.
+
+    A duotone is a 2-stop ramp; the multi-colour palettes carry 4-5 stops.
+    Invert reverses the walk (the same colours, ink and ground swapped),
+    except where an inverse is authored (mono — see AUTHORED_INVERSE)."""
+    stops = tuple(tuple(c) for c in PALETTES[name])
     if not invert:
-        return off, on
-    return AUTHORED_INVERSE.get(name, (on, off))
+        return stops
+    auth = AUTHORED_INVERSE.get(name)
+    return tuple(tuple(c) for c in auth) if auth else stops[::-1]
+
+
+def palette_pair(name, invert=False):
+    """The (off, on) END pair for a named palette, flipped or not — what a
+    1-bit dither renders, what ASCII colours its glyphs with, and what the
+    4.5:1 legibility floor is measured on. For a duotone this IS the whole
+    palette; a multi-colour ramp's middle stops live in palette_stops."""
+    stops = palette_stops(name, invert)
+    return stops[0], stops[-1]
 
 # ----- Hue / Tint (the customisability, §4.2 'two-color ramps later') -----
 #
@@ -179,19 +219,20 @@ def tint_rgb(rgb, hue_deg, amount, floor=TINT_LUMA_FLOOR):
 
 
 def tinted_palette(name, hue_deg, amount, invert=False):
-    """(off, on) for a named palette under Invert and the Hue/Tint pair.
+    """The stop tuple for a named palette under Invert and the Hue/Tint pair
+    (2 stops for a duotone, 4-5 for the multi-colour ramps).
 
     Cached — this runs per frame and the answer only ever depends on four
-    values. Invert resolves FIRST and Tint steers what comes out: for the nine
+    values. Invert resolves FIRST and Tint steers what comes out: for the
     plain-swap palettes the order cannot matter (tint_rgb is per-colour), but
-    mono's inverse is an authored pair and Tint must steer the pair the
+    mono's inverse is an authored pair and Tint must steer the stops the
     operator is actually looking at.
     """
     key = (name, round(float(hue_deg), 2), round(float(amount), 4), bool(invert))
     got = _TINT_CACHE.get(key)
     if got is None:
-        off, on = palette_pair(name, invert)
-        got = (tint_rgb(off, hue_deg, amount), tint_rgb(on, hue_deg, amount))
+        got = tuple(tint_rgb(c, hue_deg, amount)
+                    for c in palette_stops(name, invert))
         if len(_TINT_CACHE) > 512:       # slider drags are unbounded in theory
             _TINT_CACHE.clear()
         _TINT_CACHE[key] = got
@@ -414,8 +455,9 @@ class DitherGirlMode:
         return float(np.clip(self._ui("dg_tint", 0.0), 0.0, 1.0))
 
     def _palette(self):
-        """The live (off, on) pair: the named palette, flipped by Invert if
-        the toggle is on, then steered by Hue/Tint."""
+        """The live stop tuple (2 for a duotone, 4-5 for the multi-colour
+        ramps): the named palette, flipped by Invert if the toggle is on,
+        then steered by Hue/Tint."""
         return tinted_palette(self._palette_name(), self._hue(), self._tint(),
                               self._invert())
 
@@ -641,13 +683,15 @@ class DitherGirlMode:
 
     def _render_swatch(self, algo, bits, gamma, bias, palette, hue, tint,
                        invert, w, h):
-        off, on = tinted_palette(palette, hue, tint, invert)
+        stops = tinted_palette(palette, hue, tint, invert)
         if algo == "ASCII":
             # one row of characters across the strip: the strip is 16 px tall,
             # so it cannot preview the live CELL size, but it can preview the
-            # thing that actually changed — the ramp.
+            # thing that actually changed — the ramp. ASCII colours its
+            # glyphs with the palette's END pair (see step()).
             rend = AsciiRenderer(w, h, rows_req=1, n=1 << bits,
-                                 palette=(off, on), gamma=gamma, bias=bias)
+                                 palette=(stops[0], stops[-1]), gamma=gamma,
+                                 bias=bias)
             ramp_u8 = np.tile(
                 np.linspace(0, 255, w, dtype=np.float32).astype(np.uint8),
                 (h, 1))
@@ -655,17 +699,30 @@ class DitherGirlMode:
         else:
             ramp = np.tile(np.linspace(0.0, 1.0, w, dtype=np.float32), (h, 1))
             rgb = self._palette_map(_dither(ramp, algo, bits, gamma, bias),
-                                    off, on)
+                                    stops)
         return rgb[:, :, ::-1].copy()      # panel frames are BGR
 
     # ----- per-frame -----
     @staticmethod
-    def _palette_map(levels, off, on):
-        """Map dither levels [0,1] onto the off->on color ramp (uint8 RGB)."""
-        off = np.float32(off)
-        on = np.float32(on)
-        return (off[None, None, :]
-                + levels[:, :, None] * (on - off)).astype(np.uint8)
+    def _palette_map(levels, stops):
+        """Map dither levels [0,1] onto the palette's stop ramp (uint8 RGB).
+
+        Piecewise-linear over the stops: a duotone (2 stops) computes the
+        exact same off + levels*(on-off) it always did, bit for bit (pinned
+        in tests); a multi-colour palette walks its 4-5 stops, so each
+        quantisation level lands on its own hue. With B bits the dither
+        emits levels k/(2^B - 1) — at 2 bits a 5-stop ramp is sampled at
+        0, 1/3, 2/3, 1: four distinct colours on screen."""
+        arr = np.float32(stops)
+        n = len(arr)
+        if n == 2:
+            off, on = arr
+            return (off[None, None, :]
+                    + levels[:, :, None] * (on - off)).astype(np.uint8)
+        pos = np.clip(levels, 0.0, 1.0) * (n - 1)
+        i = np.minimum(pos.astype(np.int32), n - 2)
+        f = (pos - i)[:, :, None]
+        return (arr[i] + f * (arr[i + 1] - arr[i])).astype(np.uint8)
 
     def _ascii_step(self, gray_u8, rw, rh, bits, gamma, bias, contrast, scale,
                     palette):
@@ -745,7 +802,7 @@ class DitherGirlMode:
         bias = self._bias()
         contrast = float(self._ui("dg_contrast", 1.0))
         scale = float(self._ui("dg_scale", SCALE_DEFAULT))
-        off, on = self._palette()
+        stops = self._palette()
         matte_kind = self._matte_name()
 
         # audio modulation — deliberately minimal (§4.2): bass nudges Contrast
@@ -769,8 +826,11 @@ class DitherGirlMode:
         # post-dither the visual difference is small.
         gray_u8 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if algo == "ASCII":
+            # ASCII colours its glyph atlas with the palette's END pair —
+            # the glyphs themselves carry the tonal ramp, so a multi-colour
+            # palette renders as its ink/ground ends there
             out = self._ascii_step(gray_u8, rw, rh, bits, gamma, bias,
-                                   contrast, scale, (off, on))
+                                   contrast, scale, (stops[0], stops[-1]))
         else:
             wh = int(np.clip(round(scale), SCALE_LO, SCALE_HI))
             ww = max(8, int(round(wh * rw / float(rh))))
@@ -780,7 +840,7 @@ class DitherGirlMode:
                 small = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
 
             lit = _dither(small, algo, bits, gamma, bias)
-            out = self._palette_map(lit, off, on)
+            out = self._palette_map(lit, stops)
             out = cv2.resize(out, (rw, rh), interpolation=cv2.INTER_NEAREST)
 
         if matte_kind != "off":
