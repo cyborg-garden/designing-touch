@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dtouch"
+name = "lighteater"
 version = "0.1.0"
 description = "Modular, code-first engine for turning video and sound into flowing particle visuals"
 readme = "README.md"

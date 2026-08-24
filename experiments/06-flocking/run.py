@@ -123,7 +123,7 @@ MOODS = {
 
 
 def live(p):
-    """Real-time interactive flocking instrument. A new base mode for designing-touch:
+    """Real-time interactive flocking instrument. A new base mode for lighteater:
     self-driving boids instead of a video-driven matte. Keys tune the three Reynolds
     forces + the swirl live; the mouse is a hand in the field (drag to attract, right-drag
     to scatter). Emergent order you can push around."""
@@ -142,7 +142,7 @@ def live(p):
     p._attract_sign = 1.0
     extent = 1.7
 
-    win = "designing-touch · flocking"
+    win = "lighteater · flocking"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, rw, rh)
 

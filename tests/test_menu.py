@@ -387,8 +387,8 @@ def test_card_titles_render_in_caps(monkeypatch):
         return real(img, text, *a, **k)
     monkeypatch.setattr(M, "put_outlined", spy)
     draw_menu(np.zeros((360, 640, 3), np.uint8), None, registry_cards(), 0)
-    assert "PARTICLES" in texts and "DITHER GIRL" in texts
-    assert "Particles" not in texts and "Dither Girl" not in texts
+    assert "PARTICLES" in texts and "DITHER" in texts
+    assert "Particles" not in texts and "Dither" not in texts
 
 
 def test_reserved_card_border_is_dashed():

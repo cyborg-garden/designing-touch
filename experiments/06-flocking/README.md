@@ -22,7 +22,7 @@ local interaction, not imposed from a center. Many centers, not one.
 
 ## Live instrument (`--live`)
 
-A new base mode for designing-touch: instead of a video-driven matte, the picture drives
+A new base mode for lighteater: instead of a video-driven matte, the picture drives
 *itself* — self-organising boids you can push around. Open a real-time window and play:
 
 ```bash

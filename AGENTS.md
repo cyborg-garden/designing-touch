@@ -1,4 +1,4 @@
-# AGENTS.md — working on designing-touch
+# AGENTS.md — working on lighteater
 
 Guide for AI agents (and humans) developing this repo. Read this before changing code.
 
@@ -9,7 +9,7 @@ recreating TouchDesigner-style effects as text-first, CLI/GUI-drivable Python in
 node graph. The headline experience is **experiment 05** (`experiments/05-live-webcam/`), now a
 thin launcher over a **shell that hosts modes** (`dtouch/shell.py` + `dtouch/modes/`): a live
 webcam instrument with an in-frame control panel, saved looks ("templates"), a perform key
-layer, and two modes — Particles and Dither Girl.
+layer, and two modes — Particles and Dither.
 
 **[DESIGN.md](DESIGN.md) is the design authority for anything UI/UX.** Every PR that touches
 the instrument cites the principle it serves; read §2 (the mode-shell contract) before adding
@@ -45,7 +45,7 @@ modes rack into it):
 | `shell.py`         | `Host` — window, capture, key/mouse routing, recorder, SIGNAL rack, overlay state machine, preset CRUD, mode lifecycle |
 | `modes/__init__.py`| the `Mode` protocol + `REGISTRY` (one line adds a mode)             |
 | `modes/particles.py` | Particles mode: engines, panel sections, `MATTES`, per-frame image |
-| `modes/dithergirl.py` | Dither Girl mode: dithering as the primary image (§4.2)          |
+| `modes/dithergirl.py` | Dither mode: dithering as the primary image (§4.2)          |
 | `modes/physarum.py` | Physarum mode: video-driven slime mold, trail map as the image      |
 | `physarum.py`      | `PhysarumField` — Jones-model mold; matte-blended params, luma food |
 | `physarum_gl.py`   | `PhysarumFieldGL` — the same mold on moderngl ping-pong (millions of agents); the mode falls back to `PhysarumField` without GL |
@@ -108,7 +108,7 @@ and the goldens must run rather than skip.
   `matte.py`, register it in `make_matte` and the `MATTES` list in `modes/particles.py`
   (re-exported from `live.py` for existing callers).
 - **New template (look):** add an entry to the mode's `BUILTIN` — `presets.BUILTIN` for
-  Particles, `DitherGirlMode.BUILTIN` for Dither Girl. Users save their own to `presets.json`
+  Particles, `DitherGirlMode.BUILTIN` for Dither. Users save their own to `presets.json`
   (gitignored) via the panel or the `s` key.
 - **New control:** declare it once in the mode's `panel_spec()` as a `Slider`/`Toggle`/`Cycle`
   (`dtouch/panelspec.py`) — the walker draws it, the `save`/`apply` flags serialize it, and the

@@ -78,7 +78,7 @@ def _black(h=36, w=64):
 
 def test_mode_protocol_attrs():
     m = DitherGirlMode()
-    assert m.id == "dithergirl" and m.title == "Dither Girl"
+    assert m.id == "dithergirl" and m.title == "Dither"
     assert m.accepts_still is True
     assert m.accent == ACCENT
     assert m.safe_look() == "classic"
@@ -117,12 +117,12 @@ def test_status_line_is_spec_derived_and_ascii(tmp_path):
     host = _booted(tmp_path)
     s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
-    assert s == "DITHER GIRL  floyd-steinberg  1-bit  bias auto  src synthetic"
+    assert s == "DITHER  floyd-steinberg  1-bit  bias auto  src synthetic"
     host.ui.dg_algo_idx = ALGOS.index("Blue noise")
     host.ui.dg_bits = 3.0
     host.ui.input_idx = 1                    # still input -> src tail follows
     assert (host._status_line()
-            == "DITHER GIRL  blue noise  3-bit  bias auto  src still")
+            == "DITHER  blue noise  3-bit  bias auto  src still")
 
 
 # ---------- panel spec structure (DESIGN.md §4.2) ----------
@@ -1315,7 +1315,7 @@ def test_status_line_names_ascii(tmp_path):
     host.ui.dg_algo_idx = ALGOS.index("ASCII")
     host.ui.dg_bits = 4.0
     s = host._status_line()
-    assert s == "DITHER GIRL  ascii  4-bit  bias auto  src synthetic"
+    assert s == "DITHER  ascii  4-bit  bias auto  src synthetic"
     assert s == s.encode("ascii", "replace").decode()
 
 

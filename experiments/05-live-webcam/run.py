@@ -15,7 +15,7 @@ Mode 'grid' is the older luminance-displaced grid.
     python run.py --flock               # start with the particle cloud flocking
     python run.py --glitch              # start with the circuit-bent signal chain on
 
-    python run.py --mode dithergirl     # boot into Dither Girl (live dithering)
+    python run.py --mode dithergirl     # boot into Dither (live dithering)
     python run.py --mode physarum       # boot into Physarum (slime-mold veins eat the light)
     python run.py --still photo.jpg     # load a still and imply dithergirl
 
@@ -108,13 +108,13 @@ def resolve_preset(name, boot, path="presets.json"):
 
     `--preset` is NOT an entry in ENGINE_DEFAULTS on purpose. That rule is
     "any non-default value boots flow", and a preset name can legitimately
-    belong to either mode — it would send every Dither Girl look to Particles.
+    belong to either mode — it would send every Dither look to Particles.
     The name is resolved against the modes' actual look sets instead:
 
     - No higher-precedence mode flag: the mode that OWNS the look boots. The
       name IS the request. (Previously the flag was dropped entirely once
       state.json remembered another mode — `run.py --mode dithergirl`, quit,
-      `run.py --preset embers` booted Dither Girl on `classic` and said
+      `run.py --preset embers` booted Dither on `classic` and said
       nothing. On main `--preset` always worked.)
     - One already chosen (--mode / --still / an engine flag): that wins, per
       the documented precedence. A look it does not own is called out and we
