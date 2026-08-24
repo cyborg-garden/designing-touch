@@ -200,6 +200,8 @@ def test_collapse_button_wins_over_scrolled_row_under_it():
 
 def test_slider_drag_still_works_with_scrolling():
     ui = _ui()
+    ui.video_bg = True     # Vid mix only draws while Video bg is ON
+    ui.draw(np.zeros((720, 1280, 3), np.uint8), {"status": ""})
     payload = next(p for _, k, p in ui._hot if k == "slider" and p[0] == "video_mix")
     attr, x0, x1, lo, hi = payload
     rect = next(r for r, k, p in ui._hot if k == "slider" and p[0] == "video_mix")
@@ -237,6 +239,9 @@ def test_arrows_appear_when_opening_a_section_makes_the_column_overflow():
     assert _arrows(ui) == ([], [])
     for title in ("MOTION", "SIGNAL"):
         ui.sections[title] = True
+    # the gated rows only draw once their master toggles are on
+    # (panelspec.visible) — turn them on so the sections actually expand
+    ui.flock = ui.glitch = True
     ui.draw(np.zeros((1080, 1920, 3), np.uint8), {"status": ""})
     up, down = _arrows(ui)
     assert len(up) == 1 and len(down) == 1
@@ -257,6 +262,7 @@ def test_arrows_meet_the_minimum_hit_target():
         ui = OverlayUI(w, h, PRESETS, list(PALETTES), MATTES)
         for title in ("MOTION", "SIGNAL"):
             ui.sections[title] = True
+        ui.flock = ui.glitch = True   # expand the gated rows (panelspec.visible)
         frame = np.zeros((h, w, 3), np.uint8)
         ui.draw(frame, {"status": ""})
         ui.draw(frame, {"status": ""})

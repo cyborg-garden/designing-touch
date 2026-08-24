@@ -273,8 +273,12 @@ class PhysarumMode:
                        tip="How strongly the footage's light pulls the mold. "
                            "High: the network chases whatever is bright."),
                 Toggle("Video bg", "ph_video_bg", save_key="video_bg"),
+                # only acts while Video bg is on (both engines gate the
+                # composite on ph_video_bg) — hidden otherwise
+                # (panelspec.visible; magic-over-control, 2026-08-24)
                 Slider("Vid mix", "ph_video_mix", 0.0, 1.0, save_key="video_mix",
                        apply="keep",
+                       show_when=lambda s: bool(getattr(s, "ph_video_bg", False)),
                        tip="How visible the raw camera footage is under the veins."),
                 Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
                       key="res", save=False, nudge=False,

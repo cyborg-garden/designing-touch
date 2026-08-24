@@ -37,7 +37,7 @@ from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
                          build_global_rows, sync_signal)
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
-                        display_fmt, nudge_to, nudgeable)
+                        display_fmt, nudge_to, nudgeable, visible)
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
@@ -200,8 +200,12 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     # registry (Host._route_key), so priority is already right.
     def _nudgeables():
         # `nudgeable`, not "every Slider and Cycle": output resolution opts out
-        # (see its docstring — one key must not resize the show).
-        return [w for w in ui.iter_widgets() if nudgeable(w)]
+        # (see its docstring — one key must not resize the show). Gated-off
+        # rows (panelspec.visible — SIGNAL under Glitch-off, boids gains under
+        # Flock-off) are skipped too: nudging a control the panel does not
+        # show and the engine does not read is the same dead surface on keys.
+        return [w for w in ui.iter_widgets()
+                if nudgeable(w) and visible(ui, w)]
 
     def _osd_show(w):
         val = getattr(ui, w.attr)
@@ -788,6 +792,12 @@ class Host:
         for w in ui.iter_widgets():
             st = getattr(w, "status", None)
             if not st:
+                continue
+            if not visible(ui, w):
+                # a gated-off control (panelspec.visible) does not act, so
+                # its value does not belong on the status line either —
+                # "bias auto" under Floyd-Steinberg was the panel's dead-row
+                # lie in a smaller font
                 continue
             if isinstance(w, Cycle):
                 opts = list(w.options)

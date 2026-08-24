@@ -407,8 +407,11 @@ def test_the_arrows_and_enter_answer_in_every_overlay_state(code, name, state):
 # ---------- param nudging + OSD (DESIGN.md §6.2) ----------
 
 def _nudgeables(ui):
-    from dtouch.panelspec import nudgeable
-    return [w for w in ui.iter_widgets() if nudgeable(w)]
+    # mirrors the shell's walk: nudgeable AND currently visible (gated-off
+    # rows — SIGNAL under Glitch-off, boids gains under Flock-off — are not
+    # nudge stops either; panelspec.visible)
+    from dtouch.panelspec import nudgeable, visible
+    return [w for w in ui.iter_widgets() if nudgeable(w) and visible(ui, w)]
 
 
 def test_the_nudge_keys_cannot_reach_the_output_resolution():

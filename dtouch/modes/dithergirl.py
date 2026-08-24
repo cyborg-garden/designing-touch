@@ -225,6 +225,30 @@ ASCII_SLOW_CLEAR = 0.75   # ...and the fraction of it that takes the note away
 ASCII_WARMUP_FRAMES = 8   # EMA frames before either verdict is allowed
 
 
+# ----- panel visibility gates (panelspec.visible; magic-over-control,
+# ----- 2026-08-24: a control that does nothing perceptible in the current
+# ----- state hides instead of sitting on the panel looking functional) -----
+
+def _matte_on_ui(s):
+    """'Matte bg black' only acts while a matte is on (step() consults it
+    inside the `matte_kind != "off"` branch only)."""
+    return MATTES_DG[int(getattr(s, "dg_matte_idx", 0)) % len(MATTES_DG)] != "off"
+
+
+def _ordered_ui(s):
+    """Bias steers the ordered dithers (and ASCII's ramp) only — error
+    diffusion self-corrects and takes no invert parameter (see _dither), so
+    under Floyd-Steinberg / Riemersma the row moved nothing at all."""
+    return ALGOS[int(getattr(s, "dg_algo_idx", 2)) % len(ALGOS)] in ORDERED
+
+
+def _tint_on_ui(s):
+    """Hue only acts once Tint is up (tint_rgb with amount 0 is the palette
+    exactly as named) — the old tooltip even confessed it ('Does nothing
+    until Tint is up'). Now the row appears when Tint does."""
+    return float(getattr(s, "dg_tint", 0.0)) > 0.0
+
+
 def _dither(gray, algo, bits, gamma, bias):
     """One grayscale float [0,1] plane through the named algorithm. Bias
     (rounding direction) applies to the ordered dithers only — error diffusion
@@ -253,10 +277,11 @@ class DitherGirlMode:
     accepts_still = True
     blurb = "live + still\ndithering"      # home-menu card copy (DESIGN.md §3)
     # §2.4: the rack hides what we own — Dither owns ALL dither quality
-    # controls (dither row + Bits/Gamma/Bias), not just the dither cycle; two
-    # visible dither subsystems in one panel is the bolted-features
-    # incoherence the overhaul exists to kill.
-    claims = frozenset({"dither", "bits", "gamma", "bias"})
+    # controls (dither row + Pixel/Bits/Gamma/Bias), not just the dither
+    # cycle; two visible dither subsystems in one panel is the
+    # bolted-features incoherence the overhaul exists to kill. "pixel" is
+    # the rack dither's block size — this mode's Scale IS that control.
+    claims = frozenset({"dither", "pixel", "bits", "gamma", "bias"})
 
     # option lists the shell's boot path reads (OverlayUI ctor)
     palettes = list(PALETTES)
@@ -416,6 +441,7 @@ class DitherGirlMode:
                 Cycle("input", "input_idx", ["camera", "still..."], save=False),
                 Cycle("matte", "dg_matte_idx", list(MATTES_DG), save_key="matte"),
                 Toggle("Matte bg black", "dg_matte_black", save_key="matte_black",
+                       show_when=_matte_on_ui,
                        tip="With a matte on: black outside the subject instead "
                            "of the raw camera picture."),
                 Cycle("output", "res_idx", [n for n, _, _ in RES_OPTIONS],
@@ -439,7 +465,10 @@ class DitherGirlMode:
                        tip="Dither in linear light so mid-tones keep their "
                            "perceived brightness. Off = the crushed retro look."),
                 Cycle("bias", "dg_bias_idx", list(BIASES), save_key="bias",
-                      status="bias {}"),
+                      status="bias {}", show_when=_ordered_ui,
+                      tip="Which way the dots lean on a mostly-dark or "
+                          "mostly-bright picture. Auto decides per frame. "
+                          "The diffusion dithers self-correct and ignore it."),
                 Slider("Contrast", "dg_contrast", 0.25, 3.0, save_key="contrast",
                        tip="Push tones apart before dithering. High contrast "
                            "survives stream compression."),
@@ -472,18 +501,21 @@ class DitherGirlMode:
                        apply="reset",
                        tip="Swap the ink and the background. Works on any "
                            "palette - dark on light, or light on dark."),
+                # Tint before Hue: Hue only exists while Tint is up
+                # (show_when=_tint_on_ui), so the reveal unfolds BELOW the
+                # slider being dragged instead of shoving it down mid-drag.
+                Slider("Tint", "dg_tint", 0.0, 1.0, save_key="tint",
+                       tip="How far to steer the palette toward Hue. 0 = the "
+                           "palette exactly as named."),
                 # engine_snaps=False: tint_rgb consumes hue as a float — the
                 # whole-degree step is control feel (a degree is below what an
                 # eye can name), not an engine constraint, so a stored
                 # fractional hue applies exactly (panelspec's step docstring).
                 Slider("Hue", "dg_hue", HUE_LO, HUE_HI, fmt=".0f",
                        save_key="hue", step=1.0, engine_snaps=False,
+                       show_when=_tint_on_ui,
                        tip="Which colour Tint steers toward, in whole "
-                           "degrees around the colour wheel. Does nothing "
-                           "until Tint is up."),
-                Slider("Tint", "dg_tint", 0.0, 1.0, save_key="tint",
-                       tip="How far to steer the palette toward Hue. 0 = the "
-                           "palette exactly as named."),
+                           "degrees around the colour wheel."),
             ]),
         ]
 

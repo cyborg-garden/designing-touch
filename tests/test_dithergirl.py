@@ -117,7 +117,9 @@ def test_status_line_is_spec_derived_and_ascii(tmp_path):
     host = _booted(tmp_path)
     s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
-    assert s == "DITHER  floyd-steinberg  1-bit  bias auto  src synthetic"
+    # no "bias auto" here: under Floyd-Steinberg bias does nothing, so its
+    # row is hidden (panelspec.visible) and the status line skips it too
+    assert s == "DITHER  floyd-steinberg  1-bit  src synthetic"
     host.ui.dg_algo_idx = ALGOS.index("Blue noise")
     host.ui.dg_bits = 3.0
     host.ui.input_idx = 1                    # still input -> src tail follows
@@ -1076,10 +1078,12 @@ def test_palette_section_carries_hue_and_tint():
     spec = DitherGirlMode().panel_spec()
     pal = next(s for s in spec if s.title == "PALETTE")
     labels = [getattr(w, "label", None) for w in pal.widgets]
-    assert labels == ["palette", "Invert", "Hue", "Tint"]
-    hue = pal.widgets[2]
+    # Tint before Hue: Hue is gated on Tint > 0 (panelspec.visible), so the
+    # reveal unfolds below the slider being dragged
+    assert labels == ["palette", "Invert", "Tint", "Hue"]
+    hue = pal.widgets[3]
     assert (hue.lo, hue.hi, hue.store_key) == (0.0, 360.0, "hue")
-    assert pal.widgets[3].store_key == "tint"
+    assert pal.widgets[2].store_key == "tint"
 
 
 def test_hue_and_tint_round_trip_through_a_look(tmp_path):
@@ -1297,14 +1301,14 @@ def test_nudging_a_stored_fraction_lands_scale_back_on_the_grid(tmp_path):
     edit — a nudge key here, through the real registry — adapts the control
     back onto its whole-row grid, the same way the range fix let `ascii
     stream` keep 30 until the operator moved the slider."""
-    from dtouch.panelspec import nudgeable
+    from dtouch.panelspec import nudgeable, visible
 
     host = _booted(tmp_path)
     host._wire_keys()
     ui = host.ui
     assert host._apply_look("legacy", {"scale": 45.55})
     assert ui.dg_scale == 45.55                  # the stored look applies exactly
-    ws = [w for w in ui.iter_widgets() if nudgeable(w)]
+    ws = [w for w in ui.iter_widgets() if nudgeable(w) and visible(ui, w)]
     ui.nudge_idx = next(i for i, w in enumerate(ws) if w.attr == "dg_scale")
     host.reg.dispatch(ord("="))                  # one press: +17.25 rows
     assert ui.dg_scale == 63.0                   # 62.8, snapped to the grid

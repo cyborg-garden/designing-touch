@@ -64,5 +64,11 @@ def test_overlay_ui_draws_video_bg_hit_targets():
     ui.draw(canvas, {"status": ""})
     kinds = [k for _, k, _ in ui._hot]
     assert "video_bg" in kinds
+    # Vid mix only acts while Video bg is ON, so it only draws then
+    # (panelspec.visible; magic-over-control, 2026-08-24)
+    slider_attrs = [p[0] for _, k, p in ui._hot if k == "slider"]
+    assert "video_mix" not in slider_attrs
+    ui.video_bg = True
+    ui.draw(canvas, {"status": ""})
     slider_attrs = [p[0] for _, k, p in ui._hot if k == "slider"]
     assert "video_mix" in slider_attrs

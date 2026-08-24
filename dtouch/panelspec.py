@@ -73,6 +73,7 @@ class Slider:
     snap: str = "round"              # "round" | "floor"
     engine_snaps: bool = True        # engine lands on the grid itself (see above)
     nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
+    show_when: Optional[Callable] = None   # see `visible`
 
     @property
     def store_key(self):
@@ -92,6 +93,7 @@ class Toggle:
     gap: int = 0
     save_key: Optional[str] = None
     status: Any = None           # see Slider.status (DESIGN.md §2.3)
+    show_when: Optional[Callable] = None   # see `visible`
 
     @property
     def store_key(self):
@@ -120,6 +122,7 @@ class Cycle:
     legacy: Optional[dict] = None
     nudge: bool = True               # reachable by ','/'.' — see `nudgeable`
     tip: str = ""                    # `i` tooltip, same contract as Slider.tip
+    show_when: Optional[Callable] = None   # see `visible`
 
     @property
     def hit_key(self):
@@ -190,6 +193,33 @@ def walk_spec(spec):
                 yield item, w
         else:
             yield None, item
+
+
+def visible(state, w):
+    """Should this widget draw a row for the current `state`?
+
+    A widget may declare `show_when` — a predicate over the shared UI state —
+    and it exists for exactly one reason (the magic-over-control decision,
+    2026-08-24): **a visible control that does nothing perceptible in the
+    current state is a bug.** The SIGNAL rack's sliders bend nothing while
+    Glitch is off; the boids gains steer nothing while Flock is off; Vid mix
+    mixes nothing while Video bg is off. Each of those rows used to sit on
+    the panel looking exactly like a working control. Now the master toggle
+    stays (the section still reads as a thing you can turn on) and the
+    dependent rows appear when — and only when — they actually act.
+
+    Visibility is a DRAWING property, nothing more:
+
+    - capture/apply ignore it — a hidden control's value still saves into a
+      look and still loads from one (turning Glitch off must not silently
+      strip your Chroma from the next save);
+    - the keyboard nudge walk skips hidden controls (the shell filters by
+      this predicate), because nudging an invisible slider is the same dead
+      surface with the panel closed;
+    - hit-testing follows drawing for free (only drawn rows register rects).
+    """
+    fn = getattr(w, "show_when", None)
+    return fn is None or bool(fn(state))
 
 
 def nudgeable(w):

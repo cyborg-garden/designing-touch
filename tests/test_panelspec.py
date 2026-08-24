@@ -305,7 +305,7 @@ def test_the_quantised_sliders_are_exactly_the_ones_whose_engine_rounds():
 
     ui = _ui()
     got = {a for a, w in ui._sliders.items() if w.step}
-    assert got == {"sig_bits", "crush"}
+    assert got == {"sig_bits", "sig_px", "crush"}
     assert all(ui._sliders[a].engine_snaps for a in got)
     dg = {w.attr: w for s in DitherGirlMode().panel_spec()
           for w in s.widgets if isinstance(w, Slider)}
@@ -386,6 +386,7 @@ def test_dragging_a_quantised_slider_snaps_and_stays_put():
     wanders inside it — every mouse-move event is another write."""
     ui = _ui()
     ui.sections["SIGNAL"] = True        # Crush lives in the closed-by-default rack
+    ui.glitch = True                    # ...and only draws while Glitch is ON
     ui.draw(np.zeros((1080, 1920, 3), np.uint8), {"status": ""})
     ui.crush = 0.0
     payload = next(p for _r, k, p in ui._hot
