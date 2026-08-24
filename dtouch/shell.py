@@ -34,8 +34,8 @@ from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
 from .imgui import DIM, HOVER, PANEL, in_rect
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
-from .overlay_ui import (BASE_H, OverlayUI, SIGNAL_BIASES, SIGNAL_BIAS_INVERT,
-                         build_signal_section, build_global_rows)
+from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
+                         build_global_rows, sync_signal)
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
                         display_fmt, nudge_to, nudgeable)
 from . import presets as _presets
@@ -1525,33 +1525,16 @@ class Host:
                         if self.cb is None:
                             self.cb = CircuitBent(seed=self.seed)
                         cb = self.cb
-                        cb.chroma_shift = ui.chroma
-                        cb.scan_drift = ui.drift
-                        cb.bit_crush = int(ui.crush)
-                        cb.scanlines = ui.scanlines
-                        # dither-quality controls (DESIGN.md §4.1: Bits
-                        # int-snapped 1-4, Gamma default ON, Bias auto/light/dark)
-                        cb.dither_bits = int(np.clip(round(ui.sig_bits), 1, 4))
-                        cb.dither_gamma = bool(ui.sig_gamma)
-                        cb.dither_invert = SIGNAL_BIAS_INVERT[
-                            SIGNAL_BIASES[int(ui.sig_bias_idx)
-                                          % len(SIGNAL_BIASES)]]
-                        # suppression rule (DESIGN.md §2.4): a mode that claims
-                        # "dither" owns dithering — the rack runs minus its dither
-                        claimed = frozenset(getattr(mode, "claims", ()))
-                        cb.dither_mode = (None if "dither" in claimed
-                                          or ui.dither_name == "off"
-                                          else ui.dither_name)
-                        # dither working resolution: the rack's default 72
-                        # rows is the lo-fi block look; a mode may declare
-                        # `signal_dither_rows(out_h)` to scale it with the
-                        # output (Physarum: its smooth veins read the fixed
-                        # 72 rows as boulder-sized grain). Kept as rows so a
-                        # GPU port mirrors it as a quantized-UV cell count.
-                        rows_fn = getattr(mode, "signal_dither_rows", None)
-                        cb.dither_size = (rows_fn(self.res[1])
-                                          if callable(rows_fn) else 72)
-                        out = cb.process(out)
+                        # one source of truth for panel -> rack config,
+                        # including the dither suppression rule and the
+                        # per-mode dither working rows (overlay_ui.sync_signal)
+                        sync_signal(cb, ui, mode, self.res[1])
+                        # A GL mode may have already applied the rack as
+                        # fragment passes inside step() (physarum's ported
+                        # path, dtouch.rack_gl) — it says so per frame via
+                        # signal_done, and `out` is then the racked frame.
+                        if not getattr(mode, "signal_done", False):
+                            out = cb.process(out)
                     if self.ps.blackout:
                         # Hard black AFTER mode render/composite/glitch, BEFORE
                         # the recorder — blackout is part of the show and IS
