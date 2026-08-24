@@ -115,13 +115,13 @@ class PhysarumMode:
                           weave=0.55, evolve=0.6, react=0.8),
         "ghost":     dict(point_bg="haze", point_fg="web", palette="mono",
                           matte="person", food=0.60, gain=0.9, decay=0.96, exposure=4.5,
-                          weave=0.5, evolve=0.65, react=0.6),
+                          weave=0.5, evolve=0.75, react=0.6),
         "lightning": dict(point_bg="web", point_fg="fingers", palette="violet",
                           matte="edges", food=0.45, gain=1.4, decay=0.90, exposure=3.0,
                           weave=0.65, evolve=0.6, react=0.8),
         "breath":    dict(point_bg="haze", point_fg="cells", palette="aurora",
                           matte="luma", food=0.30, gain=0.8, decay=0.95, exposure=4.0,
-                          weave=0.45, evolve=0.55, react=0.5),
+                          weave=0.45, evolve=0.7, react=0.5),
     }
 
     # apply="reset" merges a look over these; matte / video_bg / video_mix are
