@@ -516,6 +516,7 @@ lowercase; an uppercase-only table would silently demand Shift).
 | `m` | `menu.open` | menu |
 | `f` | `layer.flock` (Particles) | toast |
 | `x` | `physarum.swap` (Physarum) — body/field points trade places | toast |
+| `b` / `w` | `physarum.burst` / `physarum.wave` (Physarum) — pour agents on the subject / radial ripple | toast |
 | `g` | `layer.glitch` (rack) | toast |
 | `Space` | `output.blackout` toggle (recorded too; UI responsive) | toast + amber corner tick while armed |
 | `0` | `preset.panic` — mode's `safe_look()` in <1 s; disarms blackout AND the SIGNAL rack (glitch off) — panic must restore a known-good *picture*, not just known-good params | amber `RESET` |

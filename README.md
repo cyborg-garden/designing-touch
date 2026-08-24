@@ -66,7 +66,8 @@ Three instruments share the window, the presets, the keys and the recorder:
 - **Physarum** (`o`) — a slime-mold simulation that eats the live video: the matte blends
   every sim parameter between a "field" behavior and a "body" behavior (whoever is in frame
   runs different physics than the room), and the footage's light is food the veins grow
-  toward. `X` swaps body/field mid-set. Inspired by Sage Jenson's *36 Points* and Etienne
+  toward. `X` swaps body/field mid-set; `B` pours a burst of agents onto you; `W` ripples
+  the whole organism outward. Inspired by Sage Jenson's *36 Points* and Etienne
   Jacob's *interactive-physarum* (independent implementation of the Jones model).
 
 `m` opens the **home menu** — the same one you booted into: your camera behind a scrim,
