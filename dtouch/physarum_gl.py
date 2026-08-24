@@ -93,7 +93,16 @@ class PhysarumFieldGL:
     One live field at a time (the same rule as GlowRenderer): moderngl
     issues GL calls on whichever standalone context was created last, so a
     second live field silently aliases the first one's textures and
-    programs. Release a field before building another."""
+    programs. Release a field before building another.
+
+    Every public GL entry point binds this field's context first (`with
+    self.ctx:` — moderngl makes it current and restores the previous one
+    on exit). Without the bind, ANY other moderngl context created later
+    in the process (GlowRenderer, a matte backend, a window) silently
+    receives this field's GL calls: measured, a foreign context drawing
+    between steps turned the luminance into saturated garbage (mean abs
+    error 0.49 on [0,1] vs an identical solo run). The `with` exits back
+    to the other renderer's context, so both sides stay correct."""
 
     def __init__(self, n=1_000_000, gw=1280, gh=736, seed=0,
                  point_bg="veins", point_fg="fingers",
@@ -289,51 +298,53 @@ class PhysarumFieldGL:
                              f"{matte.shape} / {gray.shape}")
         matte = np.ascontiguousarray(matte, dtype=np.float32)
         gray = np.ascontiguousarray(gray, dtype=np.float32)
-        self.tex_matte.write(matte)
-        self.tex_gray.write(gray)
+        with self.ctx:
+            self.tex_matte.write(matte)
+            self.tex_gray.write(gray)
 
-        a, b = self._points()
-        p = self.p_update
-        p["u_sense"].value = (a["sense"], b["sense"])
-        p["u_spread"].value = (a["spread"], b["spread"])
-        p["u_turn"].value = (a["turn"], b["turn"])
-        p["u_step"].value = (a["step"], b["step"])
-        p["u_gain"].value = float(self.gain)
-        p["u_food"].value = max(float(self.food), 0.0)
-        p["u_reseed"].value = float(self.reseed_frac)
-        # rejection-sampling bound for the respawn weight matte*clip(gray):
-        # an upper bound keeps the draw exact; <= 0 means "nothing lit" and
-        # the CPU field's uniform fallback
-        mmax = float(matte.max())
-        wmax = mmax * min(1.0, max(float(gray.max()), 0.05)) if mmax > 0 else 0.0
-        p["u_wmax"].value = wmax
-        p["u_salt"].value = self._salt_value()
+            a, b = self._points()
+            p = self.p_update
+            p["u_sense"].value = (a["sense"], b["sense"])
+            p["u_spread"].value = (a["spread"], b["spread"])
+            p["u_turn"].value = (a["turn"], b["turn"])
+            p["u_step"].value = (a["step"], b["step"])
+            p["u_gain"].value = float(self.gain)
+            p["u_food"].value = max(float(self.food), 0.0)
+            p["u_reseed"].value = float(self.reseed_frac)
+            # rejection-sampling bound for the respawn weight matte*clip(gray):
+            # an upper bound keeps the draw exact; <= 0 means "nothing lit" and
+            # the CPU field's uniform fallback
+            mmax = float(matte.max())
+            wmax = mmax * min(1.0, max(float(gray.max()), 0.05)) if mmax > 0 else 0.0
+            p["u_wmax"].value = wmax
+            p["u_salt"].value = self._salt_value()
 
-        self.fbo_agents_b.use()
-        self.tex_agents_a.use(0)
-        self.tex_trail_a.use(1)
-        self.tex_matte.use(2)
-        self.tex_gray.use(3)
-        self.vao_update.render(gl.TRIANGLES, vertices=3)
-        self._swap_agents()
+            self.fbo_agents_b.use()
+            self.tex_agents_a.use(0)
+            self.tex_trail_a.use(1)
+            self.tex_matte.use(2)
+            self.tex_gray.use(3)
+            self.vao_update.render(gl.TRIANGLES, vertices=3)
+            self._swap_agents()
 
-        self._deposit(a["deposit"], b["deposit"])
-        self._blur_decay()
+            self._deposit(a["deposit"], b["deposit"])
+            self._blur_decay()
         self.frame += 1
 
     # ----- interactions -----
     def _impulse(self, mode, x, y, frac=0.0, radius=0.0):
         gl = self._gl
-        p = self.p_impulse
-        p["u_mode"].value = mode
-        p["u_center"].value = (float(x), float(y))
-        p["u_frac"].value = float(frac)
-        p["u_radius"].value = float(radius)
-        p["u_salt"].value = self._salt_value()
-        self.fbo_agents_b.use()
-        self.tex_agents_a.use(0)
-        self.vao_impulse.render(gl.TRIANGLES, vertices=3)
-        self._swap_agents()
+        with self.ctx:
+            p = self.p_impulse
+            p["u_mode"].value = mode
+            p["u_center"].value = (float(x), float(y))
+            p["u_frac"].value = float(frac)
+            p["u_radius"].value = float(radius)
+            p["u_salt"].value = self._salt_value()
+            self.fbo_agents_b.use()
+            self.tex_agents_a.use(0)
+            self.vao_impulse.render(gl.TRIANGLES, vertices=3)
+            self._swap_agents()
 
     def spawn_burst(self, x, y, frac=0.08, radius=6.0):
         """Teleport a fraction of the pool into a tight gaussian at (x, y)
@@ -365,20 +376,21 @@ class PhysarumFieldGL:
         frame's raw deposits over it, 1 - exp(-exposure * x)), evaluated on
         the GPU and read back as 8-bit."""
         gl = self._gl
-        norm, lmean = self._stats()
-        if norm <= 0:
-            return np.zeros((self.gh, self.gw), np.float32)
-        gnorm = lmean * 4.0
-        p = self.p_tonemap
-        p["u_inv_norm"].value = 1.0 / norm
-        p["u_grain"].value = float(self.grain) if gnorm > 0 else 0.0
-        p["u_inv_gnorm"].value = (1.0 / gnorm) if gnorm > 0 else 0.0
-        p["u_exposure"].value = float(self.exposure)
-        self.fbo_lum.use()
-        self.tex_trail_a.use(0)
-        self.tex_laid.use(1)
-        self.vao_tonemap.render(gl.TRIANGLES, vertices=3)
-        raw = self.fbo_lum.read(components=1)
+        with self.ctx:
+            norm, lmean = self._stats()
+            if norm <= 0:
+                return np.zeros((self.gh, self.gw), np.float32)
+            gnorm = lmean * 4.0
+            p = self.p_tonemap
+            p["u_inv_norm"].value = 1.0 / norm
+            p["u_grain"].value = float(self.grain) if gnorm > 0 else 0.0
+            p["u_inv_gnorm"].value = (1.0 / gnorm) if gnorm > 0 else 0.0
+            p["u_exposure"].value = float(self.exposure)
+            self.fbo_lum.use()
+            self.tex_trail_a.use(0)
+            self.tex_laid.use(1)
+            self.vao_tonemap.render(gl.TRIANGLES, vertices=3)
+            raw = self.fbo_lum.read(components=1)
         lum = np.frombuffer(raw, np.uint8).reshape(self.gh, self.gw)
         return lum.astype(np.float32) * np.float32(1.0 / 255.0)
 
@@ -392,8 +404,9 @@ class PhysarumFieldGL:
         per-frame path never hit it — luminance() reads each target right
         after rendering into it — but trail / agents() after luminance()
         did."""
-        fbo.use()
-        raw = fbo.read(components=components, dtype="f4")
+        with self.ctx:
+            fbo.use()
+            raw = fbo.read(components=components, dtype="f4")
         return np.frombuffer(raw, np.float32).copy()
 
     @property

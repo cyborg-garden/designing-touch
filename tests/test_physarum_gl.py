@@ -12,11 +12,14 @@ as the pen, luminance as food, determinism, burst, wave.
 """
 import re
 
+import cv2
 import numpy as np
 import pytest
 
-from dtouch.modes.physarum import PhysarumMode, _colorize, _fmt_agents, _palette_lut
-from dtouch.physarum import POINTS, PhysarumField
+from dtouch.modes.particles import MATTES
+from dtouch.modes.physarum import (PALETTES_PH, PhysarumMode, _colorize,
+                                   _fmt_agents, _palette_lut)
+from dtouch.physarum import POINT_NAMES, POINTS, PhysarumField
 from dtouch.physarum_gl import (SHADER_FILES, PhysarumFieldGL, PhysarumGLUnavailable,
                                 load_shader)
 from dtouch.physarum_looks import LOOKS_PATH, dumps
@@ -395,3 +398,189 @@ def test_looks_json_matches_the_python_source():
     for name, pal in on_disk["palettes"].items():
         assert len(pal["lut"]) == 256 and all(len(c) == 3 for c in pal["lut"])
         assert pal["lut"] == _palette_lut(name).tolist()
+
+
+# ---------- mode-level regressions (the real-app symptoms of issue: every
+# look rendered the same wire-mesh and the video background disappeared) ----
+
+def _skip_without_gl():
+    try:
+        probe = PhysarumFieldGL(n=16, gw=8, gh=8)
+    except PhysarumGLUnavailable as e:
+        pytest.skip(f"no GL context available (CI): {e}")
+    probe.release()
+
+
+def _blob_frames(n, w=320, h=180):
+    """Synthetic camera: a bright blob wandering over a dim gradient."""
+    base = np.zeros((h, w, 3), np.uint8)
+    base[:] = np.linspace(20, 50, w, dtype=np.uint8)[None, :, None]
+    frames = []
+    for i in range(n):
+        f = base.copy()
+        cx = int(w * (0.2 + 0.6 * i / n))
+        cy = int(h * (0.5 + 0.25 * np.sin(i * 0.15)))
+        cv2.circle(f, (cx, cy), 28, (235, 235, 235), -1)
+        frames.append(cv2.GaussianBlur(f, (15, 15), 0))
+    return frames
+
+
+def _apply_look(ui, look, **over):
+    ui.ph_point_bg_idx = POINT_NAMES.index(look["point_bg"])
+    ui.ph_point_fg_idx = POINT_NAMES.index(look["point_fg"])
+    ui.ph_palette_idx = PALETTES_PH.index(look["palette"])
+    ui.ph_food = look["food"]; ui.ph_gain = look["gain"]
+    ui.ph_decay = look["decay"]; ui.ph_exposure = look["exposure"]
+    ui.ph_grain = 0.5
+    ui.ph_matte_idx = MATTES.index("luma")     # deterministic headless matte
+    ui.ph_video_bg = False; ui.ph_video_mix = 0.5
+    for k, v in over.items():
+        setattr(ui, k, v)
+
+
+def _median_vein_width(out):
+    """Median thickness (px) of the bright structure, via distance transform."""
+    g = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
+    d = cv2.distanceTransform((g > 96).astype(np.uint8), cv2.DIST_L2, 3)
+    core = d[d > 0.5]
+    return float(2.0 * np.median(core)) if core.size else 0.0
+
+
+class _StubToasts:
+    def flash(self, *a, **k):
+        pass
+
+
+class _StubHost:
+    """The three attributes step() actually reads — ui, hud.toasts, res —
+    without booting the shell (Host only builds its UI inside run())."""
+
+    def __init__(self, res):
+        self.res = res
+        self.ui = type("Ui", (), {})()
+        self.hud = type("Hud", (), {})()
+        self.hud.toasts = _StubToasts()
+
+
+def _booted_mode(engine, res=(640, 368)):
+    m = PhysarumMode(matte="luma", seed=1, engine=engine)
+    host = _StubHost(res)
+    m.start(host)
+    return m, host
+
+
+def test_gl_default_sizing_keeps_the_cpu_looks_scale():
+    """The look parameters (sense/step, and the blur that sets vein width)
+    are calibrated in CPU-grid pixels. Driving them unscaled on the GL grid
+    halved the mold's relative scale: veins fell below what the projector /
+    SIGNAL dither stage resolves, and every look collapsed into the same
+    fine wire-mesh (measured 0.52x the CPU vein width before the fix)."""
+    _skip_without_gl()
+    frames = _blob_frames(50)
+    widths = {}
+    for engine in ("gl", "cpu"):
+        m, host = _booted_mode(engine)
+        try:
+            _apply_look(host.ui, PhysarumMode.BUILTIN["veinwork"])
+            for i in range(45):
+                out = m.step(frames[i % len(frames)], None, 1 / 30)
+            widths[engine] = _median_vein_width(out)
+        finally:
+            m.stop()
+    assert m.engine == "cpu" and widths["cpu"] > 0
+    ratio = widths["gl"] / widths["cpu"]
+    assert ratio >= 0.7, (
+        f"GL veins are {ratio:.2f}x the CPU ground truth's width "
+        f"({widths['gl']:.1f}px vs {widths['cpu']:.1f}px) — the GL engine is "
+        "rendering the mold at the wrong relative scale")
+
+
+def test_looks_differ_under_gl():
+    """Recalling different BUILTIN looks must change the rendered picture —
+    the panel/look parameters have to reach the GL field every frame."""
+    _skip_without_gl()
+    frames = _blob_frames(50)
+    m, host = _booted_mode("gl", res=(320, 184))
+    outs = {}
+    try:
+        for name, look in PhysarumMode.BUILTIN.items():
+            _apply_look(host.ui, look)
+            for i in range(40):
+                out = m.step(frames[i % len(frames)], None, 1 / 30)
+            outs[name] = out.astype(np.float32)
+    finally:
+        m.stop()
+    names = list(outs)
+    dists = [np.abs(outs[a] - outs[b]).mean()
+             for i, a in enumerate(names) for b in names[i + 1:]]
+    assert min(dists) > 5.0, (
+        f"some GL looks render nearly identically (min pairwise distance "
+        f"{min(dists):.2f}) — look parameters are not reaching the field")
+
+
+def test_video_bg_composites_under_gl():
+    """Video bg must screen-blend the live frame under the GL mold: turning
+    it on changes the picture a lot, and the result carries the frame."""
+    _skip_without_gl()
+    frames = _blob_frames(50)
+    m, host = _booted_mode("gl", res=(320, 184))
+    try:
+        _apply_look(host.ui, PhysarumMode.BUILTIN["veinwork"])
+        for i in range(40):
+            out_off = m.step(frames[i % len(frames)], None, 1 / 30)
+        host.ui.ph_video_bg = True
+        host.ui.ph_video_mix = 0.8
+        out_on = m.step(frames[40 % len(frames)], None, 1 / 30)
+    finally:
+        m.stop()
+    diff = np.abs(out_on.astype(np.float32) - out_off.astype(np.float32)).mean()
+    assert diff > 5.0, f"video bg changed the picture by only {diff:.2f}"
+    fin = cv2.cvtColor(cv2.resize(frames[40 % len(frames)], (320, 184)),
+                       cv2.COLOR_BGR2GRAY).astype(np.float32)
+    og = cv2.cvtColor(out_on, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    corr = float(np.corrcoef(fin.ravel(), og.ravel())[0, 1])
+    assert corr > 0.1, f"bg-on output does not carry the frame (corr {corr:.3f})"
+
+
+def test_field_survives_a_foreign_context(gl_field):
+    """In the app other moderngl contexts exist (GlowRenderer, and whatever
+    created one last is current). The field must bind its OWN context per
+    call: before the fix, a foreign context drawing between steps silently
+    received the field's GL calls and the luminance came back as saturated
+    garbage (mean abs error 0.49 on [0,1] vs an identical solo run)."""
+    import moderngl
+    m = np.zeros((54, 96), np.float32); m[20:34, 40:60] = 1.0
+    g = m.copy()
+
+    def run(interleave):
+        f = gl_field(n=8000, seed=7)
+        ctx2 = None
+        try:
+            for i in range(40):
+                if interleave and i >= 20:
+                    if ctx2 is None:
+                        ctx2 = moderngl.create_standalone_context()
+                        prog = ctx2.program(
+                            vertex_shader="#version 330\nin vec2 v;"
+                                          "\nvoid main(){gl_Position=vec4(v,0,1);}",
+                            fragment_shader="#version 330\nout vec4 c;"
+                                            "\nvoid main(){c=vec4(1,0,0,1);}")
+                        vbo = ctx2.buffer(
+                            np.array([-1, -1, 3, -1, -1, 3], np.float32).tobytes())
+                        vao = ctx2.vertex_array(prog, [(vbo, "2f", "v")])
+                        fbo = ctx2.framebuffer(
+                            color_attachments=[ctx2.texture((64, 64), 4)])
+                    fbo.use()
+                    ctx2.clear(0, 0, 0, 1)
+                    vao.render(moderngl.TRIANGLES, vertices=3)
+                f.update(m, g)
+                lum = f.luminance()
+            return lum
+        finally:
+            if ctx2 is not None:
+                ctx2.release()
+
+    solo = run(False)
+    interleaved = run(True)
+    assert np.abs(solo - interleaved).mean() < 1e-6, (
+        "a foreign GL context drawing between steps corrupted the field")
