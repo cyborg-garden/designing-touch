@@ -22,3 +22,6 @@ presets.v1.bak.json
 **/*.corrupt.*.bak.json
 dtouch.egg-info/
 *.egg-info/
+
+# git worktrees for parallel branches
+.worktrees/
