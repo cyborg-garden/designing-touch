@@ -25,6 +25,12 @@ needed: this is the standard WebGL physarum architecture, and it runs on GL
   the tonemap needs (the trail's 95th percentile, the deposits' mean) come
   from a 1/4-res subsample pass read back as a small float texture.
 
+The GLSL lives in `dtouch/shaders/physarum/` as standalone files, without a
+`#version` line, in the GLSL 3.30 ∩ GLSL ES 3.00 subset: they are the single
+source of truth for this engine AND for the WebGL2 port on the public site,
+which vendors them verbatim (see that directory's README). `load_shader`
+prepends the desktop version line.
+
 Same interface as PhysarumField — `update(matte, gray)`, `luminance()`,
 `spawn_burst`, `wave`, the matte-blended POINTS — so PhysarumMode can select
 either. Known, deliberate differences from the CPU field: the blur wraps at
@@ -41,6 +47,7 @@ or parameter tables from any CC BY-NC-SA physarum project were used.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -54,210 +61,27 @@ AGENT_TEX_W = 2048
 # Stride of the statistics subsample (percentile + mean readback).
 STATS_STRIDE = 4
 
+SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders", "physarum")
+SHADER_FILES = ("fullscreen.vert", "update.frag", "deposit.vert", "deposit.frag",
+                "blur.frag", "stats.frag", "tonemap.frag", "impulse.frag")
+
+# What moderngl gets in front of every file. The browser prepends its own
+# `#version 300 es` + precision lines; the files carry neither.
+GLSL_VERSION_LINE = "#version 330 core\n"
+
+
+def load_shader(name, version_line=GLSL_VERSION_LINE):
+    """Source of `dtouch/shaders/physarum/<name>` with the version line
+    prepended. A `#line 1` follows it so compile errors keep file-true
+    line numbers."""
+    with open(os.path.join(SHADER_DIR, name), "r", encoding="utf-8") as fh:
+        body = fh.read()
+    return version_line + "#line 1\n" + body
+
 
 class PhysarumGLUnavailable(RuntimeError):
     """Raised by PhysarumFieldGL.__init__ when no GL context / float render
     target can be had. The mode catches it and falls back to the CPU field."""
-
-
-_FS_VS = """
-#version 330
-in vec2 in_vert;
-void main(){ gl_Position = vec4(in_vert, 0.0, 1.0); }
-"""
-
-# Integer hash + per-agent random stream. A per-frame salt goes into the seed
-# so each frame's coin flips are fresh; the stream is advanced by re-hashing.
-_HASH_GLSL = """
-uint hash(uint x){
-    x ^= x >> 16u; x *= 0x7feb352du;
-    x ^= x >> 15u; x *= 0x846ca68bu;
-    x ^= x >> 16u;
-    return x;
-}
-float rnd(inout uint s){ s = hash(s); return float(s) * (1.0 / 4294967296.0); }
-"""
-
-_UPDATE_FS = """
-#version 330
-uniform sampler2D u_agents;
-uniform sampler2D u_trail;
-uniform sampler2D u_matte;
-uniform sampler2D u_gray;
-uniform ivec2 u_grid;
-uniform int u_aw;
-uniform vec2 u_sense, u_spread, u_turn, u_step;   // (field point, body point)
-uniform float u_gain, u_food, u_reseed, u_wmax;
-uniform uint u_salt;
-out vec4 f_agent;
-""" + _HASH_GLSL + """
-ivec2 cell(vec2 p){ return ivec2(mod(floor(p), vec2(u_grid))); }
-float food(vec2 p){
-    ivec2 c = cell(p);
-    return texelFetch(u_trail, c, 0).r + u_food * texelFetch(u_gray, c, 0).r;
-}
-void main(){
-    ivec2 ac = ivec2(gl_FragCoord.xy);
-    uint idx = uint(ac.y * u_aw + ac.x);
-    vec4 a = texelFetch(u_agents, ac, 0);
-    vec2 p = a.xy;
-    float h = a.z;
-    uint s = hash(idx * 0x9e3779b9u + u_salt);
-
-    // the pen: blend field -> body by the matte under the agent
-    float t = texelFetch(u_matte, cell(p), 0).r;
-    float sense = mix(u_sense.x, u_sense.y, t) * u_gain;
-    float spread = mix(u_spread.x, u_spread.y, t);
-    float turn = mix(u_turn.x, u_turn.y, t);
-    float stp = mix(u_step.x, u_step.y, t) * u_gain;
-
-    // Jones steering: hold when ahead wins; coin flip when ahead loses to
-    // both sides; otherwise turn toward the stronger side.
-    float fc = food(p + vec2(cos(h), sin(h)) * sense);
-    float fl = food(p + vec2(cos(h - spread), sin(h - spread)) * sense);
-    float fr = food(p + vec2(cos(h + spread), sin(h + spread)) * sense);
-    float dir;
-    if (fc > fl && fc > fr) dir = 0.0;
-    else if (fc < fl && fc < fr) dir = (rnd(s) < 0.5) ? -1.0 : 1.0;
-    else dir = (fl > fr) ? -1.0 : 1.0;
-    h += dir * turn;
-
-    p += vec2(cos(h), sin(h)) * stp;
-    p = mod(p, vec2(u_grid));
-
-    // recycle a trickle of agents onto the lit subject (matte * luma)
-    if (u_reseed > 0.0 && rnd(s) < u_reseed) {
-        vec2 g = vec2(u_grid);
-        if (u_wmax <= 0.0) {
-            p = vec2(rnd(s), rnd(s)) * g;
-            h = rnd(s) * 6.2831853;
-        } else {
-            for (int i = 0; i < 16; i++) {
-                vec2 c = vec2(rnd(s), rnd(s)) * g;
-                ivec2 ci = cell(c);
-                float w = texelFetch(u_matte, ci, 0).r
-                        * clamp(texelFetch(u_gray, ci, 0).r, 0.05, 1.0);
-                if (rnd(s) * u_wmax < w) {
-                    p = c;
-                    h = rnd(s) * 6.2831853;
-                    break;
-                }
-            }
-        }
-    }
-    f_agent = vec4(p, h, a.w);
-}
-"""
-
-_DEPOSIT_VS = """
-#version 330
-uniform sampler2D u_agents;
-uniform sampler2D u_matte;
-uniform ivec2 u_grid;
-uniform int u_aw;
-uniform vec2 u_deposit;
-out float v_dep;
-void main(){
-    ivec2 ac = ivec2(gl_VertexID % u_aw, gl_VertexID / u_aw);
-    vec4 a = texelFetch(u_agents, ac, 0);
-    ivec2 c = ivec2(mod(floor(a.xy), vec2(u_grid)));
-    v_dep = mix(u_deposit.x, u_deposit.y, texelFetch(u_matte, c, 0).r);
-    vec2 ndc = (vec2(c) + 0.5) / vec2(u_grid) * 2.0 - 1.0;
-    gl_Position = vec4(ndc, 0.0, 1.0);
-}
-"""
-_DEPOSIT_FS = """
-#version 330
-in float v_dep;
-out vec4 f_color;
-void main(){ f_color = vec4(v_dep, 0.0, 0.0, 1.0); }
-"""
-
-# One axis of the box blur. `u_add` (the laid deposits) is folded in on the
-# first axis; `u_scale` carries 1/(2r+1) on both and decay on the second.
-_BLUR_FS = """
-#version 330
-uniform sampler2D u_src;
-uniform sampler2D u_add;
-uniform int u_use_add;
-uniform ivec2 u_dir;
-uniform int u_radius;
-uniform ivec2 u_grid;
-uniform float u_scale;
-out vec4 f_color;
-void main(){
-    ivec2 c = ivec2(gl_FragCoord.xy);
-    float acc = 0.0;
-    for (int i = -u_radius; i <= u_radius; i++) {
-        ivec2 q = c + u_dir * i;
-        q = ((q % u_grid) + u_grid) % u_grid;
-        acc += texelFetch(u_src, q, 0).r;
-        if (u_use_add == 1) acc += texelFetch(u_add, q, 0).r;
-    }
-    f_color = vec4(acc * u_scale, 0.0, 0.0, 1.0);
-}
-"""
-
-# stride-STATS_STRIDE subsample of (trail, laid) for the tonemap statistics
-_STATS_FS = """
-#version 330
-uniform sampler2D u_trail;
-uniform sampler2D u_laid;
-uniform int u_stride;
-uniform ivec2 u_grid;
-out vec4 f_color;
-void main(){
-    ivec2 c = ivec2(gl_FragCoord.xy) * u_stride;
-    c = min(c, u_grid - 1);
-    f_color = vec4(texelFetch(u_trail, c, 0).r, texelFetch(u_laid, c, 0).r, 0.0, 1.0);
-}
-"""
-
-_TONEMAP_FS = """
-#version 330
-uniform sampler2D u_trail;
-uniform sampler2D u_laid;
-uniform float u_inv_norm, u_grain, u_inv_gnorm, u_exposure;
-out vec4 f_color;
-void main(){
-    ivec2 c = ivec2(gl_FragCoord.xy);
-    float x = texelFetch(u_trail, c, 0).r * u_inv_norm
-            + u_grain * texelFetch(u_laid, c, 0).r * u_inv_gnorm;
-    f_color = vec4(vec3(1.0 - exp(-u_exposure * x)), 1.0);
-}
-"""
-
-# burst (mode 1): a fraction of agents teleport to a gaussian around the
-# center with fresh headings; wave (mode 2): every heading points away from it
-_IMPULSE_FS = """
-#version 330
-uniform sampler2D u_agents;
-uniform ivec2 u_grid;
-uniform int u_aw;
-uniform int u_mode;
-uniform vec2 u_center;
-uniform float u_frac, u_radius;
-uniform uint u_salt;
-out vec4 f_agent;
-""" + _HASH_GLSL + """
-void main(){
-    ivec2 ac = ivec2(gl_FragCoord.xy);
-    uint idx = uint(ac.y * u_aw + ac.x);
-    vec4 a = texelFetch(u_agents, ac, 0);
-    if (u_mode == 1) {
-        uint s = hash(idx * 0x9e3779b9u + u_salt);
-        if (rnd(s) < u_frac) {
-            float u1 = max(rnd(s), 1e-7), u2 = rnd(s) * 6.2831853;
-            float r = sqrt(-2.0 * log(u1)) * u_radius;      // Box-Muller
-            a.xy = mod(u_center + vec2(cos(u2), sin(u2)) * r, vec2(u_grid));
-            a.z = rnd(s) * 6.2831853;
-        }
-    } else if (u_mode == 2) {
-        a.z = atan(a.y - u_center.y, a.x - u_center.x);
-    }
-    f_agent = a;
-}
-"""
 
 
 class PhysarumFieldGL:
@@ -308,15 +132,16 @@ class PhysarumFieldGL:
         ctx = self.ctx = moderngl.create_standalone_context()
         gw, gh, aw, ah = self.gw, self.gh, self.aw, self.ah
 
-        def prog(fs, vs=_FS_VS):
-            return ctx.program(vertex_shader=vs, fragment_shader=fs)
-        self.p_update = prog(_UPDATE_FS)
-        self.p_deposit = ctx.program(vertex_shader=_DEPOSIT_VS,
-                                     fragment_shader=_DEPOSIT_FS)
-        self.p_blur = prog(_BLUR_FS)
-        self.p_stats = prog(_STATS_FS)
-        self.p_tonemap = prog(_TONEMAP_FS)
-        self.p_impulse = prog(_IMPULSE_FS)
+        fs_vs = load_shader("fullscreen.vert")
+
+        def prog(frag, vert=fs_vs):
+            return ctx.program(vertex_shader=vert, fragment_shader=load_shader(frag))
+        self.p_update = prog("update.frag")
+        self.p_deposit = prog("deposit.frag", load_shader("deposit.vert"))
+        self.p_blur = prog("blur.frag")
+        self.p_stats = prog("stats.frag")
+        self.p_tonemap = prog("tonemap.frag")
+        self.p_impulse = prog("impulse.frag")
 
         tri = np.array([-1, -1, 3, -1, -1, 3], np.float32)
         self.tri_vbo = ctx.buffer(tri.tobytes())
@@ -345,6 +170,8 @@ class PhysarumFieldGL:
         self.fbo_agents_a = ctx.framebuffer(color_attachments=[self.tex_agents_a])
         self.fbo_agents_b = ctx.framebuffer(color_attachments=[self.tex_agents_b])
 
+        # the shaders read/write .r only, so the trail-sized targets are R32F
+        # here; the browser backs the same GLSL with RGBA16F/32F
         self.tex_trail_a = ftex((gw, gh), 1)
         self.tex_trail_b = ftex((gw, gh), 1)
         self.tex_tmp = ftex((gw, gh), 1)

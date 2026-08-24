@@ -15,7 +15,9 @@ import pytest
 
 from dtouch.modes.physarum import PhysarumMode, _colorize, _fmt_agents, _palette_lut
 from dtouch.physarum import POINTS, PhysarumField
-from dtouch.physarum_gl import PhysarumFieldGL, PhysarumGLUnavailable
+from dtouch.physarum_gl import (SHADER_FILES, PhysarumFieldGL, PhysarumGLUnavailable,
+                                load_shader)
+from dtouch.physarum_looks import LOOKS_PATH, dumps
 from dtouch.shell import Host
 
 from test_shell import SyntheticSource
@@ -278,3 +280,78 @@ def test_colorize_matches_the_lut_index():
     idx = (lum * 255.0).astype(np.uint8)
     for pal in ("arctic", "fire", "mono"):
         assert np.array_equal(_colorize(lum, pal), _palette_lut(pal)[idx])
+
+
+# ---------- the shared-shader contract (dtouch/shaders/physarum/README.md) ----------
+
+def _shader_sources():
+    return {name: load_shader(name, version_line="") for name in SHADER_FILES}
+
+
+def test_every_shader_file_exists_and_carries_no_host_lines():
+    """The host prepends `#version` (330 core here, 300 es in the browser)
+    and the browser prepends `precision`; neither may live in the files."""
+    for name, src in _shader_sources().items():
+        body = src.split("#line 1\n", 1)[1]
+        assert body.strip(), f"{name} is empty"
+        assert "#version" not in body, f"{name} carries a #version line"
+        assert "precision " not in body, f"{name} carries a precision line"
+
+
+@pytest.mark.parametrize("name", SHADER_FILES)
+def test_shader_stays_inside_glsl_es_300(name):
+    """Static lint for the GLSL 3.30 ∩ ES 3.00 subset the site vendors."""
+    body = load_shader(name, version_line="").split("#line 1\n", 1)[1]
+    code = "\n".join(l.split("//", 1)[0] for l in body.splitlines())
+    banned = ("double", "dvec", "usampler", "isampler", "sampler1D", "sampler3D",
+              "image2D", "imageStore", "imageLoad", "gl_FragColor", "texture2D(",
+              "#include", "#extension", "layout(binding", "subroutine",
+              "gl_PrimitiveID", "gl_Layer")
+    for tok in banned:
+        assert tok not in code, f"{name} uses {tok!r}, outside ES 3.00"
+    if name.endswith(".frag"):
+        assert "layout(location = 0) out vec4" in code, \
+            f"{name}: fragment output needs an explicit layout(location = 0)"
+    if name == "deposit.vert":
+        assert "gl_PointSize = 1.0" in code   # ES has no glPointSize
+
+
+@pytest.mark.parametrize("name", SHADER_FILES)
+def test_shader_compiles_under_330_core(name):
+    try:
+        import moderngl
+        ctx = moderngl.create_standalone_context()
+    except Exception as e:                    # noqa: BLE001
+        pytest.skip(f"no GL context available (CI): {e}")
+    try:
+        src = load_shader(name)
+        assert src.startswith("#version 330 core\n#line 1\n")
+        # deposit.vert/.frag are a pair (v_dep); everything else rides the
+        # full-screen triangle
+        if name.startswith("deposit"):
+            ctx.program(vertex_shader=load_shader("deposit.vert"),
+                        fragment_shader=load_shader("deposit.frag"))
+        elif name.endswith(".vert"):
+            ctx.program(vertex_shader=src, fragment_shader=(
+                "#version 330 core\nout vec4 f; void main(){ f = vec4(1.0); }"))
+        else:
+            ctx.program(vertex_shader=load_shader("fullscreen.vert"), fragment_shader=src)
+    finally:
+        ctx.release()
+
+
+def test_looks_json_matches_the_python_source():
+    """dtouch/shaders/physarum/looks.json is vendored by the site; it must
+    equal what the Python tables generate. Regenerate with
+    `python -m dtouch.physarum_looks` after touching POINTS / BUILTIN /
+    DEFAULTS / palette stops."""
+    import json
+    with open(LOOKS_PATH, encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert on_disk == json.loads(dumps()), (
+        "looks.json is stale: run `python -m dtouch.physarum_looks`")
+    assert set(on_disk["points"]) == set(POINTS)
+    assert set(on_disk["builtin"]) == set(PhysarumMode.BUILTIN)
+    for name, pal in on_disk["palettes"].items():
+        assert len(pal["lut"]) == 256 and all(len(c) == 3 for c in pal["lut"])
+        assert pal["lut"] == _palette_lut(name).tolist()
