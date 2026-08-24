@@ -150,7 +150,9 @@ def build_signal_section():
     state serializes under "signal" inside each mode's looks."""
     return Section("SIGNAL", key_hint="G", widgets=[
             Toggle("Glitch", "glitch"),
-            Cycle("dither", "dither_idx", list(DITHERS), save_key="dither"),
+            Cycle("dither", "dither_idx", list(DITHERS), save_key="dither",
+                  tip="Repaints the picture from small two-tone dots, like "
+                      "newsprint or an old handheld console. Off = clean."),
             # dither-quality controls (DESIGN.md §2.4/§4.1: the audit's
             # quality controls grow the rack; a mode that claims them —
             # Dither owns ALL dither quality — hides them)
@@ -163,7 +165,9 @@ def build_signal_section():
             Toggle("Gamma", "sig_gamma", save_key="gamma",
                    tip="Dither in linear light so mid-tones keep their "
                        "perceived brightness. Off = the crushed retro look."),
-            Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias"),
+            Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias",
+                  tip="Which way the dots lean on a mostly-dark or mostly-"
+                      "bright picture. Auto decides per frame."),
             # Chroma and Drift look like pixel counts and are not: each is the
             # AMPLITUDE of a per-frame random draw that then lands on a whole
             # pixel. The fraction is used — 12.4 and 12.6 are different bleeds
@@ -610,7 +614,8 @@ class OverlayUI:
             return y + g.S(28 + wdg.gap)
         if isinstance(wdg, Cycle):
             idx = getattr(self, wdg.attr) % len(wdg.options)
-            y = g.cycle(frame, wdg.label, wdg.options[idx], wdg.hit_key, x, y, cw)
+            y = g.cycle(frame, wdg.label, wdg.options[idx], wdg.hit_key, x, y, cw,
+                        info=wdg.tip or None)
             return y + g.S(wdg.gap) if wdg.gap else y
         if isinstance(wdg, Action):
             g.row(frame, wdg.label, wdg.command, x, y, cw)

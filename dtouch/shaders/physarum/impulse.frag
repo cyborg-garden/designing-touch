@@ -1,8 +1,12 @@
-// Physarum impulses — burst and wave, applied over the agent texture.
+// Physarum impulses — burst, wave and gather, applied over the agent texture.
 //
-//   u_mode 1 (burst): each agent, with probability u_frac, teleports to a
+//   u_mode 1 (burst):  each agent, with probability u_frac, teleports to a
 //     gaussian of radius u_radius around u_center with a fresh heading.
-//   u_mode 2 (wave):  every heading points away from u_center.
+//   u_mode 2 (wave):   every heading points away from u_center.
+//   u_mode 3 (gather): only agents within u_radius of u_center (torus
+//     distance) teleport, with probability u_frac, into a tight gaussian
+//     (0.15 * u_radius) at the center — a LOCAL rush that never drains the
+//     rest of the organism (the react/"spell" impulse).
 // Drawn with fullscreen.vert; writes the next agent texture (ping-pong).
 
 uniform sampler2D u_agents;
@@ -39,6 +43,20 @@ void main() {
         }
     } else if (u_mode == 2) {
         a.z = atan(a.y - u_center.y, a.x - u_center.x);
+    } else if (u_mode == 3) {
+        vec2 g = vec2(u_grid);
+        vec2 d = a.xy - u_center;
+        d -= g * floor(d / g + 0.5);          // shortest torus offset
+        if (dot(d, d) < u_radius * u_radius) {
+            uint s = hash(idx * 0x9e3779b9u + u_salt);
+            if (rnd(s) < u_frac) {
+                float u1 = max(rnd(s), 1e-7);
+                float u2 = rnd(s) * 6.2831853;
+                float r = sqrt(-2.0 * log(u1)) * (0.15 * u_radius);
+                a.xy = mod(u_center + vec2(cos(u2), sin(u2)) * r, g);
+                a.z = rnd(s) * 6.2831853;
+            }
+        }
     }
     f_agent = a;
 }

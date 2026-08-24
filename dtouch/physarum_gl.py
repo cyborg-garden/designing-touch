@@ -107,7 +107,8 @@ class PhysarumFieldGL:
     def __init__(self, n=1_000_000, gw=1280, gh=736, seed=0,
                  point_bg="veins", point_fg="fingers",
                  decay=0.94, diffuse=1, food=0.35, exposure=3.5,
-                 grain=0.5, reseed_frac=0.004, gain=1.0):
+                 grain=0.5, reseed_frac=0.004, gain=1.0,
+                 sat=0.0, jitter=0.0, hetero=0.0):
         if n <= 0:
             raise ValueError(f"n must be > 0, got {n}")
         if gw <= 0 or gh <= 0:
@@ -126,8 +127,16 @@ class PhysarumFieldGL:
         self.grain = grain
         self.reseed_frac = reseed_frac
         self.gain = gain
+        self.sat = sat            # sensor saturation (x trail bright end); 0 = off
+        self.jitter = jitter      # per-step heading wobble, rad
+        self.hetero = hetero      # 0..1 sub-population sense split
+        # slow structural modulation multipliers (see PhysarumField)
+        self.mod_sense = 1.0
+        self.mod_turn = 1.0
+        self.mod_spread = 1.0
         self.seed = seed
         self.frame = 0
+        self._last_norm = 0.0     # last luminance() percentile (sat cap ref)
         self.ctx = None
         self._rng = np.random.default_rng(seed)
         self._salt = np.random.default_rng(seed + 1)
@@ -200,6 +209,7 @@ class PhysarumFieldGL:
 
         self.tex_matte = ftex((gw, gh), 1)
         self.tex_gray = ftex((gw, gh), 1)
+        self.tex_keep = ftex((gw, gh), 1)      # per-pixel decay boost (react)
 
         self.sw = int(math.ceil(gw / STATS_STRIDE))
         self.sh = int(math.ceil(gh / STATS_STRIDE))
@@ -222,6 +232,7 @@ class PhysarumFieldGL:
         self.p_deposit["u_matte"].value = 2
         self.p_blur["u_src"].value = 0
         self.p_blur["u_add"].value = 1
+        self.p_blur["u_keep"].value = 2
         self.p_stats["u_trail"].value = 0
         self.p_stats["u_laid"].value = 1
         self.p_stats["u_stride"].value = STATS_STRIDE
@@ -259,7 +270,7 @@ class PhysarumFieldGL:
         self.vao_deposit.render(gl.POINTS, vertices=self.n)
         ctx.disable(gl.BLEND)
 
-    def _blur_decay(self):
+    def _blur_decay(self, use_keep=False):
         ctx, gl = self.ctx, self._gl
         r = int(self.diffuse) if self.diffuse > 0 else 0
         k = 2 * r + 1
@@ -270,15 +281,20 @@ class PhysarumFieldGL:
         self.tex_trail_a.use(0)
         self.tex_laid.use(1)
         p["u_use_add"].value = 1
+        p["u_use_keep"].value = 0
+        p["u_decay"].value = 1.0
         p["u_dir"].value = (1, 0)
         p["u_scale"].value = 1.0 / k
         self.vao_blur.render(gl.TRIANGLES, vertices=3)
-        # V: tmp -> trail_b, times decay
+        # V: tmp -> trail_b, times decay (per-pixel when a keep map rode in)
         self.fbo_trail_b.use()
         self.tex_tmp.use(0)
+        self.tex_keep.use(2)
         p["u_use_add"].value = 0
+        p["u_use_keep"].value = 1 if use_keep else 0
+        p["u_decay"].value = float(self.decay)
         p["u_dir"].value = (0, 1)
-        p["u_scale"].value = self.decay / k
+        p["u_scale"].value = 1.0 / k
         self.vao_blur.render(gl.TRIANGLES, vertices=3)
         self.tex_trail_a, self.tex_trail_b = self.tex_trail_b, self.tex_trail_a
         self.fbo_trail_a, self.fbo_trail_b = self.fbo_trail_b, self.fbo_trail_a
@@ -288,25 +304,34 @@ class PhysarumFieldGL:
         self.fbo_agents_a, self.fbo_agents_b = self.fbo_agents_b, self.fbo_agents_a
 
     # ----- one simulation frame -----
-    def update(self, matte, gray):
+    def update(self, matte, gray, keep=None):
         """matte, gray: float32 (gh, gw) in [0,1]. Advances agents one frame
-        and rebuilds the trail map — three GPU passes, no readback."""
+        and rebuilds the trail map — three GPU passes, no readback.
+
+        `keep` (optional, same shape, [0,1]): per-pixel decay boost — where
+        keep is 1 the trail decays at 0.995 instead of `decay`, so swept
+        paths linger (the mode's react machinery paints it from motion)."""
         gl = self._gl
         gh, gw = self.gh, self.gw
         if matte.shape != (gh, gw) or gray.shape != (gh, gw):
             raise ValueError(f"matte/gray must be {(gh, gw)}, got "
                              f"{matte.shape} / {gray.shape}")
+        if keep is not None and keep.shape != (gh, gw):
+            raise ValueError(f"keep must be {(gh, gw)}, got {keep.shape}")
         matte = np.ascontiguousarray(matte, dtype=np.float32)
         gray = np.ascontiguousarray(gray, dtype=np.float32)
         with self.ctx:
             self.tex_matte.write(matte)
             self.tex_gray.write(gray)
+            if keep is not None:
+                self.tex_keep.write(np.ascontiguousarray(keep, np.float32))
 
             a, b = self._points()
             p = self.p_update
-            p["u_sense"].value = (a["sense"], b["sense"])
-            p["u_spread"].value = (a["spread"], b["spread"])
-            p["u_turn"].value = (a["turn"], b["turn"])
+            ms, mt, msp = self.mod_sense, self.mod_turn, self.mod_spread
+            p["u_sense"].value = (a["sense"] * ms, b["sense"] * ms)
+            p["u_spread"].value = (a["spread"] * msp, b["spread"] * msp)
+            p["u_turn"].value = (a["turn"] * mt, b["turn"] * mt)
             p["u_step"].value = (a["step"], b["step"])
             p["u_gain"].value = float(self.gain)
             p["u_food"].value = max(float(self.food), 0.0)
@@ -318,6 +343,12 @@ class PhysarumFieldGL:
             wmax = mmax * min(1.0, max(float(gray.max()), 0.05)) if mmax > 0 else 0.0
             p["u_wmax"].value = wmax
             p["u_salt"].value = self._salt_value()
+            # sat's cap is in absolute trail units: sat x the trail's own
+            # bright end (last frame's 95th percentile — one frame stale,
+            # invisible on a value that moves slowly at equilibrium)
+            p["u_satcap"].value = float(self.sat) * self._last_norm
+            p["u_jitter"].value = max(float(self.jitter), 0.0)
+            p["u_hetero"].value = min(max(float(self.hetero), 0.0), 1.0)
 
             self.fbo_agents_b.use()
             self.tex_agents_a.use(0)
@@ -328,7 +359,7 @@ class PhysarumFieldGL:
             self._swap_agents()
 
             self._deposit(a["deposit"], b["deposit"])
-            self._blur_decay()
+            self._blur_decay(use_keep=keep is not None)
         self.frame += 1
 
     # ----- interactions -----
@@ -357,6 +388,14 @@ class PhysarumFieldGL:
         """Point every agent's heading away from (x, y) — one radial impulse."""
         self._impulse(2, x, y)
 
+    def gather(self, x, y, frac=0.5, radius=60.0):
+        """Rush agents already within `radius` of (x, y) into a tight knot
+        there — a LOCAL impulse that leaves the rest of the organism alone
+        (the react 'spell' move; burst teleports from the whole pool)."""
+        if frac <= 0 or radius <= 0:
+            return
+        self._impulse(3, x, y, frac, radius)
+
     # ----- picture -----
     def _stats(self):
         """(95th percentile of the trail, mean of this frame's deposits),
@@ -378,6 +417,7 @@ class PhysarumFieldGL:
         gl = self._gl
         with self.ctx:
             norm, lmean = self._stats()
+            self._last_norm = norm      # feedback for the `sat` sensing cap
             if norm <= 0:
                 return np.zeros((self.gh, self.gw), np.float32)
             gnorm = lmean * 4.0

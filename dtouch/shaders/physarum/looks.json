@@ -8,39 +8,39 @@
    "deposit": 1.0
   },
   "cells": {
-   "sense": 16.0,
-   "spread": 0.79,
-   "turn": 0.52,
-   "step": 1.1,
-   "deposit": 0.9
+   "sense": 14.0,
+   "spread": 1.1,
+   "turn": 0.3,
+   "step": 0.8,
+   "deposit": 1.0
   },
   "fingers": {
-   "sense": 5.0,
-   "spread": 0.26,
-   "turn": 1.05,
-   "step": 2.0,
-   "deposit": 1.1
+   "sense": 2.5,
+   "spread": 0.2,
+   "turn": 0.7,
+   "step": 3.4,
+   "deposit": 2.0
   },
   "haze": {
-   "sense": 3.0,
-   "spread": 1.05,
-   "turn": 0.26,
-   "step": 0.7,
-   "deposit": 0.6
+   "sense": 1.2,
+   "spread": 1.5,
+   "turn": 0.08,
+   "step": 0.35,
+   "deposit": 0.25
   },
   "web": {
-   "sense": 24.0,
-   "spread": 0.52,
-   "turn": 0.91,
-   "step": 1.6,
-   "deposit": 0.8
+   "sense": 34.0,
+   "spread": 0.5,
+   "turn": 1.1,
+   "step": 1.8,
+   "deposit": 0.6
   },
   "storm": {
-   "sense": 12.0,
-   "spread": 1.4,
-   "turn": 1.4,
-   "step": 2.4,
-   "deposit": 1.2
+   "sense": 10.0,
+   "spread": 1.55,
+   "turn": 1.7,
+   "step": 3.2,
+   "deposit": 1.4
   }
  },
  "point_names": [
@@ -59,7 +59,10 @@
   "gain": 1.0,
   "decay": 0.94,
   "exposure": 3.5,
-  "grain": 0.5
+  "grain": 0.5,
+  "weave": 0.6,
+  "evolve": 0.5,
+  "react": 0.7
  },
  "builtin": {
   "veinwork": {
@@ -70,7 +73,10 @@
    "food": 0.35,
    "gain": 1.0,
    "decay": 0.94,
-   "exposure": 3.5
+   "exposure": 3.5,
+   "weave": 0.7,
+   "evolve": 0.5,
+   "react": 0.7
   },
   "amoeba": {
    "point_bg": "cells",
@@ -80,7 +86,10 @@
    "food": 0.5,
    "gain": 1.1,
    "decay": 0.92,
-   "exposure": 3.0
+   "exposure": 3.0,
+   "weave": 0.55,
+   "evolve": 0.6,
+   "react": 0.8
   },
   "ghost": {
    "point_bg": "haze",
@@ -90,7 +99,10 @@
    "food": 0.6,
    "gain": 0.9,
    "decay": 0.96,
-   "exposure": 4.5
+   "exposure": 4.5,
+   "weave": 0.5,
+   "evolve": 0.75,
+   "react": 0.6
   },
   "lightning": {
    "point_bg": "web",
@@ -100,7 +112,10 @@
    "food": 0.45,
    "gain": 1.4,
    "decay": 0.9,
-   "exposure": 3.0
+   "exposure": 3.0,
+   "weave": 0.65,
+   "evolve": 0.6,
+   "react": 0.8
   },
   "breath": {
    "point_bg": "haze",
@@ -110,7 +125,10 @@
    "food": 0.3,
    "gain": 0.8,
    "decay": 0.95,
-   "exposure": 4.0
+   "exposure": 4.0,
+   "weave": 0.45,
+   "evolve": 0.7,
+   "react": 0.5
   }
  },
  "palette_names": [

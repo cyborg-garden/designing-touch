@@ -25,6 +25,12 @@ import numpy as np
 
 from .dither import bayer_dither, blue_noise_dither, floyd_steinberg, riemersma_dither
 
+# The CRT look is authored at ~270 scan-line periods per frame: the mask
+# pitch is round(h / SCANLINE_ROWS) rows, floored at 2 (so up to 540p this
+# is the shipped every-other-row mask; 1080p gets a 4-row pitch, 4K 8-row —
+# the lines survive window fit / projector scalers instead of averaging out).
+SCANLINE_ROWS = 270
+
 
 class CircuitBent:
     """Stateful circuit-bent camera effect with controlled stochastic behaviour.
@@ -159,10 +165,18 @@ class CircuitBent:
         # 5. Dithering (Bayer or Floyd-Steinberg, optionally at reduced res).
         out = self._apply_dither(out, h, w)
 
-        # 6. CRT scan-line overlay: darken every other row.
+        # 6. CRT scan-line overlay. The line pitch scales with the output so
+        # the lines stay visible at any resolution: a fixed every-other-row
+        # mask is 1px at 1080p/4K and vanishes entirely the moment the frame
+        # is scaled down (window fit, projector scaler, screen capture) —
+        # adjacent rows average to a uniform dim. Authored as ~SCANLINE_ROWS
+        # visible line pairs per frame; a GPU port mirrors this as
+        # floor(uv.y * SCANLINE_ROWS * 2) % 2.
         if self.scanlines:
+            p = max(2, round(h / SCANLINE_ROWS))
+            ys = np.arange(h) % p < (p // 2)
             mask = np.ones((h, 1, 1), np.float32)
-            mask[::2] = 1.0 - self.scanline_strength
+            mask[ys] = 1.0 - self.scanline_strength
             out = out * mask
 
         out = np.clip(out, 0.0, 1.0)
