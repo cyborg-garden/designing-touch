@@ -101,7 +101,7 @@
    "decay": 0.96,
    "exposure": 4.5,
    "weave": 0.5,
-   "evolve": 0.4,
+   "evolve": 0.65,
    "react": 0.6
   },
   "lightning": {
@@ -127,7 +127,7 @@
    "decay": 0.95,
    "exposure": 4.0,
    "weave": 0.45,
-   "evolve": 0.35,
+   "evolve": 0.55,
    "react": 0.5
   }
  },

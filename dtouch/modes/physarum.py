@@ -115,13 +115,13 @@ class PhysarumMode:
                           weave=0.55, evolve=0.6, react=0.8),
         "ghost":     dict(point_bg="haze", point_fg="web", palette="mono",
                           matte="person", food=0.60, gain=0.9, decay=0.96, exposure=4.5,
-                          weave=0.5, evolve=0.4, react=0.6),
+                          weave=0.5, evolve=0.65, react=0.6),
         "lightning": dict(point_bg="web", point_fg="fingers", palette="violet",
                           matte="edges", food=0.45, gain=1.4, decay=0.90, exposure=3.0,
                           weave=0.65, evolve=0.6, react=0.8),
         "breath":    dict(point_bg="haze", point_fg="cells", palette="aurora",
                           matte="luma", food=0.30, gain=0.8, decay=0.95, exposure=4.0,
-                          weave=0.45, evolve=0.35, react=0.5),
+                          weave=0.45, evolve=0.55, react=0.5),
     }
 
     # apply="reset" merges a look over these; matte / video_bg / video_mix are
@@ -428,15 +428,20 @@ class PhysarumMode:
         weave_base = weave
         if evolve > 0:
             tau = self._t * (2.0 * np.pi)
+            # the structural movers ride sqrt(evolve): a woven mesh anchors
+            # itself hard (measured: mid evolve barely decorrelated a dense
+            # web at 10 s lag), so mid-slider needs near-full reorganizing
+            # strength while the top stays the same
+            es = float(np.sqrt(evolve))
             gain *= 1.0 + 0.22 * evolve * np.sin(tau / 19.0)
             food *= 1.0 + 0.45 * evolve * np.sin(tau / 23.0 + 4.2)
             decay = min(max(decay + 0.02 * evolve * np.sin(tau / 29.0 + 2.1),
                             0.80), 0.995)
             weave = min(max(weave + 0.30 * evolve * np.sin(tau / 31.0 + 1.0),
                             0.0), 1.0)
-            pf.mod_sense = 1.0 + 0.50 * evolve * np.sin(tau / 17.0 + 0.7)
-            pf.mod_turn = 1.0 + 0.35 * evolve * np.sin(tau / 27.0 + 3.4)
-            pf.mod_spread = 1.0 + 0.30 * evolve * np.sin(tau / 13.0 + 5.5)
+            pf.mod_sense = 1.0 + 0.50 * es * np.sin(tau / 17.0 + 0.7)
+            pf.mod_turn = 1.0 + 0.35 * es * np.sin(tau / 27.0 + 3.4)
+            pf.mod_spread = 1.0 + 0.30 * es * np.sin(tau / 13.0 + 5.5)
         else:
             pf.mod_sense = pf.mod_turn = pf.mod_spread = 1.0
 
@@ -501,7 +506,8 @@ class PhysarumMode:
             sig = 0.16 * min(gw, gh)
             blob = np.exp(((self._hcx - fx) ** 2 + (self._hcy - fy) ** 2)
                           * np.float32(-1.0 / (2.0 * sig * sig)))
-            gray = gray + (0.9 * evolve) * cv2.resize(blob, (gw, gh))
+            # sqrt(evolve), same reasoning as the structural movers above
+            gray = gray + (1.1 * np.sqrt(evolve)) * cv2.resize(blob, (gw, gh))
 
         self._burst_cool = max(getattr(self, "_burst_cool", 0.0) - dt, 0.0)
         keep = None
