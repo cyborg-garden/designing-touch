@@ -192,6 +192,10 @@ class PhysarumField:
         that ripples the whole organism outward, then the mold reknits."""
         self.heading = np.arctan2(self.py - y, self.px - x).astype(np.float32)
 
+    # ----- lifecycle -----
+    def release(self):
+        """Nothing to free — here so both engines share one stop() contract."""
+
     # ----- picture -----
     def luminance(self):
         """Tonemapped trail in [0,1] float32 (gh, gw) — the mode colorizes it.
