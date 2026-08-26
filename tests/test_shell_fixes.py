@@ -80,6 +80,22 @@ def _booted(tmp_path, **kw):
     return host
 
 
+def _free_a_bank_slot(host):
+    """Clear one built-in off the bank so a user look has somewhere to land.
+
+    Dither ships nine built-ins and the bank is nine slots, so a fresh
+    instance boots with NO free slot and `_assign_slot` correctly refuses with
+    "bank full (1-9)". Tests about assigning a slot have to make one, and the
+    documented way is a second badge click on an already-banked look.
+    """
+    ui = host.ui
+    slot = max(ui.bank, key=int)
+    ui.pending_slot = ui.bank[slot]
+    host._pump_preset_mailboxes()
+    assert slot not in ui.bank
+    return slot
+
+
 def _hints(host):
     return [t.text for t in host.hud.toasts._hints]
 
@@ -355,7 +371,7 @@ def test_panic_key_via_shell_wiring_lands_on_safe_look(tmp_path):
     host.ps.blackout = True
     host.reg.dispatch(ord("0"))
     assert host.ps.blackout is False and host.ui.glitch is False
-    assert host.ui.pending_preset == "classic"       # the mode's safe look
+    assert host.ui.pending_preset == "menu"          # the mode's safe look
 
 
 # ---------- switch-away-and-back contract (amended DESIGN.md §6.2) ----------
@@ -392,8 +408,7 @@ def test_first_entry_applies_safe_look_reentry_preserves_settings(
     host._source.on_read = on_read
     host.run()
     # first entry landed on the safe look
-    assert seen["after_first_entry"] == ("classic",
-                                         ALGOS.index("Floyd-Steinberg"))
+    assert seen["after_first_entry"] == ("menu", ALGOS.index("Blue noise"))
     # re-entry preserved the operator's settings — no safe_look re-post
     assert host.mode.id == "other"
     assert host.ui.dg_algo_idx == ALGOS.index("Bayer")
@@ -465,6 +480,7 @@ def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
     name = next(iter(ui.user_presets))
     ui.renaming = None                       # close any auto-opened rename box
     ui.preset_idx = ui.presets.index(name)
+    _free_a_bank_slot(host)
     ui.pending_slot = name                   # assign a bank slot
     host._pump_preset_mailboxes()
     slot = next(s for s, n in ui.bank.items() if n == name)
@@ -665,6 +681,8 @@ def test_every_store_mailbox_survives_a_full_disk(tmp_path, monkeypatch,
     host._pump_preset_mailboxes()                    # a real look to act on
     host.ui.renaming = None
     name = next(iter(host.ui.user_presets))
+    if mailbox == "pending_slot":
+        _free_a_bank_slot(host)              # else the assign never reaches disk
     _full_disk(monkeypatch, call)
     setattr(host.ui, mailbox, value(name))
     host._pump_preset_mailboxes()                    # must not raise

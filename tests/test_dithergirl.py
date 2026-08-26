@@ -6,6 +6,7 @@ swatch caching, preset capture/apply round-trips (incl. the nested "signal"
 block and the suppressed dither row), bank seeding, still input, and the
 shell-command wiring for menu + direct mode keys.
 """
+import itertools
 import time
 
 import cv2
@@ -22,7 +23,7 @@ from dtouch.modes.dithergirl import (ACCENT, ALGOS, AUTHORED_INVERSE,
                                      DitherGirlMode, palette_pair)
 from dtouch.modes.particles import MATTE_H, MATTE_W, ParticlesMode
 from dtouch.panelspec import Cycle, Readout, Section, Slider, Toggle
-from dtouch.shell import Host
+from dtouch.shell import BANK_SEED_MAX, BANK_SLOTS, Host
 
 RES = (192, 108)
 
@@ -81,7 +82,9 @@ def test_mode_protocol_attrs():
     assert m.id == "dithergirl" and m.title == "Dither"
     assert m.accepts_still is True
     assert m.accent == ACCENT
-    assert m.safe_look() == "classic"
+    # the boot / panic look is the one the mode selector itself wears
+    assert m.safe_look() == "menu"
+    assert m.safe_look() in DitherGirlMode.BUILTIN
     assert "dither" in m.claims
 
 
@@ -117,14 +120,16 @@ def test_status_line_is_spec_derived_and_ascii(tmp_path):
     host = _booted(tmp_path)
     s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
-    # no "bias auto" here: under Floyd-Steinberg bias does nothing, so its
-    # row is hidden (panelspec.visible) and the status line skips it too
-    assert s == "DITHER  floyd-steinberg  1-bit  src synthetic"
-    host.ui.dg_algo_idx = ALGOS.index("Blue noise")
+    # the boot look is `menu` -- Blue noise, an ORDERED dither, so the bias
+    # row is visible (panelspec.visible) and the status line carries it
+    assert s == "DITHER  blue noise  1-bit  bias auto  src synthetic"
+    host.ui.dg_algo_idx = ALGOS.index("Floyd-Steinberg")
     host.ui.dg_bits = 3.0
     host.ui.input_idx = 1                    # still input -> src tail follows
+    # ...and no "bias auto" here: under Floyd-Steinberg bias does nothing, so
+    # its row is hidden and the status line drops it too. Same spec, both ways.
     assert (host._status_line()
-            == "DITHER  blue noise  3-bit  bias auto  src still")
+            == "DITHER  floyd-steinberg  3-bit  src still")
 
 
 # ---------- panel spec structure (DESIGN.md §4.2) ----------
@@ -417,7 +422,11 @@ def test_swatch_blit_is_clipped_when_scrolled_off_frame(tmp_path):
 def test_slow_warning_only_for_error_diffusion_at_high_scale(tmp_path):
     host = _booted(tmp_path)
     ui, m = host.ui, host.mode
-    assert m.slow_warning() is False                     # classic: FS at 72
+    # set the algorithm this test is ABOUT rather than leaning on the boot
+    # look to supply it (the boot look is `menu`: Blue noise at 360, ordered)
+    ui.dg_algo_idx = ALGOS.index("Floyd-Steinberg")
+    ui.dg_scale = 72.0
+    assert m.slow_warning() is False                     # FS at 72
     ui.dg_scale = 400.0
     assert m.slow_warning() is True                      # FS dragged high
     ui.dg_algo_idx = ALGOS.index("Bayer")
@@ -501,6 +510,7 @@ def test_perf_note_wraps_inside_the_panel_column_at_720p(tmp_path):
     over the picture)."""
     host = _booted(tmp_path)
     ui, m = host.ui, host.mode
+    ui.dg_algo_idx = ALGOS.index("Floyd-Steinberg")      # not the boot look's
     ui.dg_scale = 400.0                                  # FS high: note on
     g = _gui()                                           # s = 1.0 (720p floor)
     frame = np.zeros((720, 1280, 3), np.uint8)
@@ -578,10 +588,13 @@ def test_bass_modulates_contrast_only_when_levels_present(tmp_path):
 
 # ---------- presets: capture/apply round-trip + bank (DESIGN.md §7) ----------
 
-def test_boot_applies_the_safe_look_classic(tmp_path):
+def test_boot_applies_the_safe_look(tmp_path):
+    """Boot lands on safe_look() -- `menu`, the look the mode selector wears."""
     host = _booted(tmp_path)
-    assert host.ui.preset_name == "classic"
-    assert ALGOS[host.ui.dg_algo_idx] == "Floyd-Steinberg"
+    assert host.ui.preset_name == DitherGirlMode().safe_look()
+    assert host.ui.preset_name == "menu"                 # the shipped value
+    assert ALGOS[host.ui.dg_algo_idx] == "Blue noise"
+    assert host.ui.dg_scale == 360.0
 
 
 def test_capture_includes_tone_and_nested_signal_minus_dither(tmp_path):
@@ -636,9 +649,16 @@ def test_user_look_save_recall_bank_round_trip_via_the_panel_path(tmp_path):
     name = next(iter(ui.user_presets))
     assert ui.renaming == name                           # naming is one flow
     ui.renaming = None
+    # A fresh instance holds slots open on purpose (BANK_SEED_MAX), so saving
+    # a first look must just work — no badge-clearing ritual first. That is
+    # the regression this pins: nine built-ins once filled all nine slots and
+    # the first save failed with "bank full (1-9)".
+    expected = str(BANK_SEED_MAX + 1)
+    assert expected not in ui.bank, "a fresh bank must have room to save into"
     ui._activate("slot", name, 0)                        # slot badge click
     host._pump_preset_mailboxes()
     slot = next(s for s, n in ui.bank.items() if n == name)
+    assert slot == expected                              # the next free number
     assert _presets.bank(host.presets_path, mode="dithergirl")[slot] == name
     # scramble, then recall through the panel's preset-row click path
     ui.dg_algo_idx, ui.dg_bits = 0, 1.0
@@ -651,10 +671,20 @@ def test_user_look_save_recall_bank_round_trip_via_the_panel_path(tmp_path):
     assert host2.ui.bank[slot] == name
 
 
-def test_builtins_seed_bank_slots(tmp_path):
+def test_builtins_seed_bank_slots_and_leave_room(tmp_path):
+    """The bank is a performance setlist, not a catalogue. It seeds from the
+    built-ins in order but stops short of filling every slot, so a first save
+    has somewhere to land without the user clearing a badge first."""
     host = _booted(tmp_path)
     builtins = list(DitherGirlMode.BUILTIN)
-    assert host.ui.bank == {str(i + 1): n for i, n in enumerate(builtins[:9])}
+    assert BANK_SEED_MAX < BANK_SLOTS, "the seed must leave a slot to save into"
+    assert host.ui.bank == {str(i + 1): n
+                            for i, n in enumerate(builtins[:BANK_SEED_MAX])}
+    free = [str(i) for i in range(1, BANK_SLOTS + 1) if str(i) not in host.ui.bank]
+    assert len(free) >= 2, free
+    # every built-in past the seed is still reachable through the preset list
+    for n in builtins[BANK_SEED_MAX:]:
+        assert n in host.ui.presets
 
 
 def test_bank_recall_applies_a_builtin(tmp_path):
@@ -863,12 +893,14 @@ def test_palettes_stay_distinct_at_the_bit_depths_the_mode_ships():
 
     Measured at Bits 2-4 (closest pair: amber/hi-vis, 11.9-12.4).
 
-    Bits 1 is deliberately NOT asserted here: at one bit every palette is
-    its END PAIR by construction, and the multi-colour ramps are documented
-    as alive from Bits 2 up. It is a real narrowing of the cycle at that
-    depth — `cga` and `mono` render identical, and aurora/cga, mono/aurora
-    and ultraviolet/vaporwave sit at 5.0-7.3 — and which way to resolve it
-    is a design call, not something a test should pin as desirable.
+    Bits 1 is asserted separately, in
+    `test_every_multi_colour_palette_is_its_own_colour_at_one_bit`. It used to
+    be excluded here: at one bit every palette rendered as its END PAIR by
+    construction, so `cga` and `mono` came out identical and aurora/cga,
+    mono/aurora and ultraviolet/vaporwave sat at 5.0-7.3. That was called out
+    as a design call rather than pinned as desirable; the design call has since
+    been made (low_depth_stops takes the most chromatic legible stop as ink at
+    two levels), so 1 bit now clears the same 8.0 bar the depths below do.
     """
     import itertools
 
@@ -884,6 +916,111 @@ def test_palettes_stay_distinct_at_the_bit_depths_the_mode_ships():
             d = float(np.abs(ramps[a] - ramps[b]).mean())
             assert d >= 8.0, \
                 f"at {bits} bits, {a} vs {b} render only {d:.1f} apart"
+
+
+# ---------- low bit depths: the 1-bit collapse (DESIGN.md §4.2) ----------
+#
+# At two quantisation levels a multi-colour ramp used to render as its END
+# PAIR, which every ramp deliberately keeps ink-dark against a bright top for
+# the 4.5:1 floor — so at Bits 1 the six multi-colour palettes each collapsed
+# to a greyscale, and `cga` came out byte-identical to `mono`. `_MULTI` is
+# derived from PALETTES so a new ramp is covered without touching these.
+
+_MULTI = [n for n, s in PALETTES.items() if len(s) > 2]
+_DUOTONE = [n for n, s in PALETTES.items() if len(s) == 2]
+
+# Concrete shipped values, so this pins the bytes rather than deriving both
+# sides of the comparison from PALETTES.
+_DUOTONE_PINS = {
+    "mono": ((0, 0, 0), (255, 255, 255)),
+    "amber": ((24, 12, 0), (255, 176, 0)),
+    "sepia": ((236, 224, 198), (54, 36, 24)),
+}
+
+
+def test_every_multi_colour_palette_is_its_own_colour_at_one_bit():
+    """The defect: at Bits 1 every multi-colour ramp rendered as its END pair
+    — a monochrome of one hue — so `mono` and `cga` came out BYTE-IDENTICAL
+    (mean-abs 0.0) and aurora/cga and mono/aurora sat at 5.0, far under the
+    8.0 perceptibility bar the rest of the palette suite is held to.
+
+    Measured the same way as `test_every_palette_is_distinct_from_every_other`
+    and at the same threshold, but through the two levels a 1-bit dither
+    actually emits, and across ALL palettes: a ramp that is merely distinct
+    from the other ramps but collapses onto a duotone at 1 bit is still a dead
+    cycle stop at the depth the mode boots on.
+    """
+    from dtouch.modes.dithergirl import low_depth_stops, palette_stops
+
+    assert len(_MULTI) >= 6, "the multi-colour set shrank - check PALETTES"
+    pairs = {n: low_depth_stops(palette_stops(n), 2) for n in _MULTI}
+    for a, b in itertools.combinations(_MULTI, 2):
+        assert pairs[a] != pairs[b], \
+            f"at 1 bit, {a} and {b} take the same two colours {pairs[a]}"
+
+    # ...and it reaches the picture, not just the helper.
+    lv = np.array([[0.0, 1.0]], np.float32)          # what 1 bit emits
+    ramps = {n: DitherGirlMode._palette_map(
+                 lv, low_depth_stops(palette_stops(n), 2)).astype(np.float32)
+             for n in PALETTES}
+    for a, b in itertools.combinations(PALETTES, 2):
+        d = float(np.abs(ramps[a] - ramps[b]).mean())
+        assert d >= 8.0, f"at 1 bit, {a} vs {b} render only {d:.1f} apart"
+
+
+def test_the_one_bit_pair_still_clears_the_legibility_floor():
+    """Preferring chroma over brightness must not buy colour with contrast —
+    the 4.5:1 floor is the same one every duotone is measured against."""
+    from dtouch.modes.dithergirl import (LEGIBILITY_FLOOR, contrast_ratio,
+                                         low_depth_stops, palette_stops)
+
+    for name in _MULTI:
+        for invert in (False, True):
+            ground, ink = low_depth_stops(palette_stops(name, invert), 2)
+            cr = contrast_ratio(ground, ink)
+            assert cr >= LEGIBILITY_FLOOR, \
+                f"{name}{' inverted' if invert else ''} at 1 bit: {cr:.2f}:1"
+
+
+def test_the_one_bit_ink_is_more_chromatic_than_the_ramp_end():
+    """The mechanism has to actually fire: the ink taken at two levels is a
+    MIDDLE stop chosen for chroma, not the ramp's (near-white) last stop."""
+    from dtouch.modes.dithergirl import (_chroma, low_depth_stops,
+                                         palette_stops)
+
+    for name in _MULTI:
+        stops = palette_stops(name)
+        ground, ink = low_depth_stops(stops, 2)
+        assert ground == stops[0]                    # the dark end is kept
+        assert ink != stops[-1], f"{name} still takes its brightest stop"
+        assert _chroma(ink) > _chroma(stops[-1]), \
+            f"{name}: ink {ink} is no more colourful than the ramp end"
+
+
+@pytest.mark.parametrize("name", _DUOTONE)
+@pytest.mark.parametrize("levels", [2, 3, 4, 8, 16])
+def test_duotones_are_untouched_at_every_depth(name, levels):
+    """Every look predating the ramps stays bit-exact: a 2-stop palette has no
+    middle to prefer, so low_depth_stops must be the identity on it."""
+    from dtouch.modes.dithergirl import low_depth_stops
+
+    stops = tuple(tuple(c) for c in PALETTES[name])
+    assert low_depth_stops(stops, levels) == stops
+    if name in _DUOTONE_PINS:                    # ...and they are these bytes
+        assert low_depth_stops(PALETTES[name], levels) == _DUOTONE_PINS[name]
+
+
+@pytest.mark.parametrize("levels", [3, 4, 8, 16])
+def test_above_two_levels_every_palette_walks_its_whole_ramp(levels):
+    """The special case must not leak upward — from Bits 2 the ramps come
+    alive by walking every stop, which is the whole point of them."""
+    from dtouch.modes.dithergirl import low_depth_stops, palette_stops
+
+    for name in PALETTES:
+        for invert in (False, True):
+            stops = palette_stops(name, invert)
+            assert low_depth_stops(stops, levels) == stops, \
+                f"{name} at {levels} levels lost stops"
 
 
 # ---------- Invert, and the migration off the retired pair (§4.2) ----------
@@ -1385,9 +1522,15 @@ def test_ascii_builtins_are_shipped_and_apply(tmp_path):
 
 
 def test_the_safe_look_is_still_a_pixel_dither():
-    """DESIGN.md §6.2: `0` must walk OUT of ASCII to a known-good picture."""
-    assert (DitherGirlMode.BUILTIN[DitherGirlMode().safe_look()]["algorithm"]
-            == "Floyd-Steinberg")
+    """DESIGN.md §6.2: `0` must walk OUT of ASCII to a known-good picture.
+
+    Which pixel dither is the panic target is the boot look's business and it
+    has changed before; that it is a PIXEL dither is the invariant -- ASCII
+    can never be the thing `0` walks you out of ASCII into.
+    """
+    look = DitherGirlMode.BUILTIN[DitherGirlMode().safe_look()]
+    assert look["algorithm"] in ALGOS
+    assert look["algorithm"] != "ASCII"
 
 
 def test_nudging_a_stored_fraction_lands_scale_back_on_the_grid(tmp_path):

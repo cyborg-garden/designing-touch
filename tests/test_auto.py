@@ -89,3 +89,41 @@ def test_toggle_round_trips():
     a = Autopilot(seed=1)
     assert a.toggle() is True and a.on
     assert a.toggle() is False and not a.on
+
+
+# ---------- the shell wiring ----------
+
+def test_the_menu_card_toggles_the_hosts_autopilot(tmp_path):
+    """End to end through the real routing contract: open the menu, press the
+    AUTO card's letter, and the host's autopilot is running."""
+    import numpy as np
+    from dtouch.shell import Host
+    from dtouch.modes.physarum import PhysarumMode
+
+    class Syn:
+        name = "synthetic"
+        def read(self): return True, np.zeros((36, 64, 3), np.uint8)
+        def release(self): pass
+
+    host = Host(PhysarumMode(engine="cpu", grid=(64, 36), n=200), source=Syn(),
+                res=(64, 36), show=False, max_frames=1,
+                presets_path=str(tmp_path / "p.json"),
+                state_path=str(tmp_path / "s.json"))
+    host.run()
+    assert not host.auto.on
+    host.menu.show("physarum")
+    host._route_key(ord("a"))
+    assert host.auto.on, "the AUTO card did not reach the autopilot"
+    host._route_key(ord("a"))          # not the menu now: 'a' is audio.toggle
+    assert host.auto.on, "a non-scene key released the autopilot"
+    host._route_key(ord("3"))          # a look recall IS a scene key
+    assert not host.auto.on
+
+
+def test_casts_do_not_release_but_scene_keys_do():
+    """You should be able to lean on an instrument someone else is playing."""
+    from dtouch.shell import AUTO_RELEASE_KEYS
+    for ch in "bwgairz?m":             # casts, toggles, Z's random cast
+        assert ord(ch) not in AUTO_RELEASE_KEYS, ch
+    for ch in "1590[],.-=xpdo":        # looks, nudges, swap, mode switches
+        assert ord(ch) in AUTO_RELEASE_KEYS, ch

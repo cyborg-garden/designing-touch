@@ -32,6 +32,7 @@ from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
                   draw_corner_tick, draw_help, esc_overlay, put_outlined,
                   u as _u)
 from .imgui import DIM, HOVER, PANEL, in_rect
+from .auto import Autopilot
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
@@ -39,6 +40,25 @@ from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
                         display_fmt, nudge_to, nudgeable, visible)
 from . import presets as _presets
+
+# Keys that release the autopilot. Anything that changes WHICH SCENE is on
+# screen: look recall and stepping, parameter selection and nudges, the
+# physarum point swap, mode switches, panic.
+#
+# Deliberately NOT the casts and toggles — burst, wave, Z's random cast,
+# glitch, audio, record, menu, help, debug, save. You should be able to throw
+# a burst over a running autopilot without ending it, the same way you can
+# lean on an instrument someone else is playing; Z in particular is a cast,
+# not a takeover. The rule has to be learnable by accident, so it is one set
+# in one place rather than a per-command flag.
+# Bank slots (keys 1-9) seeded from a mode's built-ins at first boot. Short of
+# nine on purpose — see _seed_bank_setlist.
+BANK_SLOTS = 9
+BANK_SEED_MAX = 7
+
+AUTO_RELEASE_KEYS = frozenset(
+    [ord(c) for c in "0123456789[],.-=_+xpdo"]
+)
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
 RESUME_HINT = "enter resumes"    # boot-menu hint prefix; retired when Enter lands
@@ -483,6 +503,7 @@ class Host:
         self.ps = PerformState()
         self.reg = CommandRegistry()
         self.menu = Menu()                # home menu — a shell overlay state (§3)
+        self.auto = Autopilot()           # the AUTO card — dtouch.auto
         self.pending_mode = None          # mode id posted by a key/menu commit
         self._mode_instances = {}         # id -> constructed Mode (reused on switch)
         self._mode_preset = {}            # id -> last selected look (re-entry)
@@ -748,13 +769,47 @@ class Host:
                 # the reserved card is on screen and dashed: name it, rather
                 # than deflect to a key map that cannot explain it either
                 self.hud.toasts.hint(f"{mode_id.lower()} - coming soon")
+            elif action == "auto":
+                self._toggle_auto()
             elif action == "unknown":
                 self.hud.toasts.hint("? for keys")
             return
         if self.ui is not None and self.ui.on_key(key):
-            return
+            return                             # rename typing eats the key
+        if key in AUTO_RELEASE_KEYS and self.auto.interrupt():
+            self.hud.toasts.hint("auto off - you took over")
         self.overlay = _perform_key(key, self.overlay, self.ps,
                                     self.reg, self.hud)
+
+    def _toggle_auto(self):
+        on = self.auto.toggle()
+        self.hud.toasts.hint("auto on - it plays itself, any scene key stops it"
+                             if on else "auto off")
+
+    def _auto_tick(self, dt):
+        """One autopilot step, folded into the ordinary mailboxes.
+
+        Everything it does is something a person could have done from the
+        keyboard: post a look, post a mode, dispatch a named command. It gets
+        no private reach into the mode, which is what keeps "it is playing"
+        and "I am playing" the same code path.
+        """
+        if not self.auto.on or self.mode is None or self.ui is None:
+            return
+        looks = list(self.all_presets.keys())
+        modes = [m.id for m in REGISTRY]
+        for kind, value in self.auto.tick(dt, self.mode.id, looks, modes):
+            if kind == "preset":
+                self.ui.pending_preset = value
+            elif kind == "mode":
+                self.pending_mode = value
+            elif kind == "command":
+                cmd = self.reg.get(value)
+                if cmd is not None:      # a cast the current mode does not
+                    cmd.run()            # have is a hint, not a demand
+        if self.auto.last_reason:
+            self.hud.toasts.hint(f"auto - {self.auto.last_reason}")
+            self.auto.last_reason = ""
 
     def _draw_waiting_note(self, img):
         """No frame has ever arrived (DESIGN.md §6.4): a plain-language
@@ -805,7 +860,7 @@ class Host:
         if stored is not None:
             ui.bank = stored
         else:
-            builtin = list(getattr(self.mode, "BUILTIN", {}))[:9]
+            builtin = list(getattr(self.mode, "BUILTIN", {}))[:BANK_SEED_MAX]
             ui.bank = {str(i + 1): n for i, n in enumerate(builtin)}
         ui.setlist = _presets.setlist(self.presets_path, mode=self.mode.id) or []
 
@@ -1556,6 +1611,7 @@ class Host:
                     # stall. The failure paths reset the clock too, so this cap
                     # is the backstop, not the mechanism.
                     dt, last_t = min(now_t - last_t, DT_MAX), now_t
+                    self._auto_tick(dt)
                     levels = (self.mic.levels()
                               if self.mic is not None and self.mic.available
                               else None)

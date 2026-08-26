@@ -26,7 +26,9 @@ Scanlines/dither/Bits/Gamma/bias = 0.000 in every mode with Glitch off
 (13.7-56.0 with it on); Cohere/Align/Separate = 0.000 with Flock off
 (15.5-32.5 on); Vid mix = 0.000 with Video bg off (31.4-51.1 on); Dither
 mode's bias = 0.000 under the error-diffusion algorithms (72.9 under Bayer)
-and its Hue = 0.000 at Tint 0 (9.1 with Tint up).
+and its Hue = 0.000 at Tint 0 (9.1 with Tint up). Note bias is the one gate
+whose OFF state is not the boot state: Dither boots on `menu`, an ordered
+dither, so the row is drawn and live there — see GATE_OFF.
 """
 import itertools
 import os
@@ -197,8 +199,6 @@ SKIP = {
 }
 
 # attr -> the state overrides under which a show_when-gated control acts.
-# The off state is always the mode's boot default ({}), where every one of
-# these measured exactly 0.000 in the audit sweep.
 GATE_ON = {
     "dither_idx": {"glitch": True},
     "sig_px": {"glitch": True},
@@ -217,6 +217,17 @@ GATE_ON = {
     "dg_matte_black": {"dg_matte_idx": 2},     # motion matte on
     "dg_hue": {"dg_tint": 0.6},
     "dg_bias_idx": {"dg_algo_idx": 0},         # Bayer (ordered)
+}
+
+# attr -> the state overrides under which a show_when-gated control is HIDDEN.
+# The boot state ({}) is the off state for almost every gate — that is where
+# they all measured exactly 0.000 in the audit sweep — but it is not a safe
+# default: `dg_bias_idx` hides under error diffusion, and Dither's boot look
+# is `menu`, whose Blue noise IS an ordered dither, so at boot that row is
+# both drawn and live. Naming the off state explicitly keeps the sweep
+# measuring the gate rather than whichever look happens to boot.
+GATE_OFF = {
+    "dg_bias_idx": {"dg_algo_idx": 2},         # Floyd-Steinberg (diffusion)
 }
 
 # (mode, attr) -> extra overrides for the gate-ON perceptibility check.
@@ -307,24 +318,27 @@ def test_gated_controls_are_dead_exactly_where_hidden(mode_id, tmp_path):
         assert w.attr in GATE_ON, (
             f"[{mode_id}] {w.attr} declares show_when but has no gate-ON "
             f"state registered here — add one so both sides stay tested")
-        d = _max_diff(mode_id, {}, w.attr,
+        off = dict(GATE_OFF.get(w.attr, {}))
+        d = _max_diff(mode_id, off, w.attr,
                       _candidates(w, on_check=False), tmp_path)
         if d >= FLOOR:
-            failures.append(f"{w.attr} ({w.label}): {d:.3f} in the hidden "
-                            f"state — the gate is hiding a live control")
+            failures.append(f"{w.attr} ({w.label}) in {off or 'base'}: "
+                            f"{d:.3f} in the hidden state — the gate is "
+                            f"hiding a live control")
     assert not failures, f"[{mode_id}]:\n  " + "\n  ".join(failures)
 
 
 @pytest.mark.parametrize("mode_id", sorted(_MODES))
 def test_gate_states_match_visibility(mode_id):
     """The show_when predicates agree with the states the sweep uses: hidden
-    in the boot state, shown in the registered gate-ON state. Pure spec — no
-    rendering — so it also covers the mic-gated Sens row."""
+    in the registered gate-OFF state, shown in the registered gate-ON state.
+    Pure spec — no rendering — so it also covers the mic-gated Sens row."""
     for w, gated in _controls(mode_id):
         if not gated:
             continue
-        assert not visible(SimpleNamespace(), w), \
-            f"[{mode_id}] {w.attr} should hide in the boot state"
+        off_state = GATE_OFF.get(w.attr, {})
+        assert not visible(SimpleNamespace(**off_state), w), \
+            f"[{mode_id}] {w.attr} should hide in {off_state or 'the base state'}"
         on = SimpleNamespace(**GATE_ON[w.attr])
         assert visible(on, w), \
             f"[{mode_id}] {w.attr} should draw in {GATE_ON[w.attr]}"

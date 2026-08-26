@@ -163,8 +163,8 @@ def test_a_mode_flag_still_wins_but_an_alien_preset_is_called_out(
     host = launch("--mode", "dithergirl", "--preset", "embers")
     out = capsys.readouterr().out
     assert 'preset "embers" is not a Dither look' in out
-    assert "booting classic" in out
-    assert host.kw["preset"] == "classic"           # the mode's safe look
+    assert "booting menu" in out
+    assert host.kw["preset"] == "menu"              # the mode's safe look
 
 
 def test_a_preset_the_booted_mode_owns_passes_through_quietly(

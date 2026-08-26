@@ -375,7 +375,7 @@ def test_switch_to_dithergirl_mid_loop_preserves_perform_state(tmp_path):
 
     assert host.mode.id == "dithergirl"
     assert host.ui.accent == ACCENT
-    assert host.ui.preset_name == "classic"              # landed on the safe look
+    assert host.ui.preset_name == "menu"                 # landed on the safe look
     titles = [s.title for s in host.ui.spec
               if hasattr(s, "title")]
     assert "ALGORITHM" in titles and "LOOK" not in titles
