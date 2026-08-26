@@ -83,7 +83,7 @@ REGIME_KEYS = ("sense", "turn", "spread", "step", "deposit", "gain", "food")
 # weave measured 0.044 at 0.3 against a 0.06 floor while reaching 0.448 at
 # 1.0, and evolve 0.065 against 0.08 while reaching 0.138. The mechanisms got
 # far stronger at the top and the curve no longer compensated at the bottom.
-FEEL_CURVE = 0.35
+FEEL_CURVE = 0.30
 
 REGIME_FADE = 3.0                # crossfade, seconds — decisive, not a jump cut
 REGIME_DWELL = (15.0, 45.0)      # dwell range, seconds, order randomized
@@ -662,7 +662,16 @@ class PhysarumMode:
         # stops being one texture everywhere — territories, fronts, dark walls.
         # This is the lever that makes weave visible in under a second, which
         # the old satcap/jitter/reseed bundle never managed.
-        pf.cross = w
+        # 0.68, not 1.0. The coefficient is a LOOK decision, not a spare
+        # scale factor: an audit measured the default look's vein contrast
+        # (p99/median) at 166 with 0.68 and 22.2 with 1.0 — the bottom edge of
+        # the 20-50x band docs/ALIVENESS.md uses to define the original bug,
+        # with the frame 80% brighter. Side by side, 0.68 is bold trunks
+        # against real black with capillaries between them; 1.0 is a uniform
+        # bright bundle, which is the complaint this project started from.
+        # tests/test_physarum_alive.py pins the contrast so it cannot drift
+        # again on the way to satisfying some other floor.
+        pf.cross = 0.68 * w
         pf.sharpen = 0.18 * w
         pf.diffuse = max(1, round(self._base_diffuse
                                   * (1.0 - 0.45 * weave_base ** FEEL_CURVE)))

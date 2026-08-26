@@ -68,10 +68,17 @@ def test_the_auto_card_commits_to_its_own_verb_not_a_mode_switch():
 
 
 def test_the_auto_card_is_reachable_by_digit_and_click_too():
+    """The name of this test used to be a lie: it exercised the digit only,
+    and a CLICK on the AUTO card returned None, so the menu closed and
+    nothing happened while the letter key worked fine."""
     m = Menu()
     m.show("physarum")
     i = [c.id for c in m.cards].index(AUTO_ID)
     assert m.key(ord(str(i + 1))) == ("auto", None)
+
+    m.show("physarum")
+    m.rects = [((0, 0, 10, 10), m.cards[i])]
+    assert m.click((5, 5)) == ("auto", None)
 
 
 def test_card_strings_are_ascii_only():
@@ -286,7 +293,7 @@ def test_click_commits_the_card_under_the_pointer():
     cam = np.full((36, 64, 3), 128, np.uint8)
     m.rects = draw_menu(frame, cam, m.cards, m.sel)
     (x0, y0, x1, y1), card = m.rects[1]
-    assert m.click(((x0 + x1) // 2, (y0 + y1) // 2)) == "dithergirl"
+    assert m.click(((x0 + x1) // 2, (y0 + y1) // 2)) == ("switch", "dithergirl")
     assert m.open is False
 
 
@@ -295,8 +302,8 @@ def test_click_on_disabled_card_or_background_does_nothing():
     frame = np.zeros((720, 1280, 3), np.uint8)
     m.rects = draw_menu(frame, np.full((36, 64, 3), 128, np.uint8), m.cards, m.sel)
     (x0, y0, x1, y1), card = m.rects[2]                  # flocking
-    assert m.click(((x0 + x1) // 2, (y0 + y1) // 2)) is None
-    assert m.click((5, 5)) is None
+    assert m.click(((x0 + x1) // 2, (y0 + y1) // 2)) == (None, None)
+    assert m.click((5, 5)) == (None, None)
     assert m.open is True
 
 

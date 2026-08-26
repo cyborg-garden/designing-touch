@@ -134,9 +134,12 @@ Phase 1 — restore the physics (shared shaders; local and web both):
 6. Re-spread POINTS so no point is steering-blind; add a test asserting
    `sense*scale >= sigma_blur`, `2*sense*scale*sin(spread) >= 1.5*sigma_blur`
    and `step < sense`, FOR BOTH ENGINES. (The first draft of this line said
-   3*sigma. Nothing in the shipped table clears that — `veins` misses it on
-   the GL grid — so the criterion is 1.5, and the number here was wrong rather
-   than the points. The engine-pair matters more than the constant: checking
+   3*sigma. Every point clears that on the GL grid; three — `veins`, `fingers`
+   and `haze` — cannot on the CPU grid, which is 2.22x narrower for the same
+   pixel-sized blur. So the criterion is 1.5, and the number here was wrong
+   rather than the points. An earlier attempt at this correction said `veins`
+   missed on the GL grid, which was the wrong engine and the wrong direction:
+   fixing a false claim is its own opportunity to write a new one. The engine-pair matters more than the constant: checking
    only the GL scale let `fingers` ship at 2.36 px of separation on the CPU
    fallback, worse than the 2.21 px this document calls blind.)
 7. Tonemap: EMA the norm; cut grain. (A black floor and an output gamma were

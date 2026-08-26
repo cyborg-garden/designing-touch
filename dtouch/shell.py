@@ -752,9 +752,11 @@ class Host:
         if self.menu.open:
             if event == cv2.EVENT_LBUTTONDOWN:
                 from_boot = self.menu.boot     # click() closes and clears it
-                mode_id = self.menu.click((x, y))
-                if mode_id:
-                    self._menu_commit(mode_id, from_boot)
+                action, value = self.menu.click((x, y))
+                if action == "switch":
+                    self._menu_commit(value, from_boot)
+                elif action == "auto":
+                    self._toggle_auto()
             return
         if self.ui is not None:
             if event == cv2.EVENT_LBUTTONDOWN and self.auto.interrupt():

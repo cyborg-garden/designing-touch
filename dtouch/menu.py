@@ -204,12 +204,20 @@ class Menu:
         return "unknown", None      # §3: unknown keys hint, never vanish
 
     def click(self, pt):
-        """A mouse click at pt: commit the enabled card under it, or None."""
+        """A mouse click at pt: the (action, value) of the card under it, or
+        (None, None) when the click hit no enabled card.
+
+        This used to return `_commit(i)[1]` — the VALUE only. That is a mode
+        id for a mode card and None for the AUTO card, so a click on AUTO was
+        indistinguishable from a click on empty space: the menu closed and
+        nothing happened, while the same card's letter key worked. Returning
+        the verb keeps mouse and keyboard on one contract, which is what the
+        rest of the menu already promises.
+        """
         for rect, card in self.rects:
             if card.enabled and in_rect(rect, pt):
-                i = self.cards.index(card)
-                return self._commit(i)[1]
-        return None
+                return self._commit(self.cards.index(card))
+        return None, None
 
 
 def _dashed_rect(img, x0, y0, x1, y1, color, thickness=1, dash=8, gap=6):

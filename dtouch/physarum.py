@@ -144,6 +144,9 @@ SENSE_MAX_FRAC = 0.10
 # Mirrors update.frag's `float back = 0.35 * cross;`.
 CROSS_BACK = 0.35
 
+# Ceiling on the zone-scaled species cross-term, both engines.
+REPEL_MAX = 1.5
+
 
 def species_matrix(species, cross):
     """Row-major 3x3 species interaction matrix — the ONE definition.
@@ -423,6 +426,41 @@ class PhysarumField:
         self.point_bg, self.point_fg = self.point_fg, self.point_bg
 
     # ----- one simulation frame -----
+    def _diffuse(self):
+        # diffuse + decay. A plain box blur is the most structure-destroying
+        # kernel there is at a given radius: it only ever smears. `sharpen`
+        # subtracts a slice of the WIDER surround, turning diffusion into a
+        # centre-surround operator, so a strong vein suppresses its own
+        # neighbourhood — sharpening the vein and digging the dark halo around
+        # it. Those halos are most of what reads as carved rather than smoked.
+        #
+        # The inhibition is SPLIT across the two axes, HALF STRENGTH ON EACH,
+        # matching physarum_gl._blur_decay, which sets u_sharpen to
+        # sharpen*0.5 on both the H and the V pass. On one axis only it is a
+        # directional operator and the picture laminates along it; at full
+        # strength on both it doubles the operator and collapses into a
+        # pixel-scale Turing dot pattern. Half and half is the isotropic one.
+        r = int(self.diffuse) if self.diffuse > 0 else 0
+        sh = max(float(self.sharpen), 0.0)
+        if r > 0 or sh > 0:
+            k = 2 * r + 1
+            if sh > 0:
+                rw = max(3 * r, r + 2)
+                w = 2 * rw + 1
+                half = np.float32(sh * 0.5)
+
+                def centre_surround(img, ksz, wsz):
+                    blurred = cv2.boxFilter(img, -1, ksz)
+                    surround = cv2.boxFilter(img, -1, wsz)
+                    return np.maximum(blurred - half * (surround - blurred),
+                                      np.float32(0.0))
+
+                # cv2 ksize is (width, height): (k, 1) is the H pass.
+                tmp = centre_surround(self.trail, (k, 1), (w, 1))
+                self.trail = centre_surround(tmp, (1, k), (1, w))
+            else:
+                self.trail = cv2.boxFilter(self.trail, -1, (k, k))
+
     def update(self, matte, gray, keep=None):
         """matte, gray: float32 (gh, gw) in [0,1]. Advances agents one frame
         and rebuilds the trail map.
@@ -472,6 +510,13 @@ class PhysarumField:
             step_d = zmul(3, step_d)
             if cross > 0.0:
                 cross = zmul(4, cross)
+                # The zones scale it; do not let it run away. Mirrors
+                # update.frag's `repel = min(repel, 1.5)`. Unreachable today
+                # (max is cross<=1 x the `mesh` regime's 1.45) but the shader
+                # grew the clamp and this did not, which is exactly the kind
+                # of silent asymmetry the shared species_matrix() exists to
+                # prevent — a latent one is still one.
+                cross = np.minimum(cross, np.float32(REPEL_MAX))
         # ...but never past a tenth of the frame. `web` already sits at the
         # ceiling by design, and the mosaic's long-range regimes would
         # otherwise multiply it past the point where any local structure can
@@ -570,39 +615,7 @@ class PhysarumField:
         self._laid = laid.reshape(gh, gw, 3).astype(np.float32)
         self.trail += self._laid
 
-        # diffuse + decay. A plain box blur is the most structure-destroying
-        # kernel there is at a given radius: it only ever smears. `sharpen`
-        # subtracts a slice of the WIDER surround, turning diffusion into a
-        # centre-surround operator, so a strong vein suppresses its own
-        # neighbourhood — sharpening the vein and digging the dark halo around
-        # it. Those halos are most of what reads as carved rather than smoked.
-        #
-        # The inhibition is SPLIT across the two axes, HALF STRENGTH ON EACH,
-        # matching physarum_gl._blur_decay, which sets u_sharpen to
-        # sharpen*0.5 on both the H and the V pass. On one axis only it is a
-        # directional operator and the picture laminates along it; at full
-        # strength on both it doubles the operator and collapses into a
-        # pixel-scale Turing dot pattern. Half and half is the isotropic one.
-        r = int(self.diffuse) if self.diffuse > 0 else 0
-        sh = max(float(self.sharpen), 0.0)
-        if r > 0 or sh > 0:
-            k = 2 * r + 1
-            if sh > 0:
-                rw = max(3 * r, r + 2)
-                w = 2 * rw + 1
-                half = np.float32(sh * 0.5)
-
-                def centre_surround(img, ksz, wsz):
-                    blurred = cv2.boxFilter(img, -1, ksz)
-                    surround = cv2.boxFilter(img, -1, wsz)
-                    return np.maximum(blurred - half * (surround - blurred),
-                                      np.float32(0.0))
-
-                # cv2 ksize is (width, height): (k, 1) is the H pass.
-                tmp = centre_surround(self.trail, (k, 1), (w, 1))
-                self.trail = centre_surround(tmp, (1, k), (1, w))
-            else:
-                self.trail = cv2.boxFilter(self.trail, -1, (k, k))
+        self._diffuse()
         if keep is None:
             self.trail *= self.decay
         else:

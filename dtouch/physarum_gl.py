@@ -570,6 +570,27 @@ class PhysarumFieldGL:
         rgba = self._read_f4(self.fbo_trail_a, 4).reshape(self.gh, self.gw, 4)
         return rgba[..., :3].sum(axis=2)
 
+    @trail.setter
+    def trail(self, value):
+        """Write the whole trail — TESTS AND DIAGNOSTICS ONLY.
+
+        Accepts (gh, gw) to fill every species channel equally, or
+        (gh, gw, 3) to set them independently. Exists because the species
+        chirality — which population repels which — is otherwise only
+        observable through many frames of emergent behaviour, and a test that
+        cannot place a known trail cannot ask "which way did this agent turn".
+        """
+        a = np.asarray(value, dtype=np.float32)
+        if a.shape == (self.gh, self.gw):
+            a = np.repeat(a[..., None], 3, axis=2)
+        if a.shape != (self.gh, self.gw, 3):
+            raise ValueError(f"trail must be {(self.gh, self.gw)} or "
+                             f"{(self.gh, self.gw, 3)}, got {a.shape}")
+        rgba = np.zeros((self.gh, self.gw, 4), np.float32)
+        rgba[..., :3] = a
+        with self.ctx:
+            self.tex_trail_a.write(np.ascontiguousarray(rgba))
+
     @property
     def trail_species(self):
         """Per-species trail, (gh, gw, 3) float32 — diagnostics and tests."""
