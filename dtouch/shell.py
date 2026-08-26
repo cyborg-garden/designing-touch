@@ -1433,6 +1433,21 @@ class Host:
                 preset = st.get("preset")
         if preset is None:
             preset = mode.safe_look()
+        if preset not in self.all_presets:
+            # A boot preset this mode does not own. The Host's own default is a
+            # Particles look, and --preset resolution can hand over a name that
+            # belongs to the other mode, so this is reachable. It used to fall
+            # straight through the apply below and leave the look UNAPPLIED:
+            # the panel and the HUD showed a name, and the parameters were
+            # whatever _UI_DEFAULTS happened to say. A UI that names a look it
+            # did not load is lying, and silence on a half-loaded look is a bug
+            # (DESIGN.md §9).
+            #
+            # It stayed invisible because Dither's first built-in used to be
+            # `classic`, whose values are identical to its _UI_DEFAULTS — so
+            # the no-op and the correct result looked the same. Changing the
+            # first look is what made it show.
+            preset = mode.safe_look()
 
         # The shared UI-state object ALWAYS exists — it is the mode's parameter
         # surface (spec capture/apply target + step()'s per-frame sync source).

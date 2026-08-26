@@ -1959,3 +1959,52 @@ def test_a_rename_box_born_below_the_fold_is_scrolled_into_view(tmp_path):
     for ch in "x!":
         _present(host, ord(ch))
     assert host.ui.rename_buf.endswith("x!")         # typing lands in the box
+
+
+# ---------- a named look must be a loaded look ----------
+
+def test_a_boot_preset_the_mode_does_not_own_falls_back_to_its_safe_look(tmp_path):
+    """The panel must never name a look it did not apply.
+
+    `Host`'s own default preset is a Particles look, and `--preset` resolution
+    can hand a name from the other mode, so a boot preset the active mode does
+    not own is reachable. It used to fall straight through the apply and leave
+    the look UNAPPLIED: `preset_name` showed the name, and every parameter was
+    whatever `_UI_DEFAULTS` said.
+
+    It hid for as long as it did because Dither's first built-in was `classic`,
+    whose values are identical to its `_UI_DEFAULTS` — the no-op and the
+    correct result rendered the same frame. Changing the first look is what
+    made it visible.
+    """
+    import numpy as np
+    from dtouch.modes.dithergirl import ALGOS, DitherGirlMode
+
+    class Syn:
+        name = "synthetic"
+        def read(self):
+            return True, np.full((54, 96, 3), 128, np.uint8)
+        def release(self):
+            pass
+
+    mode = DitherGirlMode()
+    host = Host(mode, source=Syn(), res=(96, 54), show=False, max_frames=2,
+                preset="abstract",                  # a Particles look
+                presets_path=str(tmp_path / "p.json"),
+                state_path=str(tmp_path / "s.json"))
+    host.run()
+    ui = host.ui
+    safe = mode.safe_look()
+    assert ui.preset_name == safe
+    # ...and the parameters are that look's, not the UI defaults
+    want = mode.BUILTIN[safe]
+    assert ALGOS[ui.dg_algo_idx] == want["algorithm"]
+    assert ui.dg_scale == want["scale"]
+    # the guard has to bite on a name that exists in NO mode, too
+    host2 = Host(DitherGirlMode(), source=Syn(), res=(96, 54), show=False,
+                 max_frames=2, preset="no-such-look-anywhere",
+                 presets_path=str(tmp_path / "p2.json"),
+                 state_path=str(tmp_path / "s2.json"))
+    host2.run()
+    assert host2.ui.preset_name == safe
+    assert ALGOS[host2.ui.dg_algo_idx] == want["algorithm"]
