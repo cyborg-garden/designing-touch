@@ -15,14 +15,14 @@
    "deposit": 1.0
   },
   "fingers": {
-   "sense": 2.5,
-   "spread": 0.2,
+   "sense": 4.5,
+   "spread": 0.62,
    "turn": 0.7,
    "step": 3.4,
    "deposit": 2.0
   },
   "haze": {
-   "sense": 1.2,
+   "sense": 3.6,
    "spread": 1.5,
    "turn": 0.08,
    "step": 0.35,
@@ -59,7 +59,7 @@
   "gain": 1.0,
   "decay": 0.94,
   "exposure": 3.5,
-  "grain": 0.5,
+  "grain": 0.2,
   "weave": 0.6,
   "evolve": 0.5,
   "react": 0.7

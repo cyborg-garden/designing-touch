@@ -249,7 +249,8 @@ def test_mode_boots_the_gpu_field_when_gl_is_there(tmp_path):
         assert (m.grid, m.n) == (PhysarumMode.GL_GRID, PhysarumMode.GL_N)
         out = m.step(np.full((36, 64, 3), 255, np.uint8), None, 1 / 30)
         assert out.shape == (RES[1], RES[0], 3) and out.dtype == np.uint8
-        assert m.status_tail("synthetic").startswith("gl 2.0M")
+        assert m.status_tail("synthetic").startswith(
+            _fmt_agents(PhysarumMode.GL_N).join(("gl ", "")))
     finally:
         m.stop()
     assert m.pf is None
@@ -263,7 +264,8 @@ def test_mode_engine_cpu_is_an_explicit_opt_out(tmp_path):
     try:
         assert m.engine == "cpu" and isinstance(m.pf, PhysarumField)
         assert (m.grid, m.n) == (PhysarumMode.CPU_GRID, PhysarumMode.CPU_N)
-        assert m.status_tail("synthetic") == "cpu 400k  cam synthetic"
+        assert m.status_tail("synthetic") == (
+            f"cpu {_fmt_agents(PhysarumMode.CPU_N)}  cam synthetic")
     finally:
         m.stop()
 

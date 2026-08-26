@@ -12,7 +12,8 @@
 // the trail re-fluidizes (evolve paints it over stale regions — locked
 // structure dissolves and regrows instead of ossifying). Semantics mirror
 // dtouch.physarum's KEEP_HOLD / MELT_DROP / MELT_FLOOR.
-// Edges wrap (the agents already do). Only .r is read and written.
+// Edges wrap (the agents already do). All three species channels are
+// diffused and decayed together, with the same kernel and the same keep map.
 
 uniform sampler2D u_src;
 uniform sampler2D u_add;
@@ -24,19 +25,25 @@ uniform int u_radius;      // box half-width in px; 0 = no diffusion
 uniform ivec2 u_grid;
 uniform float u_scale;
 uniform float u_decay;
+uniform float u_sharpen;   // lateral inhibition, 0 = plain box blur
+uniform int u_wide;        // wide-box half-width for the inhibition surround
 
 layout(location = 0) out vec4 f_color;
 
 void main() {
     ivec2 c = ivec2(gl_FragCoord.xy);
-    float acc = 0.0;
-    for (int i = -u_radius; i <= u_radius; i++) {
+    vec3 acc = vec3(0.0);
+    vec3 wide = vec3(0.0);
+    int rw = (u_sharpen > 0.0) ? u_wide : u_radius;
+    for (int i = -rw; i <= rw; i++) {
         ivec2 q = c + u_dir * i;
         // wrap via floor, not integer %: GLSL ES 3.00 leaves % undefined
         // when an operand is negative, and q is negative at the low edge
         q -= u_grid * ivec2(floor(vec2(q) / vec2(u_grid)));
-        acc += texelFetch(u_src, q, 0).r;
-        if (u_use_add == 1) acc += texelFetch(u_add, q, 0).r;
+        vec3 v = texelFetch(u_src, q, 0).rgb;
+        if (u_use_add == 1) v += texelFetch(u_add, q, 0).rgb;
+        wide += v;
+        if (i >= -u_radius && i <= u_radius) acc += v;
     }
     float d = u_decay;
     if (u_use_keep == 1) {
@@ -44,5 +51,17 @@ void main() {
         d = u_decay + (0.995 - u_decay) * max(k, 0.0) - 0.12 * max(-k, 0.0);
         d = clamp(d, 0.70, 0.995);
     }
-    f_color = vec4(acc * u_scale * d, 0.0, 0.0, 1.0);
+    vec3 out3 = acc * u_scale;
+    // Lateral inhibition. A plain box blur is the most structure-destroying
+    // kernel there is at a given radius: it only ever smears. Subtracting a
+    // slice of the WIDER surround turns diffusion into a centre-surround
+    // operator, so a strong vein suppresses its own neighbourhood — which
+    // sharpens the vein and digs the dark halo around it. Those halos, and
+    // the hard seams they make between neighbouring structures, are most of
+    // what reads as "carved" rather than "smoked".
+    if (u_sharpen > 0.0) {
+        vec3 surround = wide * (1.0 / float(2 * rw + 1));
+        out3 = max(out3 - u_sharpen * (surround - out3), vec3(0.0));
+    }
+    f_color = vec4(out3 * d, 1.0);
 }

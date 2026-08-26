@@ -150,6 +150,66 @@ def palette_stops(name, invert=False):
     return tuple(tuple(c) for c in auth) if auth else stops[::-1]
 
 
+# ----- low bit depths ------------------------------------------------------
+#
+# At Bits 1 a dither emits two values, so a palette renders as two colours —
+# and the ramps sample those at their ENDS, which is where every one of them
+# is deliberately ink-dark against a bright top for the 4.5:1 floor. The
+# result is that at the shipped boot depth `aurora` and `cga` come out
+# BYTE-IDENTICAL, and every multi-colour palette collapses to a monochrome
+# ramp of one hue. That is exactly the complaint the multi-colour palettes
+# were added to answer, reappearing one bit lower down.
+#
+# So at two levels a ramp keeps its dark ground and takes its most CHROMATIC
+# stop as ink, rather than its brightest — provided that stop still clears
+# the legibility floor against the ground. aurora goes black/green, cga
+# black/cyan, vaporwave black/pink, ultraviolet black/magenta: six palettes
+# that are six colours at 1 bit instead of six greyscales.
+#
+# Duotones are untouched (they have no middle stop to prefer), which keeps
+# every look predating the ramps bit-exact.
+LEGIBILITY_FLOOR = 4.5
+
+
+def _rel_luminance(rgb):
+    """WCAG relative luminance of an 8-bit sRGB triple."""
+    c = [v / 255.0 for v in rgb]
+    c = [(x / 12.92) if x <= 0.04045 else (((x + 0.055) / 1.055) ** 2.4)
+         for x in c]
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+
+def contrast_ratio(a, b):
+    """WCAG contrast between two 8-bit sRGB triples."""
+    la, lb = _rel_luminance(a), _rel_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _chroma(rgb):
+    """How colourful, 0..1. Plain max-min: cheap, and it ranks the way the
+    eye does for the stops these ramps actually contain."""
+    return (max(rgb) - min(rgb)) / 255.0
+
+
+def low_depth_stops(stops, levels):
+    """The stops a dither at `levels` quantisation levels should actually use.
+
+    Only the two-level case is special-cased, and only for ramps with a
+    middle to prefer; everything else walks the ramp as before.
+    """
+    stops = tuple(tuple(int(v) for v in c) for c in stops)
+    if levels != 2 or len(stops) <= 2:
+        return stops
+    ground = stops[0]
+    ink = max(stops[1:],
+              key=lambda c: (contrast_ratio(ground, c) >= LEGIBILITY_FLOOR,
+                             _chroma(c)))
+    if contrast_ratio(ground, ink) < LEGIBILITY_FLOOR:
+        return (ground, stops[-1])      # nothing chromatic is legible here
+    return (ground, ink)
+
+
 def palette_pair(name, invert=False):
     """The (off, on) END pair for a named palette, flipped or not — what a
     1-bit dither renders, what ASCII colours its glyphs with, and what the
@@ -333,6 +393,30 @@ class DitherGirlMode:
     # bankable. 'stream-safe' is the stream-tuned variant — bigger cells
     # (low Scale) + higher contrast survive stream compression (§4.2).
     BUILTIN = {
+        # The look the mode selector wears. The home menu renders the live
+        # camera through a 1-bit blue-noise dither at half resolution and
+        # NEAREST-upscales it, so every dither cell is a 2x2 block — it is
+        # the first thing anyone sees in this app and the owner's favourite
+        # thing in it, and it was reachable from nowhere. Scale 360 is half
+        # of a 720p output, which is what menu.draw_menu computes.
+        # Deliberately 1-bit and neutral: see low_depth_stops for why that no
+        # longer costs the palettes their colour.
+        "menu": dict(algorithm="Blue noise", bits=1.0, gamma=True,
+                     bias="auto", contrast=1.0, scale=360.0,
+                     palette="mono", matte="off"),
+        # The owner's own saved look, promoted from presets.json so it cannot
+        # be lost to a rename and so it ships to everyone. Its colours are not
+        # the palette's: magenta steered blue-violet gives four stops, and the
+        # rack's 1-bit crush then binarises those to black, black, pure blue
+        # and pure magenta, with chroma bleed fringing the edges. That
+        # accident is the register the multi-colour palettes were written to
+        # make native — it belongs in the menu next to them, not in one
+        # person's preset file.
+        "CCCCCC": dict(algorithm="Riemersma", bits=2.0, gamma=True,
+                       bias="auto", contrast=1.60, scale=486.0,
+                       palette="magenta", hue=238.0, tint=0.61, matte="off",
+                       signal=dict(glitch=True, chroma=55.4, drift=9.49,
+                                   crush=1.0, scanlines=True)),
         "classic": dict(algorithm="Floyd-Steinberg", bits=1.0, gamma=True,
                         bias="auto", contrast=1.0, scale=72.0,
                         palette="mono", matte="off"),
@@ -565,8 +649,11 @@ class DitherGirlMode:
         return {}                          # no mode-local perform keys (v1)
 
     def safe_look(self):
-        """The panic target (DESIGN.md §6.2 '0')."""
-        return "classic"
+        """The look the mode opens on, and the panic target (DESIGN.md §6.2
+        '0'). The menu's own dither: whoever just pressed `d` was looking at
+        it a second ago, so entering the mode continues the picture rather
+        than replacing it."""
+        return "menu"
 
     def status_tail(self, cam_name):
         """The source tail of the spec-derived HUD status (DESIGN.md §2.3 —
@@ -699,7 +786,7 @@ class DitherGirlMode:
         else:
             ramp = np.tile(np.linspace(0.0, 1.0, w, dtype=np.float32), (h, 1))
             rgb = self._palette_map(_dither(ramp, algo, bits, gamma, bias),
-                                    stops)
+                                    low_depth_stops(stops, 1 << bits))
         return rgb[:, :, ::-1].copy()      # panel frames are BGR
 
     # ----- per-frame -----
@@ -840,7 +927,7 @@ class DitherGirlMode:
                 small = np.clip((small - 0.5) * contrast + 0.5, 0.0, 1.0)
 
             lit = _dither(small, algo, bits, gamma, bias)
-            out = self._palette_map(lit, stops)
+            out = self._palette_map(lit, low_depth_stops(stops, 1 << bits))
             out = cv2.resize(out, (rw, rh), interpolation=cv2.INTER_NEAREST)
 
         if matte_kind != "off":

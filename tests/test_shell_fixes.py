@@ -80,6 +80,24 @@ def _booted(tmp_path, **kw):
     return host
 
 
+def _free_a_bank_slot(host):
+    """Clear one built-in off the bank, for tests that need a KNOWN slot free.
+
+    This used to be load-bearing: Dither's nine built-ins once filled all nine
+    slots, so a fresh instance had nowhere to save a first look and
+    `_assign_slot` refused with "bank full (1-9)". The seed now stops at
+    BANK_SEED_MAX and holds two slots open, so nothing depends on this any
+    more — it stays because a test that wants to pin WHICH slot a look lands
+    in still has to control the bank rather than hope.
+    """
+    ui = host.ui
+    slot = max(ui.bank, key=int)
+    ui.pending_slot = ui.bank[slot]
+    host._pump_preset_mailboxes()
+    assert slot not in ui.bank
+    return slot
+
+
 def _hints(host):
     return [t.text for t in host.hud.toasts._hints]
 
@@ -355,7 +373,7 @@ def test_panic_key_via_shell_wiring_lands_on_safe_look(tmp_path):
     host.ps.blackout = True
     host.reg.dispatch(ord("0"))
     assert host.ps.blackout is False and host.ui.glitch is False
-    assert host.ui.pending_preset == "classic"       # the mode's safe look
+    assert host.ui.pending_preset == "menu"          # the mode's safe look
 
 
 # ---------- switch-away-and-back contract (amended DESIGN.md §6.2) ----------
@@ -392,8 +410,7 @@ def test_first_entry_applies_safe_look_reentry_preserves_settings(
     host._source.on_read = on_read
     host.run()
     # first entry landed on the safe look
-    assert seen["after_first_entry"] == ("classic",
-                                         ALGOS.index("Floyd-Steinberg"))
+    assert seen["after_first_entry"] == ("menu", ALGOS.index("Blue noise"))
     # re-entry preserved the operator's settings — no safe_look re-post
     assert host.mode.id == "other"
     assert host.ui.dg_algo_idx == ALGOS.index("Bayer")
@@ -465,6 +482,7 @@ def test_rename_mailbox_reloads_names_follows_selection_and_bank(tmp_path):
     name = next(iter(ui.user_presets))
     ui.renaming = None                       # close any auto-opened rename box
     ui.preset_idx = ui.presets.index(name)
+    _free_a_bank_slot(host)
     ui.pending_slot = name                   # assign a bank slot
     host._pump_preset_mailboxes()
     slot = next(s for s, n in ui.bank.items() if n == name)
@@ -665,6 +683,8 @@ def test_every_store_mailbox_survives_a_full_disk(tmp_path, monkeypatch,
     host._pump_preset_mailboxes()                    # a real look to act on
     host.ui.renaming = None
     name = next(iter(host.ui.user_presets))
+    if mailbox == "pending_slot":
+        _free_a_bank_slot(host)              # pin which slot the look lands in
     _full_disk(monkeypatch, call)
     setattr(host.ui, mailbox, value(name))
     host._pump_preset_mailboxes()                    # must not raise
@@ -1941,3 +1961,52 @@ def test_a_rename_box_born_below_the_fold_is_scrolled_into_view(tmp_path):
     for ch in "x!":
         _present(host, ord(ch))
     assert host.ui.rename_buf.endswith("x!")         # typing lands in the box
+
+
+# ---------- a named look must be a loaded look ----------
+
+def test_a_boot_preset_the_mode_does_not_own_falls_back_to_its_safe_look(tmp_path):
+    """The panel must never name a look it did not apply.
+
+    `Host`'s own default preset is a Particles look, and `--preset` resolution
+    can hand a name from the other mode, so a boot preset the active mode does
+    not own is reachable. It used to fall straight through the apply and leave
+    the look UNAPPLIED: `preset_name` showed the name, and every parameter was
+    whatever `_UI_DEFAULTS` said.
+
+    It hid for as long as it did because Dither's first built-in was `classic`,
+    whose values are identical to its `_UI_DEFAULTS` — the no-op and the
+    correct result rendered the same frame. Changing the first look is what
+    made it visible.
+    """
+    import numpy as np
+    from dtouch.modes.dithergirl import ALGOS, DitherGirlMode
+
+    class Syn:
+        name = "synthetic"
+        def read(self):
+            return True, np.full((54, 96, 3), 128, np.uint8)
+        def release(self):
+            pass
+
+    mode = DitherGirlMode()
+    host = Host(mode, source=Syn(), res=(96, 54), show=False, max_frames=2,
+                preset="abstract",                  # a Particles look
+                presets_path=str(tmp_path / "p.json"),
+                state_path=str(tmp_path / "s.json"))
+    host.run()
+    ui = host.ui
+    safe = mode.safe_look()
+    assert ui.preset_name == safe
+    # ...and the parameters are that look's, not the UI defaults
+    want = mode.BUILTIN[safe]
+    assert ALGOS[ui.dg_algo_idx] == want["algorithm"]
+    assert ui.dg_scale == want["scale"]
+    # the guard has to bite on a name that exists in NO mode, too
+    host2 = Host(DitherGirlMode(), source=Syn(), res=(96, 54), show=False,
+                 max_frames=2, preset="no-such-look-anywhere",
+                 presets_path=str(tmp_path / "p2.json"),
+                 state_path=str(tmp_path / "s2.json"))
+    host2.run()
+    assert host2.ui.preset_name == safe
+    assert ALGOS[host2.ui.dg_algo_idx] == want["algorithm"]

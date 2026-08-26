@@ -386,3 +386,34 @@ def test_diffuse_trim_rounds_once():
         expect = max(1, round(scale * (1.0 - 0.45 * 0.31 ** 0.6)))
         assert mode.pf.diffuse == expect, (scale, mode.pf.diffuse, expect)
     mode.stop()
+
+
+# ---------- P7: the veins stay veins ----------
+
+def _vein_contrast(seed, weave=0.6, evolve=0.5, frames=300):
+    """p99/median of the rendered luminance at the shipped default feel.
+
+    docs/ALIVENESS.md defines the original bug partly as "measured vein/floor
+    contrast lands near 2-4x where a network normally reaches 20-50x. Veins
+    need dark to be veins."  Nothing measured it, so it was free to drift —
+    and it did: an audit caught a 7.5x collapse that arrived as a side effect
+    of satisfying the slider floors above, with no test and no mention.
+    """
+    host, mode = _boot(weave=weave, evolve=evolve, seed=seed)
+    f = _scene(*GRID)
+    for _ in range(frames):
+        mode.step(f, None, 1 / 30)
+    lum = mode.pf.luminance()
+    mode.stop()
+    return float(np.percentile(lum, 99) / max(float(np.median(lum)), 1e-6))
+
+
+def test_the_default_look_keeps_its_veins():
+    """A floor, not a target. Measured 10.6 at the shipped mapping on this
+    rig; it read 16.1 before the feel curve was steepened to keep the sliders
+    perceptible at 0.3, and that trade was made deliberately and recorded.
+    What this stops is the NEXT change quietly flattening it further: the
+    broken regime this project started from measured 2-4.
+    """
+    got = float(np.mean([_vein_contrast(s) for s in (7, 11, 23)]))
+    assert got >= 6.0, f"vein contrast collapsed to {got:.1f} (floor 6.0)"

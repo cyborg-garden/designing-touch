@@ -74,6 +74,17 @@ REGIMES = {
 }
 REGIME_NAMES = list(REGIMES)
 REGIME_KEYS = ("sense", "turn", "spread", "step", "deposit", "gain", "food")
+# Perceptual curve on the three MOLD feel sliders. The contract
+# (tests/test_physarum_alive.py) is that each is perceptible within 5 seconds
+# AT 0.3, not merely at 1.0 — the bottom third of a slider has to be where
+# most of the playing happens, or the control is a switch with decoration.
+#
+# It was 0.6. After the species and mosaic work the response went back-loaded:
+# weave measured 0.044 at 0.3 against a 0.06 floor while reaching 0.448 at
+# 1.0, and evolve 0.065 against 0.08 while reaching 0.138. The mechanisms got
+# far stronger at the top and the curve no longer compensated at the bottom.
+FEEL_CURVE = 0.30
+
 REGIME_FADE = 3.0                # crossfade, seconds — decisive, not a jump cut
 REGIME_DWELL = (15.0, 45.0)      # dwell range, seconds, order randomized
 
@@ -179,13 +190,13 @@ class PhysarumMode:
     # apply="reset" merges a look over these; matte / video_bg / video_mix are
     # deliberately absent (keep semantics — rig switches survive look hops).
     DEFAULTS = dict(point_bg="veins", point_fg="fingers", palette="arctic",
-                    food=0.35, gain=1.0, decay=0.94, exposure=3.5, grain=0.5,
+                    food=0.35, gain=1.0, decay=0.94, exposure=3.5, grain=0.2,
                     weave=0.6, evolve=0.5, react=0.7)
 
     _UI_DEFAULTS = dict(ph_matte_idx=0, ph_food=0.35, ph_video_bg=False,
                         ph_video_mix=0.5, ph_point_bg_idx=0, ph_point_fg_idx=2,
                         ph_gain=1.0, ph_decay=0.94, ph_palette_idx=0,
-                        ph_exposure=3.5, ph_grain=0.5,
+                        ph_exposure=3.5, ph_grain=0.2,
                         ph_weave=0.6, ph_evolve=0.5, ph_react=0.7,
                         ph_quality_idx=0)
 
@@ -193,17 +204,22 @@ class PhysarumMode:
     # working grid; the GPU field runs 2M agents on a 1280x736 grid in ~8 ms
     # (experiments/08-physarum-gl). An explicit grid / n overrides both.
     ENGINES = ("auto", "gl", "cpu")
-    CPU_GRID, CPU_N = (576, 324), 400_000
-    GL_GRID, GL_N = (1280, 736), 2_000_000
+    # Agent DENSITY (agents per grid cell) is the load-bearing number, not the
+    # agent count. Jones reticulation lives near 0.05-0.3 agents/cell; the
+    # shipped 2.12/cell filled every cell with ~33 units of trail, so there was
+    # no dark for a vein to be a vein against and measured vein/floor contrast
+    # sat near 2-4x instead of 20-50x. These sizings hold ~0.5/cell.
+    CPU_GRID, CPU_N = (576, 324), 100_000
+    GL_GRID, GL_N = (1280, 736), 500_000
 
     # Render-quality tiers (GL engine only; the CPU fallback has no headroom).
     # perform = the shipped sizing; higher tiers raise the sim grid + agent
     # pool so the veins stay crisp on a 1440p/4K projector. Switching tiers
     # rebuilds the field live — the trail regrows in a couple of seconds.
     QUALITY = {
-        "perform": ((1280, 736), 2_000_000),
-        "balance": ((1920, 1104), 3_000_000),
-        "quality": ((2560, 1472), 4_000_000),
+        "perform": ((1280, 736), 500_000),
+        "balance": ((1920, 1104), 1_100_000),
+        "quality": ((2560, 1472), 1_900_000),
     }
     QUALITY_NAMES = list(QUALITY)
 
@@ -550,7 +566,7 @@ class PhysarumMode:
         # MOLD slider read as nothing): the sliders' bottom third has to
         # already be clearly audible, so the levers ride value**0.6 —
         # 0.3 -> 0.49, 0.6 -> 0.74, 1.0 -> 1.0 (wild) — instead of linear.
-        e = evolve ** 0.6
+        e = evolve ** FEEL_CURVE
 
         # evolve: the mold hops between REGIMES — decisive crossfaded
         # transitions (REGIME_FADE seconds) between distinct growth
@@ -598,6 +614,14 @@ class PhysarumMode:
             pf.mod_sense = pf.mod_turn = pf.mod_spread = 1.0
             pf.mod_step = pf.mod_deposit = 1.0
 
+        # evolve's spatial half. The regime table above moves the WHOLE frame
+        # together, which is why the picture could churn constantly and still
+        # read as one uniform texture. The mosaic partitions the grid into
+        # drifting zones with their own multipliers and hard boundaries, so
+        # several morphologies coexist and abut. Time axis and space axis,
+        # both under the one knob: evolve is "how unlike itself it gets".
+        pf.mosaic = 0.95 * e
+
         # weave: one knob onto the engine's anti-thoroughfare levers, tuned
         # offline (junction density several-x between 0 and 1 on a static
         # scene while veins stay coherent). 0 is the legacy bold-canal
@@ -607,13 +631,50 @@ class PhysarumMode:
         # visibly — and is computed in float from the unrounded base so the
         # trim bites identically at every quality tier (rounding the base
         # first made 'quality' veins relatively thinner than 'perform').
-        w = weave ** 0.6
-        pf.sat = 0.30 * w
-        pf.jitter = 0.50 * w + extra_jitter
+        w = weave ** FEEL_CURVE
+        # sat is a MULTIPLE of the trail's own bright end. It must sit ABOVE
+        # that end: capping at 0.22x p95 (the old 0.30*w) compressed the whole
+        # field into a 3-unit band, so agents inside the network were steering
+        # on noise and every point converged on the same mesh. Above 1.0 only
+        # the fat canals compress, which is the anti-thoroughfare effect that
+        # was actually wanted, and weave now tightens the cap toward the
+        # network instead of blinding it.
+        # The bottom of the knob stays the legacy engine: at weave 0 the cap is
+        # off entirely. Above 0 it lands ABOVE the trail's bright end and
+        # tightens toward it, so only the fat canals compress. (The old
+        # mapping put it at ~0.2x the bright end, which flattened the whole
+        # sensed field into a few units and left agents inside the network
+        # steering on noise. It also had the cap jump from "off" to "crushing"
+        # across weave 0; now it goes from off to nearly-inert.)
+        pf.sat = 0.0 if weave <= 0.0 else 1.70 - 0.85 * w
+        # jitter and reseed used to be weave's main levers and were the two
+        # things preventing any structure at all: heading decorrelated in
+        # 0.37 s and the entire population recycled once a second, so the
+        # picture's statistics were pinned to the reseed distribution rather
+        # than to anything self-organised. Both are now seasoning, not engine.
+        pf.jitter = 0.14 * w + extra_jitter
         pf.hetero = w
-        pf.reseed_frac = 0.004 + 0.022 * w * w
+        pf.reseed_frac = 0.004 + 0.006 * w * w
+        # weave's real job. Three populations sense each other through a signed
+        # matrix; `cross` is how hard they push. At 0 they are one organism and
+        # you get the classic single-species transport network. As it rises the
+        # populations carve exclusion membranes into each other and the picture
+        # stops being one texture everywhere — territories, fronts, dark walls.
+        # This is the lever that makes weave visible in under a second, which
+        # the old satcap/jitter/reseed bundle never managed.
+        # 0.68, not 1.0. The coefficient is a LOOK decision, not a spare
+        # scale factor: an audit measured the default look's vein contrast
+        # (p99/median) at 166 with 0.68 and 22.2 with 1.0 — the bottom edge of
+        # the 20-50x band docs/ALIVENESS.md uses to define the original bug,
+        # with the frame 80% brighter. Side by side, 0.68 is bold trunks
+        # against real black with capillaries between them; 1.0 is a uniform
+        # bright bundle, which is the complaint this project started from.
+        # tests/test_physarum_alive.py pins the contrast so it cannot drift
+        # again on the way to satisfying some other floor.
+        pf.cross = 0.68 * w
+        pf.sharpen = 0.18 * w
         pf.diffuse = max(1, round(self._base_diffuse
-                                  * (1.0 - 0.45 * weave_base ** 0.6)))
+                                  * (1.0 - 0.45 * weave_base ** FEEL_CURVE)))
 
         pf.decay = decay
         pf.food = food
@@ -691,7 +752,7 @@ class PhysarumMode:
 
         self._burst_cool = max(getattr(self, "_burst_cool", 0.0) - dt, 0.0)
         self._melt_pulse = max(0.0, self._melt_pulse - dt / 2.5)
-        r = react ** 0.6             # perceptual mapping, same as the others
+        r = react ** FEEL_CURVE      # perceptual mapping, same as the others
         keep_pos = None
         if react > 0:
             gray = gray + (5.0 * r) * self._motion

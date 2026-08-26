@@ -32,6 +32,7 @@ from .hud import (AMBER, RED, Hud, OverlayState, cycle_overlay,
                   draw_corner_tick, draw_help, esc_overlay, put_outlined,
                   u as _u)
 from .imgui import DIM, HOVER, PANEL, in_rect
+from .auto import Autopilot
 from .menu import Menu, draw_menu, render_boot_card
 from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
@@ -39,6 +40,25 @@ from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
                         display_fmt, nudge_to, nudgeable, visible)
 from . import presets as _presets
+
+# Keys that release the autopilot. Anything that changes WHICH SCENE is on
+# screen: look recall and stepping, parameter selection and nudges, the
+# physarum point swap, mode switches, panic.
+#
+# Deliberately NOT the casts and toggles — burst, wave, Z's random cast,
+# glitch, audio, record, menu, help, debug, save. You should be able to throw
+# a burst over a running autopilot without ending it, the same way you can
+# lean on an instrument someone else is playing; Z in particular is a cast,
+# not a takeover. The rule has to be learnable by accident, so it is one set
+# in one place rather than a per-command flag.
+# Bank slots (keys 1-9) seeded from a mode's built-ins at first boot. Short of
+# nine on purpose — see _seed_bank_setlist.
+BANK_SLOTS = 9
+BANK_SEED_MAX = 7
+
+AUTO_RELEASE_KEYS = frozenset(
+    [ord(c) for c in "0123456789[],.-=_+xpdo"]
+)
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
 RESUME_HINT = "enter resumes"    # boot-menu hint prefix; retired when Enter lands
@@ -483,6 +503,7 @@ class Host:
         self.ps = PerformState()
         self.reg = CommandRegistry()
         self.menu = Menu()                # home menu — a shell overlay state (§3)
+        self.auto = Autopilot()           # the AUTO card — dtouch.auto
         self.pending_mode = None          # mode id posted by a key/menu commit
         self._mode_instances = {}         # id -> constructed Mode (reused on switch)
         self._mode_preset = {}            # id -> last selected look (re-entry)
@@ -594,6 +615,12 @@ class Host:
     def _menu_commit(self, mode_id, from_boot):
         """One card committed from the menu (key, Enter, Esc-at-boot, click).
 
+        Releases the autopilot. The keyboard release check in `_route_key`
+        cannot see this: the open menu consumes every key and returns before
+        it, so picking a mode card — which is about as deliberate an act as
+        the instrument has — used to leave AUTO running, and it would recall
+        a look over the top of your choice a minute later.
+
         A commit from the BOOT menu that lands on the mode already running is
         not a switch — that mode was started behind the menu so the screen
         would be live, and it is what the selection defaulted to. Routing it
@@ -602,6 +629,8 @@ class Host:
         It gets the mode-title flash a real entry gets, and the three-doors
         hint is posted HERE rather than at boot, so it lands on the mode
         instead of on top of the menu's own hint line."""
+        if self.auto.interrupt():
+            self.hud.toasts.hint("auto off - you took over")
         if from_boot:
             # the resume hint is a pointer at Enter, and Enter has just been
             # pressed. Its 4 s ttl outlives that by ~3 s, so without this it
@@ -723,11 +752,20 @@ class Host:
         if self.menu.open:
             if event == cv2.EVENT_LBUTTONDOWN:
                 from_boot = self.menu.boot     # click() closes and clears it
-                mode_id = self.menu.click((x, y))
-                if mode_id:
-                    self._menu_commit(mode_id, from_boot)
+                action, value = self.menu.click((x, y))
+                if action == "switch":
+                    self._menu_commit(value, from_boot)
+                elif action == "auto":
+                    self._toggle_auto()
             return
         if self.ui is not None:
+            if event == cv2.EVENT_LBUTTONDOWN and self.auto.interrupt():
+                # The panel is the other half of the instrument's input
+                # surface, and none of it goes through _route_key — a slider
+                # drag or a preset-row click never touched AUTO_RELEASE_KEYS.
+                # dtouch.auto promises ANY scene-changing human input releases
+                # it; a click on the panel is exactly that.
+                self.hud.toasts.hint("auto off - you took over")
             self.ui.on_mouse(event, x, y, flags, param)
 
     def _route_key(self, key):
@@ -748,13 +786,50 @@ class Host:
                 # the reserved card is on screen and dashed: name it, rather
                 # than deflect to a key map that cannot explain it either
                 self.hud.toasts.hint(f"{mode_id.lower()} - coming soon")
+            elif action == "auto":
+                self._toggle_auto()
             elif action == "unknown":
                 self.hud.toasts.hint("? for keys")
             return
         if self.ui is not None and self.ui.on_key(key):
-            return
+            return                             # rename typing eats the key
+        if key in AUTO_RELEASE_KEYS and self.auto.interrupt():
+            self.hud.toasts.hint("auto off - you took over")
         self.overlay = _perform_key(key, self.overlay, self.ps,
                                     self.reg, self.hud)
+
+    def _toggle_auto(self):
+        on = self.auto.toggle()
+        self.hud.toasts.hint("auto on - it plays itself, any scene key stops it"
+                             if on else "auto off")
+
+    def _auto_tick(self, dt):
+        """One autopilot step, folded into the ordinary mailboxes.
+
+        Everything it does is something a person could have done from the
+        keyboard: post a look, post a mode, dispatch a named command. It gets
+        no private reach into the mode, which is what keeps "it is playing"
+        and "I am playing" the same code path.
+        """
+        if not self.auto.on or self.mode is None or self.ui is None:
+            return
+        looks = list(self.all_presets.keys())
+        modes = [m.id for m in REGISTRY]
+        current = self.ui.preset_name if self.ui.preset_idx < len(
+            self.ui.presets) else None
+        for kind, value in self.auto.tick(dt, self.mode.id, looks, modes,
+                                          current=current):
+            if kind == "preset":
+                self.ui.pending_preset = value
+            elif kind == "mode":
+                self.pending_mode = value
+            elif kind == "command":
+                cmd = self.reg.get(value)
+                if cmd is not None:      # a cast the current mode does not
+                    cmd.run()            # have is a hint, not a demand
+        if self.auto.last_reason:
+            self.hud.toasts.hint(f"auto - {self.auto.last_reason}")
+            self.auto.last_reason = ""
 
     def _draw_waiting_note(self, img):
         """No frame has ever arrived (DESIGN.md §6.4): a plain-language
@@ -805,7 +880,7 @@ class Host:
         if stored is not None:
             ui.bank = stored
         else:
-            builtin = list(getattr(self.mode, "BUILTIN", {}))[:9]
+            builtin = list(getattr(self.mode, "BUILTIN", {}))[:BANK_SEED_MAX]
             ui.bank = {str(i + 1): n for i, n in enumerate(builtin)}
         ui.setlist = _presets.setlist(self.presets_path, mode=self.mode.id) or []
 
@@ -1378,6 +1453,21 @@ class Host:
                 preset = st.get("preset")
         if preset is None:
             preset = mode.safe_look()
+        if preset not in self.all_presets:
+            # A boot preset this mode does not own. The Host's own default is a
+            # Particles look, and --preset resolution can hand over a name that
+            # belongs to the other mode, so this is reachable. It used to fall
+            # straight through the apply below and leave the look UNAPPLIED:
+            # the panel and the HUD showed a name, and the parameters were
+            # whatever _UI_DEFAULTS happened to say. A UI that names a look it
+            # did not load is lying, and silence on a half-loaded look is a bug
+            # (DESIGN.md §9).
+            #
+            # It stayed invisible because Dither's first built-in used to be
+            # `classic`, whose values are identical to its _UI_DEFAULTS — so
+            # the no-op and the correct result looked the same. Changing the
+            # first look is what made it show.
+            preset = mode.safe_look()
 
         # The shared UI-state object ALWAYS exists — it is the mode's parameter
         # surface (spec capture/apply target + step()'s per-frame sync source).
@@ -1556,6 +1646,7 @@ class Host:
                     # stall. The failure paths reset the clock too, so this cap
                     # is the backstop, not the mechanism.
                     dt, last_t = min(now_t - last_t, DT_MAX), now_t
+                    self._auto_tick(dt)
                     levels = (self.mic.levels()
                               if self.mic is not None and self.mic.available
                               else None)

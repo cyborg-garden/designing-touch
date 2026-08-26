@@ -47,12 +47,137 @@ import numpy as np
 POINTS = {
     "veins":   dict(sense=9.0,  spread=0.39, turn=0.79, step=1.4, deposit=1.0),
     "cells":   dict(sense=14.0, spread=1.10, turn=0.30, step=0.8, deposit=1.0),
-    "fingers": dict(sense=2.5,  spread=0.20, turn=0.70, step=3.4, deposit=2.0),
-    "haze":    dict(sense=1.2,  spread=1.50, turn=0.08, step=0.35, deposit=0.25),
+    "fingers": dict(sense=4.5,  spread=0.62, turn=0.70, step=3.4, deposit=2.0),
+    "haze":    dict(sense=3.6,  spread=1.50, turn=0.08, step=0.35, deposit=0.25),
     "web":     dict(sense=34.0, spread=0.50, turn=1.10, step=1.8, deposit=0.6),
     "storm":   dict(sense=10.0, spread=1.55, turn=1.70, step=3.2, deposit=1.4),
 }
 POINT_NAMES = list(POINTS)
+
+# A point can only steer on what the trail still resolves. The trail is box
+# blurred every frame over a `1/(1-decay)`-frame memory, which accumulates to
+# roughly SENSE_SIGMA_PX of smoothing at the shipped diffuse radius, so, with
+# `scale` the engine's grid-px-per-table-unit:
+#
+#   sense * scale              >= SENSE_SIGMA_PX          reach past the blur
+#   2*sense*scale*sin(spread)  >= 1.5 * SENSE_SIGMA_PX    resolve a gradient
+#   step                       <  sense                   don't leap past it
+#
+# BOTH engines, and the CPU one binds. The blur radius is the same integer on
+# each, so the smoothing is the same number of PIXELS — but the CPU grid is
+# 2.22x narrower, so a point has 2.22x less reach there in the units that
+# matter. Checking only PX_SCALE (the GL figure) let `fingers` ship at 2.36 px
+# of separation on the fallback engine — WORSE than the 2.21 px this whole
+# diagnosis calls blind, on the path every machine without a GPU actually
+# runs. tests/test_physarum_points.py checks both.
+#
+# `fingers` used to violate all three (2.21 px of sensor separation on a field
+# smoothed to 3.33 px, and a stride longer than its own reach), which made it a
+# constant-turn random walk rather than a Jones walker — and it is the default
+# body point. `haze` sensed inside its own blur kernel. tests/test_physarum.py
+# pins these; widen a point rather than quietly reintroducing a blind one.
+# Per-frame decay of the wave's ballistic phase (~0.55 s at 60 fps).
+# Shared by both engines; physarum_gl re-exports the same constant.
+BALLISTIC_DECAY = 0.90
+
+# Exposure-reference smoothing, shared by both engines (physarum_gl re-exports
+# this). The p95 the picture is normalized by is an estimate off a strided
+# subsample; tracking it frame-to-frame pumps.
+NORM_EMA = 0.85
+
+PX_SCALE = 1280.0 / 576.0        # working grid -> GL grid, see modes.physarum
+CPU_SCALE = 1.0                  # the CPU field runs at gain 1.0 on its own grid
+SENSE_SIGMA_PX = 3.33            # accumulated trail smoothing, GL px
+
+# ----- the spatial mosaic --------------------------------------------------
+# One parameter set over the whole canvas grows one texture, everywhere, and
+# no slider can change that — which is why every look read as the same thing
+# recoloured. The grid is instead cut into slowly drifting Voronoi zones, and
+# each zone runs ONE of these regimes outright. Hard seams, not a blend: the
+# blend is what averages six characters back into one.
+#
+# Multipliers on the blended point parameters, plus a multiplier on the
+# species cross-term (low = one organism, thick canals; high = woven, walled).
+# Ours, derived from this model's own points; nothing external.
+SPATIAL_REGIMES = {
+    "mesh":  dict(sense=0.45, turn=1.35, spread=0.75, step=0.60, cross=1.45),
+    "trunk": dict(sense=2.20, turn=0.65, spread=0.85, step=1.50, cross=0.25),
+    "bloom": dict(sense=0.55, turn=1.90, spread=1.60, step=1.15, cross=1.10),
+    "drift": dict(sense=1.80, turn=0.45, spread=1.30, step=0.90, cross=0.55),
+    "knot":  dict(sense=0.75, turn=1.55, spread=0.45, step=0.50, cross=1.30),
+    "calm":  dict(sense=1.00, turn=1.00, spread=1.00, step=1.00, cross=1.00),
+}
+SPATIAL_REGIME_NAMES = list(SPATIAL_REGIMES)
+ZONE_REGIME_COUNT = 6            # the shader's u_zreg[] / u_zcross[] arity
+assert len(SPATIAL_REGIMES) == ZONE_REGIME_COUNT
+
+# The regime table as arrays, in the same order the GL host uploads u_zreg[] /
+# u_zcross[] — columns are sense, turn, spread, step.
+ZONE_REGIME_MULTS = np.array(
+    [[SPATIAL_REGIMES[k][f] for f in ("sense", "turn", "spread", "step")]
+     for k in SPATIAL_REGIMES], np.float32)
+ZONE_REGIME_CROSS = np.array(
+    [SPATIAL_REGIMES[k]["cross"] for k in SPATIAL_REGIMES], np.float32)
+
+# The zones drift on slow sines (update.frag zone_at). A Voronoi lookup per
+# agent per frame is a GPU luxury; on the CPU the lattice is rasterized into a
+# zone-index map once every ZONE_REFRESH frames and read by agent position.
+# At the shipped drift rates (0.07-0.17 rad/s) a site moves ~0.02 lattice
+# cells in 20 frames, so the staleness is invisible and the cost amortizes to
+# a fraction of a millisecond.
+ZONE_REFRESH = 20
+ZONE_MAP_MAX = 224               # zone map is rasterized at <= this and lifted
+                                 # to the grid: interiors are flat, so only the
+                                 # seam's cross-fade needs the resolution
+ZONE_EDGE = 0.16                 # seam cross-fade width, lattice units
+ZONE_WARP = 0.22                 # domain-warp amplitude, lattice units
+TAU = float(2.0 * np.pi)
+
+# Sensing further than a tenth of the frame is sensing globally: the three
+# sensors stop reporting on a neighbourhood and the mold dissolves into a
+# structureless cloud. The mosaic's long-range regimes would otherwise
+# multiply an already-long point (`web`, sense 34) well past that.
+SENSE_MAX_FRAC = 0.10
+
+# Species cross-term: each species is repelled by the NEXT species' trail and
+# mildly drawn to the PREVIOUS one, with this weight on the "drawn to" side.
+# Mirrors update.frag's `float back = 0.35 * cross;`.
+CROSS_BACK = 0.35
+
+# Ceiling on the zone-scaled species cross-term, both engines.
+REPEL_MAX = 1.5
+
+
+def species_matrix(species, cross):
+    """Row-major 3x3 species interaction matrix — the ONE definition.
+
+    Both engines and the browser port implement this arrangement, and it used
+    to be written out three times, which is how the GL field and the CPU
+    field came to disagree about what cross 0 means.
+
+    Diagonal is self-attraction (1). The off-diagonals BLEND from +1 at cross
+    0 toward rock-paper-scissors at cross 1: each species repelled outright by
+    the next, mildly drawn to the previous.
+
+    All-ones is the load-bearing end. Three populations depositing into three
+    channels and sensing their SUM is arithmetically the same field as one
+    population depositing into one, so cross 0 really is the legacy
+    single-channel model — which is what the bottom of `weave` promises. An
+    identity row there instead gives three mutually invisible organisms at a
+    third of the density each: a different picture wearing the same label,
+    and measurably so (channel correlation 0.04 where the legacy field has
+    them locked together).
+    """
+    if int(species) <= 1:
+        return (1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0)
+    c = max(float(cross), 0.0)
+    wn = 1.0 - 2.0 * c                      # the next species: +1 -> -1
+    wp = 1.0 - (1.0 - CROSS_BACK) * c       # the previous one: +1 -> +0.35
+    return (1.0, wn, wp,
+            wp, 1.0, wn,
+            wn, wp, 1.0)
 
 _PARAM_KEYS = ("sense", "spread", "turn", "step", "deposit")
 
@@ -75,8 +200,9 @@ class PhysarumField:
     def __init__(self, n=250_000, gw=480, gh=270, seed=0,
                  point_bg="veins", point_fg="fingers",
                  decay=0.94, diffuse=1, food=0.35, exposure=3.5,
-                 grain=0.5, reseed_frac=0.004, gain=1.0,
-                 sat=0.0, jitter=0.0, hetero=0.0):
+                 grain=0.2, reseed_frac=0.004, gain=1.0,
+                 sat=0.0, jitter=0.0, hetero=0.0, species=3, cross=0.0,
+                 sharpen=0.0, mosaic=0.0, zones=7.0):
         if n <= 0:
             raise ValueError(f"n must be > 0, got {n}")
         if gw <= 0 or gh <= 0:
@@ -90,7 +216,19 @@ class PhysarumField:
         self.px = rng.uniform(0, gw, n).astype(np.float32)
         self.py = rng.uniform(0, gh, n).astype(np.float32)
         self.heading = rng.uniform(0, 2 * np.pi, n).astype(np.float32)
-        self.trail = np.zeros((gh, gw), np.float32)
+        # Species is a LINEAGE, not a per-frame lookup: drawn once here (same
+        # rng, same draw order as PhysarumFieldGL's agent-texture .w slot) and
+        # never rewritten. Reseeds, spawn_burst, wave and gather all move
+        # agents around by index, so an agent keeps its species for life.
+        self.species = max(1, min(3, int(species)))
+        self._species = rng.integers(0, self.species, n).astype(np.int32)
+        # Three species channels. Each species lays into its own channel and
+        # senses all three through a signed matrix, so one population can be
+        # REPELLED by another's trail — the mechanism behind exclusion
+        # membranes and travelling fronts, which a single-channel attract-only
+        # field cannot express at any parameter setting. `trail_total` is the
+        # 2-D picture (the whole organism) and what the statistics run on.
+        self.trail = np.zeros((gh, gw, 3), np.float32)
         # params
         self.point_bg = point_bg
         self.point_fg = point_fg
@@ -109,20 +247,159 @@ class PhysarumField:
         self.jitter = jitter            # random per-step heading wobble (rad)
         self.hetero = hetero            # 0..1 blend toward a 3-sub-population
                                         # sense-range split (short/mid/long)
+        self.cross = float(cross)       # off-diagonal strength of the species
+                                        # matrix (0 = three independent molds)
+        self.sharpen = float(sharpen)   # lateral inhibition in the diffusion
+                                        # pass (centre-surround, not a smear)
+        self.mosaic = float(mosaic)     # 0..1 spatial parameter mosaic strength
+        self.zones = float(zones)       # zone lattice density across the grid
         # slow structural modulation (the mode's `evolve` drives these):
         # multipliers on the blended point parameters — moving the
         # sense/turn/spread/step geometry re-organizes the network topology,
         # where gain alone only re-scales its tempo
         self.mod_sense = 1.0
         self.mod_turn = 1.0
+        self.ballistic = 0.0   # steering suppression, decays after a wave
         self.mod_spread = 1.0
         self.mod_step = 1.0
         self.mod_deposit = 1.0
         self._rng = rng
-        self._laid = np.zeros((gh, gw), np.float32)
+        self._laid = np.zeros((gh, gw, 3), np.float32)
         self._norm = 0.0                # last luminance() percentile (sat cap ref)
         # per-agent sense-range multiplier groups for `hetero` (1/3 each)
         self._sense_group = HETERO_MULTS[np.arange(n) % 3].astype(np.float32)
+        self.frame = 0                  # drives the zone lattice's slow drift
+        self._zmap = None               # (gh, gw) int8 regime index per pixel
+        self._zmap_frame = -10 ** 9
+        self._zmap_zones = None
+        self._zhash = None              # (Z, Z, 3) per-lattice-cell hash
+        # the zone lattice must not perturb the agent stream's determinism
+        self._zrng_seed = int(seed) ^ 0x5A0E
+
+    # ----- the picture, and its species decomposition -----
+    @property
+    def trail_total(self):
+        """The whole organism: the species channels summed, (gh, gw) float32.
+
+        The picture, the p95 normalization and the `sat` reference all run on
+        this — matching stats.frag / tonemap.frag, which sum .rgb."""
+        tr = self.trail
+        return tr[..., 0] + tr[..., 1] + tr[..., 2]
+
+    @property
+    def trail_species(self):
+        """Per-species trail, (gh, gw, 3) float32 — mirrors PhysarumFieldGL."""
+        return self.trail
+
+    def species_of(self):
+        """Per-agent species index, int32 (n,) — mirrors PhysarumFieldGL."""
+        return self._species.copy()
+
+    def interaction_matrix(self):
+        """This field's species matrix — see `species_matrix`."""
+        return species_matrix(self.species, self.cross)
+
+    # ----- the spatial mosaic -----
+    def _zone_mults(self):
+        """(gh*gw, 5) float32 of per-pixel regime multipliers — sense, turn,
+        spread, step, cross — rebuilt every ZONE_REFRESH frames.
+
+        This is update.frag's zone_at() rasterized. Same lattice: `zones`
+        sites across the grid, each drifting on its own slow sine, wrapping on
+        the torus, nearest site wins. Three details carry the character:
+
+        - **Domain warp.** A Voronoi diagram is made of straight lines, and a
+          straight line across a slime mold reads instantly as machinery. Two
+          cheap sine octaves bend the boundaries into something the organism
+          could have grown. In lattice units, so it scales with zone size.
+        - **A zone picks ONE regime outright**, not a blend of six —
+          continuous multipliers average back into a single texture.
+        - **...except on the seam itself**, where the nearest and second
+          nearest zones cross-fade over a narrow band, so the transition is a
+          front rather than a visible polygon edge.
+
+        The GPU does this per agent per frame; here it is a map, because the
+        lattice drifts at 0.07-0.17 rad/s and a 20-frame-old seam has moved
+        about 0.02 of a cell. Storing the BLENDED multipliers rather than a
+        zone index folds the seam cross-fade in for free and leaves one
+        gather per agent instead of two plus a mix."""
+        z = max(float(self.zones), 1.0)
+        if (self._zmap is not None and self._zmap_zones == z
+                and self.frame - self._zmap_frame < ZONE_REFRESH):
+            return self._zmap
+        gw, gh = self.gw, self.gh
+        nz = max(1, int(round(z)))
+        if self._zhash is None or self._zhash.shape[0] != nz:
+            self._zhash = np.random.default_rng(
+                self._zrng_seed ^ (nz * 0x9E3779B9)).random(
+                    (nz, nz, 3)).astype(np.float32)
+        step = max(1, int(np.ceil(max(gw, gh) / float(ZONE_MAP_MAX))))
+        cw, ch = max(1, gw // step), max(1, gh // step)
+        t = np.float32(self.frame * (1.0 / 60.0))
+        nx0 = (((np.arange(cw, dtype=np.float32) + 0.5) * (gw / cw)) / gw * z)
+        ny0 = (((np.arange(ch, dtype=np.float32) + 0.5) * (gh / ch)) / gh * z)
+        # the warp reads the UNWARPED other axis (GLSL evaluates the whole
+        # vec2 before the +=), so each offset stays one-dimensional
+        wx = ZONE_WARP * (np.sin(ny0 * 2.7 + t * 0.05)
+                          + 0.5 * np.sin(ny0 * 6.1 - t * 0.031))
+        wy = ZONE_WARP * (np.cos(nx0 * 2.3 - t * 0.043)
+                          + 0.5 * np.cos(nx0 * 5.3 + t * 0.037))
+        NX = nx0[None, :] + wx[:, None]
+        NY = ny0[:, None] + wy[None, :]
+        i0x = np.floor(NX).astype(np.int32)
+        i0y = np.floor(NY).astype(np.int32)
+        # the drift is a property of the LATTICE CELL, not of the pixel, and
+        # there are only nz*nz cells: evaluate the sines once per cell here
+        # instead of once per sample per neighbour (18 transcendentals over
+        # the whole raster, which dominated the rebuild)
+        r0t, r1t, r2t = (self._zhash[..., 0], self._zhash[..., 1],
+                         self._zhash[..., 2])
+        dxt = (0.42 * np.sin(t * (0.09 + 0.08 * r0t) + TAU * r1t)).ravel()
+        dyt = (0.42 * np.cos(t * (0.07 + 0.07 * r1t) + TAU * r2t)).ravel()
+        r0t = r0t.ravel()
+        big = np.float32(1e18)
+        best = np.full((ch, cw), big, np.float32)
+        nxt = np.full((ch, cw), big, np.float32)
+        hv = np.full((ch, cw), 0.5, np.float32)
+        hv2 = np.full((ch, cw), 0.5, np.float32)
+        for dy in (-1, 0, 1):
+            gy = i0y + dy
+            wyi = np.mod(gy, nz) * nz
+            gyf = gy.astype(np.float32) + 0.5
+            for dx in (-1, 0, 1):
+                gx = i0x + dx
+                ci = wyi + np.mod(gx, nz)                      # flat cell id
+                r0 = r0t[ci]
+                sx = gx.astype(np.float32) + 0.5 + dxt[ci]
+                sy = gyf + dyt[ci]
+                ddx, ddy = NX - sx, NY - sy
+                dd = ddx * ddx + ddy * ddy
+                win = dd < best
+                run = (~win) & (dd < nxt)
+                nxt = np.where(win, best, np.where(run, dd, nxt))
+                hv2 = np.where(win, hv, np.where(run, r0, hv2))
+                best = np.where(win, dd, best)
+                hv = np.where(win, r0, hv)
+        # 0 deep inside a zone, 0.5 on the seam: narrow, so the seam stays a
+        # seam and not a gradient
+        gap = np.sqrt(np.maximum(nxt, 0.0)) - np.sqrt(np.maximum(best, 0.0))
+        u = np.clip(gap * np.float32(1.0 / ZONE_EDGE), 0.0, 1.0)
+        edge = (0.5 * (1.0 - u * u * (3.0 - 2.0 * u))).astype(np.float32)
+        za = np.clip(np.floor(hv * ZONE_REGIME_COUNT),
+                     0, ZONE_REGIME_COUNT - 1).astype(np.int32)
+        zb = np.clip(np.floor(hv2 * ZONE_REGIME_COUNT),
+                     0, ZONE_REGIME_COUNT - 1).astype(np.int32)
+        e = edge[..., None]
+        m4 = ZONE_REGIME_MULTS[za] * (1.0 - e) + ZONE_REGIME_MULTS[zb] * e
+        mc = (ZONE_REGIME_CROSS[za] * (1.0 - edge)
+              + ZONE_REGIME_CROSS[zb] * edge)
+        small = np.concatenate([m4, mc[..., None]], axis=2).astype(np.float32)
+        full = cv2.resize(small, (gw, gh), interpolation=cv2.INTER_LINEAR)
+        self._zmap = np.ascontiguousarray(
+            full.reshape(gh * gw, 5).T)                    # (5, gh*gw)
+        self._zmap_frame = self.frame
+        self._zmap_zones = z
+        return self._zmap
 
     # ----- parameter blending -----
     def _blend_params(self, t):
@@ -149,6 +426,41 @@ class PhysarumField:
         self.point_bg, self.point_fg = self.point_fg, self.point_bg
 
     # ----- one simulation frame -----
+    def _diffuse(self):
+        # diffuse + decay. A plain box blur is the most structure-destroying
+        # kernel there is at a given radius: it only ever smears. `sharpen`
+        # subtracts a slice of the WIDER surround, turning diffusion into a
+        # centre-surround operator, so a strong vein suppresses its own
+        # neighbourhood — sharpening the vein and digging the dark halo around
+        # it. Those halos are most of what reads as carved rather than smoked.
+        #
+        # The inhibition is SPLIT across the two axes, HALF STRENGTH ON EACH,
+        # matching physarum_gl._blur_decay, which sets u_sharpen to
+        # sharpen*0.5 on both the H and the V pass. On one axis only it is a
+        # directional operator and the picture laminates along it; at full
+        # strength on both it doubles the operator and collapses into a
+        # pixel-scale Turing dot pattern. Half and half is the isotropic one.
+        r = int(self.diffuse) if self.diffuse > 0 else 0
+        sh = max(float(self.sharpen), 0.0)
+        if r > 0 or sh > 0:
+            k = 2 * r + 1
+            if sh > 0:
+                rw = max(3 * r, r + 2)
+                w = 2 * rw + 1
+                half = np.float32(sh * 0.5)
+
+                def centre_surround(img, ksz, wsz):
+                    blurred = cv2.boxFilter(img, -1, ksz)
+                    surround = cv2.boxFilter(img, -1, wsz)
+                    return np.maximum(blurred - half * (surround - blurred),
+                                      np.float32(0.0))
+
+                # cv2 ksize is (width, height): (k, 1) is the H pass.
+                tmp = centre_surround(self.trail, (k, 1), (w, 1))
+                self.trail = centre_surround(tmp, (1, k), (1, w))
+            else:
+                self.trail = cv2.boxFilter(self.trail, -1, (k, k))
+
     def update(self, matte, gray, keep=None):
         """matte, gray: float32 (gh, gw) in [0,1]. Advances agents one frame
         and rebuilds the trail map.
@@ -162,33 +474,113 @@ class PhysarumField:
 
         # float32 modulo can land exactly ON the upper bound (a hair below gw
         # rounds up in float32), so every grid index wraps in INT space
-        t = matte[py.astype(np.int32) % gh, px.astype(np.int32) % gw]
+        cy = py.astype(np.int32) % gh
+        cx = px.astype(np.int32) % gw
+        t = matte[cy, cx]
         p = self._blend_params(t)
         sense_d = p["sense"] * self.gain
         step_d = p["step"] * self.gain
+        turn_a = p["turn"]
+        spread_a = p["spread"]
         if self.hetero > 0:
             # blend each agent's sense range toward its sub-population's
             sense_d = sense_d * (1.0 + (self._sense_group - 1.0) * self.hetero)
 
-        # what the sensors read: laid trail plus the footage's light as food.
-        # `sat` softly caps the sensed trail at sat x its own bright end, so
-        # a saturated fat vein reads the same as a merely strong thin one —
-        # the single strongest anti-thoroughfare lever (fat veins stop
-        # winning every recruitment contest).
-        sensed = self.trail
+        # ----- the spatial mosaic -----
+        # One parameter set over the whole canvas grows one texture, and no
+        # slider changes that. The zone an agent stands in picks ONE regime
+        # outright and multiplies its geometry (and its species cross-term) by
+        # that regime's entries, mixed in by `mosaic` — the same
+        # mix(1.0, r, u_mosaic) update.frag does. Hard seams, not a blend: the
+        # blend is what averages six characters back into one.
+        cross_base = max(float(self.cross), 0.0) if self.species > 1 else 0.0
+        cross = cross_base
+        mos = min(max(float(self.mosaic), 0.0), 1.0)
+        if mos > 0.0:
+            reg = self._zone_mults()
+            here = cy * gw + cx
+            m = np.float32(mos)
+            one = np.float32(1.0)
+
+            def zmul(row, base):
+                return base * (one + (reg[row][here] - one) * m)
+            sense_d = zmul(0, sense_d)
+            turn_a = zmul(1, turn_a)
+            spread_a = zmul(2, spread_a)
+            step_d = zmul(3, step_d)
+            if cross > 0.0:
+                cross = zmul(4, cross)
+                # The zones scale it; do not let it run away. Mirrors
+                # update.frag's `repel = min(repel, 1.5)`. Unreachable today
+                # (max is cross<=1 x the `mesh` regime's 1.45) but the shader
+                # grew the clamp and this did not, which is exactly the kind
+                # of silent asymmetry the shared species_matrix() exists to
+                # prevent — a latent one is still one.
+                cross = np.minimum(cross, np.float32(REPEL_MAX))
+        # ...but never past a tenth of the frame. `web` already sits at the
+        # ceiling by design, and the mosaic's long-range regimes would
+        # otherwise multiply it past the point where any local structure can
+        # survive — the sensors stop reporting on a neighbourhood at all.
+        sense_max = np.float32(SENSE_MAX_FRAC * min(gw, gh))
+        sense_d = np.minimum(sense_d, sense_max)
+
+        # ----- what the sensors read -----
+        # Species s reads dot(row_s, trail[p]): its own channel attracts, the
+        # others pull with the signed weights of interaction_matrix(). Written
+        # as total - cross * (0.65*previous + 2*next), which is that row
+        # rearranged: at cross 0 it collapses to the plain channel SUM, i.e.
+        # the legacy single-channel field. Folding the two channel
+        # permutations into one plane means a sample is
+        # two gathers instead of a 3x3 mix of the whole grid.
+        tr_f = self.trail.reshape(-1)                # index cell*3 + species
+        sp = self._species
+        # `multi` decides WHICH field is read, `use_cross` only whether the
+        # repulsion term is worth computing. They are not the same switch: at
+        # cross 0 a three-species field still reads the channel SUM (the
+        # legacy single-channel model), never its own channel alone.
+        multi = self.species > 1
+        use_cross = multi and cross_base > 0.0
+        mix_f = tot_f = None
+        if multi:
+            tot_f = self.trail.sum(axis=2, dtype=np.float32).reshape(-1)
+        if use_cross:
+            mix_f = (np.float32(1.0 - CROSS_BACK) * self.trail[..., [2, 0, 1]]
+                     + np.float32(2.0) * self.trail[..., [1, 2, 0]]).reshape(-1)
+        # `sat` softly caps the sensed trail at sat x its own bright end, so a
+        # saturated fat vein reads the same as a merely strong thin one — the
+        # single strongest anti-thoroughfare lever. The dot product is SIGNED
+        # once the off-diagonals bite, and exp(-t/C) on a negative t diverges,
+        # so cap the MAGNITUDE and keep the sign (update.frag's `food`).
         cap = float(self.sat) * self._norm
-        if cap > 0:
-            sensed = cap * (1.0 - np.exp(sensed * np.float32(-1.0 / cap)))
-        food = sensed if self.food <= 0 else sensed + self.food * gray
+        # food is in TRAIL units (see physarum_gl._food_norm): gray is
+        # [0,1] and the trail is ~33 at equilibrium, so an unscaled
+        # term cannot steer anything once a network exists.
+        fnorm = self._norm if self._norm > 0.0 else 1.0
+        gfood = (None if self.food <= 0
+                 else ((self.food * fnorm) * gray).reshape(-1))
 
         def _sample(angle_off):
             sx = px + np.cos(h + angle_off) * sense_d
             sy = py + np.sin(h + angle_off) * sense_d
-            return food[sy.astype(np.int32) % gh, sx.astype(np.int32) % gw]
+            c = (sy.astype(np.int32) % gh) * gw + (sx.astype(np.int32) % gw)
+            i3 = c * 3 + sp
+            if use_cross:
+                v = tot_f[c] - cross * mix_f[i3]
+            elif multi:
+                v = tot_f[c]
+            else:
+                v = tr_f[i3]
+            if cap > 0:
+                a = np.abs(v)
+                np.exp(a * np.float32(-1.0 / cap), out=a)
+                v = np.copysign(np.float32(cap) * (1.0 - a), v)
+            if gfood is not None:
+                v = v + gfood[c]
+            return v
 
         f_c = _sample(0.0)
-        f_l = _sample(-p["spread"])
-        f_r = _sample(p["spread"])
+        f_l = _sample(-spread_a)
+        f_r = _sample(spread_a)
 
         # Jones steering: hold when ahead wins; flip a coin when ahead loses to
         # both sides; otherwise turn toward the stronger side.
@@ -197,12 +589,16 @@ class PhysarumField:
             (f_c > f_l) & (f_c > f_r), 0.0,
             np.where((f_c < f_l) & (f_c < f_r), rand_sign,
                      np.where(f_l > f_r, -1.0, 1.0))).astype(np.float32)
-        h += turn * p["turn"]
+        # The wave's ballistic phase: for a beat after a wave, steering and
+        # wobble are suppressed so the outward front actually travels instead
+        # of being steered back within a frame or two. Decays every update.
+        b = np.float32(1.0 - min(max(self.ballistic, 0.0), 1.0))
+        h += turn * (turn_a * b)
         if self.jitter > 0:
             # per-step heading wobble: highways stop being perfectly straight
             # attractors and the mold keeps probing sideways
             h += ((self._rng.random(n, dtype=np.float32) * 2.0 - 1.0)
-                  * np.float32(self.jitter))
+                  * np.float32(self.jitter) * b)
 
         px += np.cos(h) * step_d
         py += np.sin(h) * step_d
@@ -210,16 +606,16 @@ class PhysarumField:
         py %= gh
 
         # deposit — one bincount over flattened grid indices, the cheap way to
-        # scatter-add N agents without np.add.at's per-element dispatch
-        idx = (py.astype(np.int32) % gh) * gw + (px.astype(np.int32) % gw)
-        laid = np.bincount(idx, weights=p["deposit"], minlength=gw * gh)
-        self._laid = laid.reshape(gh, gw).astype(np.float32)
+        # scatter-add N agents without np.add.at's per-element dispatch. Each
+        # agent lands in its OWN species channel (deposit.vert's one-hot
+        # v_mask), so the index carries the species in its low digit.
+        idx = ((py.astype(np.int32) % gh) * gw
+               + (px.astype(np.int32) % gw)) * 3 + sp
+        laid = np.bincount(idx, weights=p["deposit"], minlength=gw * gh * 3)
+        self._laid = laid.reshape(gh, gw, 3).astype(np.float32)
         self.trail += self._laid
 
-        # diffuse + decay
-        if self.diffuse > 0:
-            k = 2 * int(self.diffuse) + 1
-            self.trail = cv2.boxFilter(self.trail, -1, (k, k))
+        self._diffuse()
         if keep is None:
             self.trail *= self.decay
         else:
@@ -228,7 +624,7 @@ class PhysarumField:
                    + np.float32(KEEP_HOLD - self.decay) * np.maximum(k, 0.0)
                    - np.float32(MELT_DROP) * np.maximum(-k, 0.0))
             self.trail *= np.clip(eff, np.float32(MELT_FLOOR),
-                                  np.float32(KEEP_HOLD))
+                                  np.float32(KEEP_HOLD))[..., None]
 
         # recycle a trickle of agents onto the lit subject, so the network
         # keeps finding whoever is in frame instead of ossifying
@@ -239,6 +635,10 @@ class PhysarumField:
             self.px[pick] = rx
             self.py[pick] = ry
             self.heading[pick] = self._rng.uniform(0, 2 * np.pi, budget).astype(np.float32)
+            # species is NOT redrawn: a reseed relocates a lineage, it does
+            # not replace it (update.frag carries a.w through untouched)
+        self.ballistic *= BALLISTIC_DECAY
+        self.frame += 1
 
     def _sample_weighted(self, weight, k):
         w = weight.ravel().astype(np.float64)
@@ -266,9 +666,15 @@ class PhysarumField:
         self.heading[pick] = self._rng.uniform(0, 2 * np.pi, k).astype(np.float32)
 
     def wave(self, x, y):
-        """Point every agent's heading away from (x, y) — one radial impulse
-        that ripples the whole organism outward, then the mold reknits."""
+        """Point every agent's heading away from (x, y), and hold it there.
+
+        The impulse alone is one frame of new headings, and steering takes
+        most of them back before the front has gone anywhere. Arming the
+        ballistic phase suppresses steering while it decays, so the ring
+        actually travels; then the mold reknits.
+        """
         self.heading = np.arctan2(self.py - y, self.px - x).astype(np.float32)
+        self.ballistic = 1.0
 
     def gather(self, x, y, frac=0.5, radius=60.0):
         """Rush agents already within `radius` of (x, y) into a tight knot
@@ -306,13 +712,26 @@ class PhysarumField:
         `grain` mixes the CURRENT frame's raw deposits (pre-blur agent
         positions) over the smooth diffused trail — that per-frame dust is
         what makes the organism look granular and alive instead of airbrushed."""
-        norm = float(np.percentile(self.trail, 95.0))
+        tr = self.trail
+        total = tr[..., 0] + tr[..., 1] + tr[..., 2]
+        norm = float(np.percentile(total, 95.0))
+        # Smooth it, exactly as PhysarumFieldGL does with NORM_EMA. A raw
+        # per-frame p95 renormalizes the picture against its own noise every
+        # frame, which reads as a slow pump — and it also feeds the `sat` and
+        # `food` scales, so an unsmoothed reference makes the SENSING wobble
+        # too. The two engines used different references here until this
+        # comment was written, which is precisely the kind of quiet divergence
+        # "both engines implement the same model" is supposed to exclude.
+        if self._norm > 0.0 and norm > 0.0:
+            norm = self._norm * NORM_EMA + norm * (1.0 - NORM_EMA)
         self._norm = norm               # feedback for the `sat` sensing cap
         if norm <= 0:
             return np.zeros((self.gh, self.gw), np.float32)
-        x = self.trail * (1.0 / norm)
+        x = total * (1.0 / norm)
         if self.grain > 0:
-            gnorm = float(self._laid.mean()) * 4.0
+            ld = self._laid
+            laid = ld[..., 0] + ld[..., 1] + ld[..., 2]
+            gnorm = float(laid.mean()) * 4.0
             if gnorm > 0:
-                x = x + self.grain * (self._laid * (1.0 / gnorm))
+                x = x + self.grain * (laid * (1.0 / gnorm))
         return (1.0 - np.exp(-self.exposure * x)).astype(np.float32)

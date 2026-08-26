@@ -14,5 +14,8 @@ layout(location = 0) out vec4 f_color;
 void main() {
     ivec2 c = ivec2(gl_FragCoord.xy) * u_stride;
     c = min(c, u_grid - 1);
-    f_color = vec4(texelFetch(u_trail, c, 0).r, texelFetch(u_laid, c, 0).r, 0.0, 1.0);
+    // the picture is the whole organism: sum the species channels
+    vec3 t = texelFetch(u_trail, c, 0).rgb;
+    vec3 l = texelFetch(u_laid, c, 0).rgb;
+    f_color = vec4(t.r + t.g + t.b, l.r + l.g + l.b, 0.0, 1.0);
 }
