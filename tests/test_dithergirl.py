@@ -854,6 +854,38 @@ def test_every_palette_is_distinct_from_every_other():
         assert d >= 8.0, f"{a} vs {b}: ramps only {d:.1f} apart"
 
 
+def test_palettes_stay_distinct_at_the_bit_depths_the_mode_ships():
+    """The ramp test above samples 256 levels; the mode never renders 256.
+    With B bits the dither emits only 2**B levels, so two ramps can be far
+    apart continuously and land on nearly the same handful of colours at the
+    depth actually on screen — a dead cycle stop by the perceptibility rule
+    (magic-over-control, 2026-08-24), invisible to a continuous measurement.
+
+    Measured at Bits 2-4 (closest pair: amber/hi-vis, 11.9-12.4).
+
+    Bits 1 is deliberately NOT asserted here: at one bit every palette is
+    its END PAIR by construction, and the multi-colour ramps are documented
+    as alive from Bits 2 up. It is a real narrowing of the cycle at that
+    depth — `cga` and `mono` render identical, and aurora/cga, mono/aurora
+    and ultraviolet/vaporwave sit at 5.0-7.3 — and which way to resolve it
+    is a design call, not something a test should pin as desirable.
+    """
+    import itertools
+
+    from dtouch.modes.dithergirl import palette_stops
+
+    for bits in (2, 3, 4):
+        n = 1 << bits
+        lv = (np.arange(n, dtype=np.float32) / (n - 1)).reshape(1, n)
+        ramps = {p: DitherGirlMode._palette_map(lv, palette_stops(p))
+                     .astype(np.float32)
+                 for p in PALETTES}
+        for a, b in itertools.combinations(PALETTES, 2):
+            d = float(np.abs(ramps[a] - ramps[b]).mean())
+            assert d >= 8.0, \
+                f"at {bits} bits, {a} vs {b} render only {d:.1f} apart"
+
+
 # ---------- Invert, and the migration off the retired pair (§4.2) ----------
 
 def test_invert_swaps_the_pair_for_every_palette_but_mono():

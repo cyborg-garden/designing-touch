@@ -524,6 +524,62 @@ def test_nudging_works_in_hidden_and_the_osd_draws_there():
     assert not img2.any()
 
 
+def test_a_master_toggle_cannot_retarget_the_nudge_keys():
+    """The nudge walk is filtered by panelspec.visible, so pressing G or F
+    changes the list's length AND membership. The selection is anchored to
+    the control (ui.nudge_attr), not to a slot number: with Crush selected,
+    turning Glitch off used to leave the index pointing at Size, and the
+    next '-' edited Size before the OSD named it.
+
+    Contract: the keys never write to a control the operator did not select.
+    A press made while the anchored control is gated off re-anchors and
+    shows the OSD, changing nothing.
+    """
+    r = Rig()
+    r.ui.glitch = True
+    ws_on = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws_on) if getattr(w, "attr", "") == "crush")
+    r.ui.nudge_idx, r.ui.nudge_attr = i, "crush"
+
+    r.ui.glitch = False                      # the rack's rows are gated off
+    ws_off = _nudgeables(r.ui)
+    assert len(ws_off) < len(ws_on)
+    victim = ws_off[i % len(ws_off)]         # what the bare index now points at
+    assert getattr(victim, "attr", "") != "crush", "test needs a real collision"
+    before = getattr(r.ui, victim.attr)
+
+    r.press("-")
+    assert getattr(r.ui, victim.attr) == before, \
+        "a gated-off selection silently edited a different control"
+    assert r.hud.osd._show is not None        # ...it re-anchored and said so
+    assert r.ui.nudge_attr == getattr(ws_off[r.ui.nudge_idx], "attr", None)
+
+    # and the re-anchored control is the one the OSD named, so the NEXT
+    # press moves that one and nothing else
+    now = ws_off[r.ui.nudge_idx]
+    was = getattr(r.ui, now.attr)
+    r.press("-")
+    assert getattr(r.ui, now.attr) != was
+    assert getattr(r.ui, victim.attr) == before
+
+
+def test_nudge_selection_survives_a_gate_opening_and_closing():
+    """Turning Glitch back on must put the operator back on the control they
+    had, not on whatever the index happens to hit."""
+    r = Rig()
+    r.ui.glitch = True
+    ws = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws) if getattr(w, "attr", "") == "chroma")
+    r.ui.nudge_idx, r.ui.nudge_attr = i, "chroma"
+    r.ui.glitch = False
+    r.press("-")                              # re-anchor somewhere else
+    r.ui.nudge_attr = "chroma"                # operator re-selects it
+    r.ui.glitch = True
+    before = r.ui.chroma
+    r.press("=")
+    assert r.ui.chroma != before, "the anchored control must be the one moved"
+
+
 def test_nudge_selection_resets_on_spec_rebind():
     """Mode switches rebind the spec (Host.set_mode -> ui.set_spec); the
     nudge selection must reset sanely with it."""

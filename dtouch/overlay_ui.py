@@ -413,6 +413,12 @@ class OverlayUI:
         # spec-order list of nudgeable widgets (Sliders + Cycles). Rebinding
         # the spec (mode switch) resets it to the first control.
         self.nudge_idx = 0
+        # ...and the ANCHOR that index is re-derived from. The nudgeable list
+        # is filtered by panelspec.visible, so it changes shape the moment a
+        # master toggle (Glitch/Flock/Video bg) flips. An index alone would
+        # then point at whatever row slid into that slot — see the shell's
+        # nudge wiring.
+        self.nudge_attr = None
         self._toggles = {}    # hit key -> Toggle
         self._cycles = {}     # hit key -> Cycle
         self._sliders = {}    # attr -> Slider
