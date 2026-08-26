@@ -180,9 +180,16 @@ def test_clicking_a_header_reveals_its_controls():
     ui = _ui()
     ui.sections["MOTION"] = True
     keys = _keys(ui)
+    # Flock off: only the master toggle draws — the gains are gated off
+    # (panelspec.visible; they steer nothing while Flock is off)
+    assert "flock" in keys
+    assert not any(p and p[0] in ("cohere", "align", "separate")
+                   for _, kk, p in ui._hot if kk == "slider")
+    ui.flock = True
+    keys = _keys(ui)
     for k in ("flock", "cohere", "align", "separate"):
         assert k in keys or any(p and p[0] == k for _, kk, p in ui._hot if kk == "slider"), \
-            f"{k} should be reachable when MOTION is open"
+            f"{k} should be reachable when MOTION is open and Flock is on"
 
 
 def test_motion_controls_are_wired():

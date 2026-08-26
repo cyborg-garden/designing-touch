@@ -278,18 +278,44 @@ dtouch · PARTICLES
 - TEMPLATES        ← PresetList: rows, slot badges [1]..[9], Save current look
 - SOURCE           ← matte cycle · output res · Video bg · Vid mix
 - LOOK             ← color cycle · Trails Glow Spark Flow Size Count Glide Pull Reseed
-- MOTION   (F)     ← Flock toggle · Cohere · Align · Separate      [starts closed]
-- SIGNAL   (G)     ← Glitch toggle · dither cycle (bayer·blue·fs·riemersma·off) ·
-                     Bits · Gamma (ON) · Bias (auto/light/dark) · Chroma · Drift ·
-                     Crush · Scanlines                             [starts closed]
+- MOTION   (F)     ← Flock toggle · [Cohere · Align · Separate]    [starts closed]
+- SIGNAL   (G)     ← Glitch toggle · [dither cycle (bayer·blue·fs·riemersma·off) ·
+                     Pixel · Bits · Gamma (ON) · Bias (auto/light/dark) ·
+                     Chroma · Drift · Crush · Scanlines]           [starts closed]
 ──────────────────
-Sound react (A) · Sens · Record (R) · Mirror · Menu (M) · Quit
+Sound react (A) · [Sens] · Record (R) · Mirror · Menu (M) · Quit
 ```
 
 Identical section order, names, labels, and widget shapes as shipped. Visible
 changes only: slot badges, key hints on section headers, SIGNAL's new dither-
 quality controls. Boids sliders keep their labels; their tooltips say the human
 thing ("how tightly the swarm pulls together", etc.).
+
+**[Bracketed] rows draw only where they act** (`panelspec.show_when`, read by
+`panelspec.visible` — the magic-over-control decision, 2026-08-24: *a visible
+control that does nothing perceptible in the current state is a bug*). The
+shell runs the rack only behind `ui.glitch`, so every dependent SIGNAL row
+measured exactly 0.000 rendered difference with Glitch off; the boids gains
+are forced to 0 with Flock off; Vid mix mixes nothing with Video bg off; Sens
+scales an audio modulation that is zero with Sound react off. The master
+toggle always stays (the section still reads as a thing you can turn on) and
+its dependants unfold when they start acting. Within SIGNAL the dither-quality
+rows want the rack's dither on at all, and **Bias** additionally wants an
+ordered dither (error diffusion self-corrects and ignores it).
+
+Visibility is a DRAWING property only: capture and apply ignore it (turning
+Glitch off must not strip your Chroma from the next save), hit-testing follows
+drawing for free, the `,`/`.` nudge walk skips hidden rows, and a gated-off
+control's value leaves the spec-derived status line. Both directions are held
+against real rendered frames by `tests/test_perceptibility.py` — visible ⇒
+perceptible, and gated-off ⇒ imperceptible.
+
+**Pixel** (SIGNAL, 0–32 px, whole numbers) is the dither's block size in
+output pixels: 0 = auto, each mode's own working cell (`signal_dither_rows`);
+1 = full-detail dithering; higher = chunkier. It maps in `sync_signal` onto
+`cb.dither_size` — the one number both rack backends already read — so the
+numpy rack and `SignalRackGL` stay in lockstep with no shader change. Dither
+mode claims it: there, Scale *is* that control.
 
 ### 4.2 Dither
 
@@ -312,11 +338,19 @@ lighteater · DITHER
 - TONE             ← Bits (1–4, int) · Gamma toggle (default ON) · Bias cycle
                      auto/light/dark · Contrast · Scale (30–720, default 72) ·
                      grid readout (ASCII only)
-- PALETTE          ← ten two-colour pairs, each shipped only if its own off/on
-                     measures ≥ 4.5:1 (§5): mono · amber · green phosphor ·
-                     cyan · magenta · ice · blood · gameboy · sepia · hi-vis —
-                     plus an **Invert** toggle, and Hue and Tint
-- SIGNAL   (G)     ← shell rack minus dither row
+- PALETTE          ← sixteen N-stop ramps, each shipped only if its own END
+                     pair measures ≥ 4.5:1 (§5). Ten duotones: mono · amber ·
+                     green phosphor · cyan · magenta · ice · blood · gameboy ·
+                     sepia · hi-vis. Six multi-colour: aurora · ultraviolet ·
+                     vaporwave · sunset · oil slick · cga — the quantisation
+                     levels walk the stops piecewise-linearly, so each level
+                     lands on its own hue (alive from Bits 2 up; at Bits 1
+                     every palette is its end pair by construction). A duotone
+                     is a 2-stop ramp and renders bit-for-bit as before —
+                     plus an **Invert** toggle (reverses the walk), and Hue
+                     and Tint (steer every stop)
+- SIGNAL   (G)     ← shell rack minus the controls Dither claims (dither row,
+                     Pixel, Bits, Gamma, Bias)
 ──────────────────
 Sound react (A) · Sens · Record (R) · Menu (M) · Quit
 ```
@@ -373,9 +407,10 @@ only whole numbers?"). A control whose engine cannot use a fraction declares
 its quantum in the spec (`Slider.step`, and `Slider.snap` because Bits and
 Scale round while Crush truncates), and the one number it holds is what the
 panel prints, what the OSD and the spec-derived HUD line print, and what the
-engine consumes. Quantised: **Bits** (both racks, 4 settings), **Scale**
-(whole working pixels / whole character rows), **Crush** (whole output bits,
-`int()`), **Hue** (whole degrees — finer than the track can resolve anyway).
+engine consumes. Quantised: **Bits** (both racks, 4 settings), **Pixel**
+(whole output pixels, `round()`), **Scale** (whole working pixels / whole
+character rows), **Crush** (whole output bits, `int()`), **Hue** (whole
+degrees — finer than the track can resolve anyway).
 Deliberately NOT quantised: Chroma and Drift, which look like pixel counts but
 are the amplitudes of a per-frame draw that then lands on a whole pixel — the
 fraction is used, so the tooltip says where the whole numbers come in instead

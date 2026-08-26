@@ -226,11 +226,14 @@ def test_the_atlas_luminance_curve_cannot_go_backwards():
     The sweep covers the authored inverses too: `mono` inverted is its own
     pair (245/16, not a swap of 0/255), renderable by any look that says
     `invert: true`, and a PALETTES-only sweep never rasterised it."""
-    from dtouch.modes.dithergirl import AUTHORED_INVERSE, PALETTES
+    from dtouch.modes.dithergirl import (AUTHORED_INVERSE, PALETTES,
+                                         palette_pair)
 
     assert "mono" in AUTHORED_INVERSE       # the sweep must include it; an
-    pairs = list(PALETTES.items()) + [      # emptied dict would silently
-        (name + " (inverted)", pair)        # shrink the coverage back
+    # ASCII colours its glyphs with each palette's END pair (a multi-colour
+    # ramp's middle stops never reach the atlas — see DitherGirlMode.step)
+    pairs = [(name, palette_pair(name)) for name in PALETTES] + [
+        (name + " (inverted)", pair)        # an emptied dict would silently
         for name, pair in AUTHORED_INVERSE.items()]
     reordered = 0
     for res in ((1280, 720), (1920, 1080), (3840, 2160)):

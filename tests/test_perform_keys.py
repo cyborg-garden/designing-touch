@@ -407,8 +407,11 @@ def test_the_arrows_and_enter_answer_in_every_overlay_state(code, name, state):
 # ---------- param nudging + OSD (DESIGN.md §6.2) ----------
 
 def _nudgeables(ui):
-    from dtouch.panelspec import nudgeable
-    return [w for w in ui.iter_widgets() if nudgeable(w)]
+    # mirrors the shell's walk: nudgeable AND currently visible (gated-off
+    # rows — SIGNAL under Glitch-off, boids gains under Flock-off — are not
+    # nudge stops either; panelspec.visible)
+    from dtouch.panelspec import nudgeable, visible
+    return [w for w in ui.iter_widgets() if nudgeable(w) and visible(ui, w)]
 
 
 def test_the_nudge_keys_cannot_reach_the_output_resolution():
@@ -519,6 +522,62 @@ def test_nudging_works_in_hidden_and_the_osd_draws_there():
     img2 = np.zeros((360, 640, 3), np.uint8)
     r.hud.draw(img2, OverlayState.HIDDEN)
     assert not img2.any()
+
+
+def test_a_master_toggle_cannot_retarget_the_nudge_keys():
+    """The nudge walk is filtered by panelspec.visible, so pressing G or F
+    changes the list's length AND membership. The selection is anchored to
+    the control (ui.nudge_attr), not to a slot number: with Crush selected,
+    turning Glitch off used to leave the index pointing at Size, and the
+    next '-' edited Size before the OSD named it.
+
+    Contract: the keys never write to a control the operator did not select.
+    A press made while the anchored control is gated off re-anchors and
+    shows the OSD, changing nothing.
+    """
+    r = Rig()
+    r.ui.glitch = True
+    ws_on = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws_on) if getattr(w, "attr", "") == "crush")
+    r.ui.nudge_idx, r.ui.nudge_attr = i, "crush"
+
+    r.ui.glitch = False                      # the rack's rows are gated off
+    ws_off = _nudgeables(r.ui)
+    assert len(ws_off) < len(ws_on)
+    victim = ws_off[i % len(ws_off)]         # what the bare index now points at
+    assert getattr(victim, "attr", "") != "crush", "test needs a real collision"
+    before = getattr(r.ui, victim.attr)
+
+    r.press("-")
+    assert getattr(r.ui, victim.attr) == before, \
+        "a gated-off selection silently edited a different control"
+    assert r.hud.osd._show is not None        # ...it re-anchored and said so
+    assert r.ui.nudge_attr == getattr(ws_off[r.ui.nudge_idx], "attr", None)
+
+    # and the re-anchored control is the one the OSD named, so the NEXT
+    # press moves that one and nothing else
+    now = ws_off[r.ui.nudge_idx]
+    was = getattr(r.ui, now.attr)
+    r.press("-")
+    assert getattr(r.ui, now.attr) != was
+    assert getattr(r.ui, victim.attr) == before
+
+
+def test_nudge_selection_survives_a_gate_opening_and_closing():
+    """Turning Glitch back on must put the operator back on the control they
+    had, not on whatever the index happens to hit."""
+    r = Rig()
+    r.ui.glitch = True
+    ws = _nudgeables(r.ui)
+    i = next(i for i, w in enumerate(ws) if getattr(w, "attr", "") == "chroma")
+    r.ui.nudge_idx, r.ui.nudge_attr = i, "chroma"
+    r.ui.glitch = False
+    r.press("-")                              # re-anchor somewhere else
+    r.ui.nudge_attr = "chroma"                # operator re-selects it
+    r.ui.glitch = True
+    before = r.ui.chroma
+    r.press("=")
+    assert r.ui.chroma != before, "the anchored control must be the one moved"
 
 
 def test_nudge_selection_resets_on_spec_rebind():

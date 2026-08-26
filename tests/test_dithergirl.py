@@ -117,7 +117,9 @@ def test_status_line_is_spec_derived_and_ascii(tmp_path):
     host = _booted(tmp_path)
     s = host._status_line()
     assert s == s.encode("ascii", "replace").decode()
-    assert s == "DITHER  floyd-steinberg  1-bit  bias auto  src synthetic"
+    # no "bias auto" here: under Floyd-Steinberg bias does nothing, so its
+    # row is hidden (panelspec.visible) and the status line skips it too
+    assert s == "DITHER  floyd-steinberg  1-bit  src synthetic"
     host.ui.dg_algo_idx = ALGOS.index("Blue noise")
     host.ui.dg_bits = 3.0
     host.ui.input_idx = 1                    # still input -> src tail follows
@@ -228,8 +230,42 @@ def test_global_mirror_kept_for_particles():
 
 def test_palette_map_endpoints():
     lv = np.array([[0.0, 1.0]], np.float32)
-    out = DitherGirlMode._palette_map(lv, (0, 0, 0), (255, 255, 255))
+    out = DitherGirlMode._palette_map(lv, ((0, 0, 0), (255, 255, 255)))
     assert out[0, 0].tolist() == [0, 0, 0] and out[0, 1].tolist() == [255, 255, 255]
+
+
+def test_palette_map_duotone_is_bit_identical_to_the_shipped_formula():
+    """The multi-stop walk must not re-tone a single duotone pixel: for two
+    stops it computes exactly off + levels*(on-off), truncated the same."""
+    rng = np.random.default_rng(0)
+    lv = rng.random((48, 64)).astype(np.float32)
+    off, on = PALETTES["amber"]
+    want = (np.float32(off)[None, None, :]
+            + lv[:, :, None] * (np.float32(on) - np.float32(off))
+            ).astype(np.uint8)
+    got = DitherGirlMode._palette_map(lv, (off, on))
+    np.testing.assert_array_equal(want, got)
+
+
+def test_palette_map_multi_stop_hits_each_stop():
+    """With B bits the dither emits levels k/(2^B - 1); a stop tuple of
+    matching length puts each level exactly ON its own stop — the whole
+    point of the multi-colour palettes (one hue per level)."""
+    from dtouch.modes.dithergirl import palette_stops
+
+    stops = palette_stops("cga")                 # 4 stops
+    lv = np.array([[0.0, 1 / 3, 2 / 3, 1.0]], np.float32)
+    out = DitherGirlMode._palette_map(lv, stops)
+    got = [tuple(c) for c in out[0]]
+    assert got == list(stops), got
+
+    stops5 = palette_stops("aurora")             # 5 stops, 2-bit sampling
+    out = DitherGirlMode._palette_map(lv, stops5)
+    mids = [tuple(c) for c in out[0, 1:3]]
+    # the two middle levels land between stops (piecewise-linear), and on
+    # DIFFERENT hues — green-leading vs blue-leading for aurora
+    assert mids[0][1] > mids[0][0] and mids[0][1] > mids[0][2]
+    assert mids[1][2] > mids[1][0]
 
 
 @pytest.mark.parametrize("palette,invert,white_out,black_out", [
@@ -776,15 +812,17 @@ def test_every_palette_reads_at_projector_distance():
     """Colour is state, never decoration (§5) — and a duotone whose two ends
     do not separate is not a look, it is an unreadable picture. 4.5:1 is the
     same floor the mode accent was picked against."""
-    for name, (off, on) in PALETTES.items():
-        assert _contrast(off, on) >= 4.5, f"{name} is too flat to project"
+    for name in PALETTES:
+        assert _contrast(*palette_pair(name)) >= 4.5, \
+            f"{name} is too flat to project"
 
 
 def test_palettes_are_ascii_named_and_well_formed():
-    for name, pair in PALETTES.items():
+    for name, stops in PALETTES.items():
         assert name == name.encode("ascii", "replace").decode()
-        assert len(pair) == 2
-        for c in pair:
+        # duotones are 2 stops; the multi-colour ramps carry 4-5
+        assert 2 <= len(stops) <= 5
+        for c in stops:
             assert len(c) == 3 and all(0 <= v <= 255 for v in c)
 
 
@@ -797,14 +835,70 @@ def test_every_palette_reads_at_projector_distance_inverted_too():
         assert _contrast(off, on) >= 4.5, f"{name} inverted is too flat"
 
 
+def test_every_palette_is_distinct_from_every_other():
+    """The perceptibility rule pointed at the palette list: a cycle stop
+    that renders nearly the same picture as another stop is a dead option.
+    Measured as mean-abs distance between full 256-level ramps — the worst
+    shipped pair (amber vs hi-vis, 11.8) sets the scale; the multi-colour
+    additions all clear 21."""
+    import itertools
+
+    from dtouch.modes.dithergirl import palette_stops
+
+    lv = np.linspace(0.0, 1.0, 256, dtype=np.float32).reshape(1, 256)
+    ramps = {n: DitherGirlMode._palette_map(lv, palette_stops(n))
+                 .astype(np.float32)
+             for n in PALETTES}
+    for a, b in itertools.combinations(PALETTES, 2):
+        d = float(np.abs(ramps[a] - ramps[b]).mean())
+        assert d >= 8.0, f"{a} vs {b}: ramps only {d:.1f} apart"
+
+
+def test_palettes_stay_distinct_at_the_bit_depths_the_mode_ships():
+    """The ramp test above samples 256 levels; the mode never renders 256.
+    With B bits the dither emits only 2**B levels, so two ramps can be far
+    apart continuously and land on nearly the same handful of colours at the
+    depth actually on screen — a dead cycle stop by the perceptibility rule
+    (magic-over-control, 2026-08-24), invisible to a continuous measurement.
+
+    Measured at Bits 2-4 (closest pair: amber/hi-vis, 11.9-12.4).
+
+    Bits 1 is deliberately NOT asserted here: at one bit every palette is
+    its END PAIR by construction, and the multi-colour ramps are documented
+    as alive from Bits 2 up. It is a real narrowing of the cycle at that
+    depth — `cga` and `mono` render identical, and aurora/cga, mono/aurora
+    and ultraviolet/vaporwave sit at 5.0-7.3 — and which way to resolve it
+    is a design call, not something a test should pin as desirable.
+    """
+    import itertools
+
+    from dtouch.modes.dithergirl import palette_stops
+
+    for bits in (2, 3, 4):
+        n = 1 << bits
+        lv = (np.arange(n, dtype=np.float32) / (n - 1)).reshape(1, n)
+        ramps = {p: DitherGirlMode._palette_map(lv, palette_stops(p))
+                     .astype(np.float32)
+                 for p in PALETTES}
+        for a, b in itertools.combinations(PALETTES, 2):
+            d = float(np.abs(ramps[a] - ramps[b]).mean())
+            assert d >= 8.0, \
+                f"at {bits} bits, {a} vs {b} render only {d:.1f} apart"
+
+
 # ---------- Invert, and the migration off the retired pair (§4.2) ----------
 
 def test_invert_swaps_the_pair_for_every_palette_but_mono():
-    for name, (off, on) in PALETTES.items():
+    from dtouch.modes.dithergirl import palette_stops
+
+    for name, stops in PALETTES.items():
         if name in AUTHORED_INVERSE:
             continue
-        assert palette_pair(name, True) == (on, off)
-        assert palette_pair(name, False) == (off, on)
+        assert palette_pair(name, True) == (stops[-1], stops[0])
+        assert palette_pair(name, False) == (stops[0], stops[-1])
+        # a multi-colour ramp inverts by walking its stops backwards —
+        # same colours, ink and ground swapped
+        assert palette_stops(name, True) == tuple(stops[::-1])
 
 
 def test_mono_inverted_is_the_authored_pair_not_the_naive_swap():
@@ -1025,11 +1119,13 @@ def test_tint_zero_is_an_exact_no_op():
     (245/16, not a swap) and a sweep over PALETTES alone never touches it."""
     from dtouch.modes.dithergirl import tinted_palette
 
-    for name, pair in PALETTES.items():
+    from dtouch.modes.dithergirl import palette_stops
+
+    for name in PALETTES:
         for hue in (0.0, 137.0, 359.0):
-            assert tinted_palette(name, hue, 0.0) == pair
+            assert tinted_palette(name, hue, 0.0) == palette_stops(name)
             assert (tinted_palette(name, hue, 0.0, invert=True)
-                    == palette_pair(name, True))
+                    == palette_stops(name, True))
 
 
 def test_tint_cannot_push_any_palette_below_the_contrast_floor():
@@ -1042,7 +1138,8 @@ def test_tint_cannot_push_any_palette_below_the_contrast_floor():
     from dtouch.modes.dithergirl import tinted_palette
 
     worst = min(
-        (_contrast(*tinted_palette(name, hue, amt, invert)),
+        (_contrast(tinted_palette(name, hue, amt, invert)[0],
+                   tinted_palette(name, hue, amt, invert)[-1]),
          name, invert, hue, amt)
         for name in PALETTES
         for invert in (False, True)
@@ -1076,10 +1173,12 @@ def test_palette_section_carries_hue_and_tint():
     spec = DitherGirlMode().panel_spec()
     pal = next(s for s in spec if s.title == "PALETTE")
     labels = [getattr(w, "label", None) for w in pal.widgets]
-    assert labels == ["palette", "Invert", "Hue", "Tint"]
-    hue = pal.widgets[2]
+    # Tint before Hue: Hue is gated on Tint > 0 (panelspec.visible), so the
+    # reveal unfolds below the slider being dragged
+    assert labels == ["palette", "Invert", "Tint", "Hue"]
+    hue = pal.widgets[3]
     assert (hue.lo, hue.hi, hue.store_key) == (0.0, 360.0, "hue")
-    assert pal.widgets[3].store_key == "tint"
+    assert pal.widgets[2].store_key == "tint"
 
 
 def test_hue_and_tint_round_trip_through_a_look(tmp_path):
@@ -1297,14 +1396,14 @@ def test_nudging_a_stored_fraction_lands_scale_back_on_the_grid(tmp_path):
     edit — a nudge key here, through the real registry — adapts the control
     back onto its whole-row grid, the same way the range fix let `ascii
     stream` keep 30 until the operator moved the slider."""
-    from dtouch.panelspec import nudgeable
+    from dtouch.panelspec import nudgeable, visible
 
     host = _booted(tmp_path)
     host._wire_keys()
     ui = host.ui
     assert host._apply_look("legacy", {"scale": 45.55})
     assert ui.dg_scale == 45.55                  # the stored look applies exactly
-    ws = [w for w in ui.iter_widgets() if nudgeable(w)]
+    ws = [w for w in ui.iter_widgets() if nudgeable(w) and visible(ui, w)]
     ui.nudge_idx = next(i for i, w in enumerate(ws) if w.attr == "dg_scale")
     host.reg.dispatch(ord("="))                  # one press: +17.25 rows
     assert ui.dg_scale == 63.0                   # 62.8, snapped to the grid

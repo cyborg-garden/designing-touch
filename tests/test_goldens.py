@@ -137,6 +137,12 @@ def _render_panel(w, h, frame, sections_open=False, scrolled=False):
         for title in OPEN_SECTIONS:
             assert title in ui.sections, f"{title} section vanished from the spec"
             ui.sections[title] = True
+        # The rack/boids rows are visibility-gated on their master toggles
+        # (panelspec.visible): with Glitch/Flock off an open section shows
+        # only the toggle. These goldens exist to pin the EXPANDED rows
+        # (Pixel/Bits/Gamma/Bias, the circuit-bent sliders, the gains), so
+        # turn the toggles on.
+        ui.glitch = ui.flock = True
     if sections_open or scrolled:
         # The column is taller than the frame (always when open; at 720p even
         # closed). Scroll is clamped inside draw() against the LAST measured

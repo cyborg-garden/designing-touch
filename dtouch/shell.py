@@ -37,7 +37,7 @@ from .modes import REGISTRY, mode_by_id
 from .overlay_ui import (BASE_H, OverlayUI, build_signal_section,
                          build_global_rows, sync_signal)
 from .panelspec import (Cycle, Section, Slider, apply_look, capture_look,
-                        display_fmt, nudge_to, nudgeable)
+                        display_fmt, nudge_to, nudgeable, visible)
 from . import presets as _presets
 
 REC_DIR = "out"        # recordings land beside the launch dir; created on first take
@@ -198,10 +198,42 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
     # feedback, and it works in every overlay state. Inside the open menu
     # ','/'.' move card selection instead — the menu consumes keys before the
     # registry (Host._route_key), so priority is already right.
-    def _nudgeables():
+    def _nudgeables(gated=False):
         # `nudgeable`, not "every Slider and Cycle": output resolution opts out
-        # (see its docstring — one key must not resize the show).
-        return [w for w in ui.iter_widgets() if nudgeable(w)]
+        # (see its docstring — one key must not resize the show). Gated-off
+        # rows (panelspec.visible — SIGNAL under Glitch-off, boids gains under
+        # Flock-off) are skipped too: nudging a control the panel does not
+        # show and the engine does not read is the same dead surface on keys.
+        rows = [w for w in ui.iter_widgets() if nudgeable(w)]
+        return rows if gated else [w for w in rows if visible(ui, w)]
+
+    def _selected(ws):
+        """(index, adrift) — where the selection sits in the CURRENT list.
+
+        The list is filtered by `visible`, so pressing G or F changes its
+        length and membership under a selection that is only a NUMBER. The
+        selection is therefore anchored to the chosen control's `attr`
+        (ui.nudge_attr) and the index re-derived from it every press:
+        selecting Crush and turning Glitch off used to leave nudge_idx
+        pointing at whatever row had slid into slot 20, and the next '-'
+        edited THAT control (Particles: Crush -> Size) before the OSD named
+        it. `adrift` says the anchored control is gated off now, so the
+        caller re-anchors and shows the OSD INSTEAD of writing a value —
+        one press to see where you are, never a silent edit elsewhere.
+        """
+        attr = getattr(ui, "nudge_attr", None)
+        if attr is None:
+            return ui.nudge_idx % len(ws), False
+        for i, w in enumerate(ws):
+            if getattr(w, "attr", None) == attr:
+                return i, False
+        # gated off: land on the nearest visible row in SPEC order, not on
+        # whatever now occupies the old index
+        rows = _nudgeables(gated=True)
+        pos = next((i for i, w in enumerate(rows)
+                    if getattr(w, "attr", None) == attr), 0)
+        before = sum(1 for w in rows[:pos] if visible(ui, w))
+        return min(before, len(ws) - 1), True
 
     def _osd_show(w):
         val = getattr(ui, w.attr)
@@ -218,15 +250,26 @@ def _wire_perform_keys(reg, ui, hud, ps, recall, mode_commands=None,
         ws = _nudgeables()
         if not ws:
             return
-        ui.nudge_idx = (ui.nudge_idx + d) % len(ws)
+        i, adrift = _selected(ws)
+        # an adrift press re-anchors where the selection actually is; the
+        # step comes on the next one
+        ui.nudge_idx = i if adrift else (i + d) % len(ws)
+        ui.nudge_attr = getattr(ws[ui.nudge_idx], "attr", None)
         _osd_show(ws[ui.nudge_idx])
 
     def nudge(d, big=False):
         ws = _nudgeables()
         if not ws:
             return
-        ui.nudge_idx %= len(ws)
-        w = ws[ui.nudge_idx]
+        i, adrift = _selected(ws)
+        ui.nudge_idx = i
+        w = ws[i]
+        ui.nudge_attr = getattr(w, "attr", None)
+        if adrift:
+            # the selected control was gated off between presses — show what
+            # the keys now hold and change NOTHING this press
+            _osd_show(w)
+            return
         if isinstance(w, Cycle):
             opts = list(w.options)
             setattr(ui, w.attr, (int(getattr(ui, w.attr)) + d) % len(opts))
@@ -788,6 +831,12 @@ class Host:
         for w in ui.iter_widgets():
             st = getattr(w, "status", None)
             if not st:
+                continue
+            if not visible(ui, w):
+                # a gated-off control (panelspec.visible) does not act, so
+                # its value does not belong on the status line either —
+                # "bias auto" under Floyd-Steinberg was the panel's dead-row
+                # lie in a smaller font
                 continue
             if isinstance(w, Cycle):
                 opts = list(w.options)

@@ -172,6 +172,24 @@ def test_bayer_dither_full_res_is_exact(gl_ctx):
                                 "dither_size": None}))
 
 
+def test_pixel_derived_working_res_within_tolerance(gl_ctx):
+    """The Pixel slider's working resolutions ride the same dither_size the
+    two backends already share — parity must hold at a px-derived (non-72)
+    size. 32 rows = the sync mapping for sig_px 9 at this frame height; its
+    horizontal working width (512*32/288 = 56.9 -> 56) makes the downsample
+    a NON-integer scale, where cv2's fixed-point bilinear and the shader's
+    float bilinear differ in the last ulp and flip rare dither thresholds —
+    bounded the same way as the crush+dither chain: sparse flips, unchanged
+    blurred look. (The integer-scale sizes stay bit-exact above.)"""
+    cpu, gpu = _run_both(gl_ctx, _frames(),
+                         **{**OFF, "dither_mode": "bayer",
+                            "dither_size": 32})
+    for a, b in zip(cpu, gpu):
+        d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+        assert float((d > 0).mean()) < 0.002
+        assert _blurred_mae(a, b) < 0.5
+
+
 def test_blue_noise_dither_is_exact(gl_ctx):
     _assert_exact(*_run_both(gl_ctx, _frames(),
                              **{**OFF, "dither_mode": "blue",
@@ -278,10 +296,11 @@ class _StubHost:
         self.hud.toasts = _StubToasts()
 
 
-def _signal_ui(ui, glitch=True, palette_idx=0, video_bg=False):
+def _signal_ui(ui, glitch=True, palette_idx=0, video_bg=False, sig_px=0.0):
     ui.glitch = glitch
     ui.chroma, ui.drift, ui.crush = 10.0, 8.0, 0.0
     ui.sig_bits, ui.sig_gamma, ui.sig_bias_idx = 3.0, True, 0
+    ui.sig_px = sig_px                      # 0 = auto (mode's own cell)
     ui.scanlines = True
     ui.dither_name = "bayer"
     ui.ph_matte_idx = 5                     # luma: deterministic headless
@@ -313,7 +332,7 @@ def _boot_gl_mode(res=OUT_RES):
     return m, host
 
 
-def _mode_pair_run(palette_idx=0, video_bg=False, nframes=24):
+def _mode_pair_run(palette_idx=0, video_bg=False, nframes=24, sig_px=0.0):
     """The same sim (same seed) through both rack backends.
 
     GPU: ui.glitch on, host.cb seeded 42. CPU reference: rack applied the
@@ -322,7 +341,7 @@ def _mode_pair_run(palette_idx=0, video_bg=False, nframes=24):
 
     m, host = _boot_gl_mode()
     _signal_ui(host.ui, glitch=True, palette_idx=palette_idx,
-               video_bg=video_bg)
+               video_bg=video_bg, sig_px=sig_px)
     host.cb = CircuitBent(seed=42)
     try:
         gpu = []
@@ -335,7 +354,7 @@ def _mode_pair_run(palette_idx=0, video_bg=False, nframes=24):
 
     m, host = _boot_gl_mode()
     _signal_ui(host.ui, glitch=False, palette_idx=palette_idx,
-               video_bg=video_bg)
+               video_bg=video_bg, sig_px=sig_px)
     cb = CircuitBent(seed=42)
     try:
         cpu = []
@@ -370,6 +389,18 @@ def test_mode_gpu_rack_matches_with_video_palette_and_bg(gl_ctx):
         d = np.abs(a.astype(np.int16) - b.astype(np.int16))
         assert float((d > 1).mean()) < 0.06
         assert _blurred_mae(a, b) < 1.5
+
+
+def test_mode_gpu_rack_matches_with_pixel_override(gl_ctx):
+    """ui.sig_px reaches both backends through sync_signal: the mode-level
+    pictures must still match with a non-auto Pixel setting (px 8 at 368
+    rows -> 46-row working res, neither the mode auto nor the rack's 72)."""
+    del gl_ctx
+    cpu, gpu = _mode_pair_run(nframes=12, sig_px=8.0)
+    for a, b in zip(cpu, gpu):
+        d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+        assert float((d > 1).mean()) < 0.01
+        assert _blurred_mae(a, b) < 1.0
 
 
 def test_mode_colorize_upscale_parity_no_rack(gl_ctx):

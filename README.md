@@ -111,9 +111,15 @@ never scrolled up at all), and the mouse is meant to be a fallback that can reac
   grid, because true all-pairs boids at this particle count is ~4x10^10 pair terms.
 - **Signal** — **Glitch**: the circuit-bent chain (chroma bleed, scan drift and sync tears,
   glitch blocks, bit-crush, CRT scan lines) plus Bayer / blue-noise / Floyd-Steinberg /
-  Riemersma **dithering**, with `Bits` (1–4, how many shades survive), `Gamma` (dither in
-  linear light so mid-tones keep their brightness — on by default; off is the crushed retro
-  look) and `Bias` (which way the ordered dithers round: auto / light / dark). It's applied
+  Riemersma **dithering**, with `Pixel` (0–32, the dither's block size in output pixels — 0 is
+  auto, 1 is full detail, higher is chunkier), `Bits` (1–4, how many shades survive), `Gamma`
+  (dither in linear light so mid-tones keep their brightness — on by default; off is the
+  crushed retro look) and `Bias` (which way the ordered dithers round: auto / light / dark).
+  Everything under the Glitch switch is only drawn while Glitch is on, because the rack only
+  runs while Glitch is on — a row that bends nothing doesn't sit there looking like a control.
+  (Same rule elsewhere: the boids gains appear with Flock, `Vid mix` with `Video bg`, `Sens`
+  with sound reactivity, and `Bias` only under the ordered dithers that read it. Hidden values
+  are still saved and recalled with your looks.) It's applied
   to the finished frame, and it's a layer, not a mode — it's there in every mode. Costs ~6 ms
   at 720p, ~14 ms at 1080p. The control panel is drawn *after* it, so the panel never glitches
   into unreadability, and recordings capture what you see.
@@ -159,9 +165,13 @@ The same camera (or a still, via `--still photo.jpg`) run through the dither pip
   compression. Drag Scale up with an error-diffusion algorithm active and it says so in amber
   rather than quietly dropping frames.
 - **Palette** — ten two-colour pairs: mono, amber, green phosphor, cyan, magenta, ice,
-  blood, gameboy, sepia and hi-vis, plus an **Invert** switch that flips the ink and the
+  blood, gameboy, sepia and hi-vis; plus six multi-colour ramps — aurora, ultraviolet,
+  vaporwave, sunset, oil slick and cga — where each shade the dither produces lands on its
+  own hue instead of a lighter version of one colour. (They need `Bits` 2 or more to show
+  it: at 1 bit there are only two shades, so every palette is just its two ends.) Plus an
+  **Invert** switch that flips the ink and the
   background of any of them. Every one was measured for
-  contrast between its own two ends and none ships under 4.5:1, because this is aimed at a
+  contrast between its two ends and none ships under 4.5:1, because this is aimed at a
   projector rather than a monitor. Plus **Hue** and **Tint** — a direction and an amount, so
   you can dial a palette during a set instead of hunting a longer list. At Tint 0 every
   palette is exactly as named; turn Tint up and both ends steer toward Hue together, so a

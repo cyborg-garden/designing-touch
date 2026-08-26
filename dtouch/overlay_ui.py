@@ -29,7 +29,8 @@ from . import imgui
 from .imgui import (PANEL, BTN, HOVER, INK, DIM, ACC, TRACK, HANDLE, RED, DARK,
                     in_rect as _in)
 from .panelspec import (Slider, Toggle, Cycle, Action, Param, Readout,
-                        PresetList, Section, display_fmt, nudge_to, quantise)
+                        PresetList, Section, display_fmt, nudge_to, quantise,
+                        visible)
 
 BASE_H = 1080   # resolution the layout literals are authored against
 
@@ -41,6 +42,32 @@ DITHERS = ["bayer", "blue", "fs", "riemersma", "off"]
 # dithers' rounding direction — auto flips on dark frames, light/dark force it.
 SIGNAL_BIASES = ["auto", "light", "dark"]
 SIGNAL_BIAS_INVERT = {"auto": "auto", "light": False, "dark": True}
+
+
+# ----- SIGNAL visibility gates (panelspec.visible; the magic-over-control
+# ----- decision, 2026-08-24). The rack only runs while Glitch is ON
+# ----- (dtouch/shell.py gates CircuitBent on ui.glitch; the physarum GPU
+# ----- rack gates the same way), so every dependent row measured 0.000
+# ----- rendered difference with Glitch off — a panel of working-looking
+# ----- controls bending nothing. They now appear only where they act.
+
+def _sig_dither_name(s):
+    return DITHERS[int(getattr(s, "dither_idx", 0)) % len(DITHERS)]
+
+
+def _sig_on(s):
+    return bool(getattr(s, "glitch", False))
+
+
+def _sig_dither_on(s):
+    """Dither-quality rows: the rack must be on AND its dither not 'off'."""
+    return _sig_on(s) and _sig_dither_name(s) != "off"
+
+
+def _sig_ordered_on(s):
+    """Bias only steers the ordered dithers — error diffusion self-corrects
+    and ignores it (dtouch.dither), so the row hides under fs/riemersma."""
+    return _sig_on(s) and _sig_dither_name(s) in ("bayer", "blue")
 
 
 def sync_signal(cb, ui, mode, out_h):
@@ -66,8 +93,18 @@ def sync_signal(cb, ui, mode, out_h):
     claimed = frozenset(getattr(mode, "claims", ()))
     cb.dither_mode = (None if "dither" in claimed or ui.dither_name == "off"
                       else ui.dither_name)
-    rows_fn = getattr(mode, "signal_dither_rows", None)
-    cb.dither_size = rows_fn(out_h) if callable(rows_fn) else 72
+    # Pixel (the dither's block size, in output pixels). 0 = auto: the mode's
+    # own working resolution (`signal_dither_rows(out_h)`; default 72 rows,
+    # the lo-fi block look). A set value converts to working rows so both
+    # backends (CircuitBent._apply_dither and SignalRackGL's downsample
+    # stage) read the SAME dither_size — px 1 lands on out_h rows, which
+    # both treat as full-res dithering.
+    px = int(round(float(getattr(ui, "sig_px", 0.0))))
+    if px > 0:
+        cb.dither_size = max(1, round(out_h / px))
+    else:
+        rows_fn = getattr(mode, "signal_dither_rows", None)
+        cb.dither_size = rows_fn(out_h) if callable(rows_fn) else 72
 
 
 RES_OPTIONS = [("720p", 1280, 720), ("1080p", 1920, 1080),
@@ -97,6 +134,7 @@ _RANGES = {
 # 2.92 has always rendered at bit depth 2, it just used to *read* "3".
 _QUANTISED = {
     "sig_bits": (1.0, "round"),   # int(clip(round(v), 1, 4)) — 4 real settings
+    "sig_px":   (1.0, "round"),   # int(round(v)) whole pixels — 0 = auto
     "crush":    (1.0, "floor"),   # int(v) — whole output bits, 0 = off
 }
 
@@ -148,7 +186,8 @@ def build_particles_sections(palettes, mattes):
             Toggle("Video bg", "video_bg"),
             _slider_spec("Vid mix", "video_mix",
                          "How visible the raw camera footage is behind the particles.",
-                         apply="keep"),
+                         apply="keep",
+                         show_when=lambda s: bool(getattr(s, "video_bg", False))),
         ]),
         Section("LOOK", [
             Cycle("color", "palette_idx", list(palettes), gap=4,
@@ -157,16 +196,23 @@ def build_particles_sections(palettes, mattes):
             # captured-but-undrawn: saved since v1, no panel control yet
             Param("attract_speed"),
         ]),
-        # MOTION — boids steering (dtouch.flock). The sliders stay visible while off so the
-        # section reads as a thing you can turn on, not a thing that appears from nowhere.
+        # MOTION — boids steering (dtouch.flock). The section header + Flock
+        # toggle stay visible while off (it still reads as a thing you can
+        # turn on); the gain sliders appear only while Flock is ON, because
+        # off means every gain is forced to 0 and the sliders steer nothing
+        # (magic-over-control, 2026-08-24: a control that does nothing
+        # perceptible in the current state is a bug).
         Section("MOTION", key_hint="F", widgets=[
             Toggle("Flock", "flock"),
             _slider_spec("Cohere", "cohere",
-                         "Steer toward the local centre. Pulls the cloud into shoals."),
+                         "Steer toward the local centre. Pulls the cloud into shoals.",
+                         show_when=lambda s: bool(getattr(s, "flock", False))),
             _slider_spec("Align", "align",
-                         "Match neighbours' direction. This is what makes it move as one."),
+                         "Match neighbours' direction. This is what makes it move as one.",
+                         show_when=lambda s: bool(getattr(s, "flock", False))),
             _slider_spec("Separate", "separate",
-                         "Push apart when crowded. Stops the shoal collapsing to a dot."),
+                         "Push apart when crowded. Stops the shoal collapsing to a dot.",
+                         show_when=lambda s: bool(getattr(s, "flock", False))),
         ], open=False),
     ]
 
@@ -178,22 +224,39 @@ def build_signal_section():
     state serializes under "signal" inside each mode's looks."""
     return Section("SIGNAL", key_hint="G", widgets=[
             Toggle("Glitch", "glitch"),
+            # Everything below only bends the picture while Glitch is ON
+            # (the shell runs CircuitBent behind ui.glitch), so the rows
+            # gate their visibility on it (panelspec.visible): the section
+            # opens as one honest toggle and unfolds when it starts acting.
             Cycle("dither", "dither_idx", list(DITHERS), save_key="dither",
+                  show_when=_sig_on,
                   tip="Repaints the picture from small two-tone dots, like "
                       "newsprint or an old handheld console. Off = clean."),
             # dither-quality controls (DESIGN.md §2.4/§4.1: the audit's
             # quality controls grow the rack; a mode that claims them —
-            # Dither owns ALL dither quality — hides them)
+            # Dither owns ALL dither quality — hides them). They also gate
+            # on the rack's dither being on at all: with dither 'off' they
+            # move nothing, so they show nothing.
+            Slider("Pixel", "sig_px", 0.0, 32.0, fmt=".0f", save_key="pixel",
+                   step=_QUANTISED["sig_px"][0],
+                   snap=_QUANTISED["sig_px"][1],
+                   show_when=_sig_dither_on,
+                   tip="Size of the dither's blocks, in pixels. 0 = auto: "
+                       "each mode picks its own cell. 1 = full detail; "
+                       "higher = chunkier."),
             Slider("Bits", "sig_bits", 1.0, 4.0, fmt=".0f", save_key="bits",
                    step=_QUANTISED["sig_bits"][0],
                    snap=_QUANTISED["sig_bits"][1],
+                   show_when=_sig_dither_on,
                    tip="Dither bit depth. 1 = pure two-tone; higher keeps "
                        "more shades. Whole numbers only - there are four "
                        "settings."),
             Toggle("Gamma", "sig_gamma", save_key="gamma",
+                   show_when=_sig_dither_on,
                    tip="Dither in linear light so mid-tones keep their "
                        "perceived brightness. Off = the crushed retro look."),
             Cycle("bias", "sig_bias_idx", list(SIGNAL_BIASES), save_key="bias",
+                  show_when=_sig_ordered_on,
                   tip="Which way the dots lean on a mostly-dark or mostly-"
                       "bright picture. Auto decides per frame."),
             # Chroma and Drift look like pixel counts and are not: each is the
@@ -206,13 +269,16 @@ def build_signal_section():
             _slider_spec("Chroma", "chroma",
                          "Colour bleed: red and blue drift apart, slowly. "
                          "This is how far they can go; each frame lands on a "
-                         "whole pixel."),
+                         "whole pixel.",
+                         show_when=_sig_on),
             _slider_spec("Drift", "drift",
                          "Scan-line sync loss. Rows slip sideways; sometimes a whole band tears. "
-                         "This is the most any row can slip, in whole pixels."),
+                         "This is the most any row can slip, in whole pixels.",
+                         show_when=_sig_on),
             _slider_spec("Crush", "crush",
-                         "Hard bit-depth reduction, in whole bits. 0 = off."),
-            Toggle("Scanlines", "scanlines", on_text="on"),
+                         "Hard bit-depth reduction, in whole bits. 0 = off.",
+                         show_when=_sig_on),
+            Toggle("Scanlines", "scanlines", on_text="on", show_when=_sig_on),
         ], open=False, gap=6, store="signal")
 
 
@@ -223,8 +289,12 @@ def build_global_rows():
     `menu.open` command through the walker's pending_commands mailbox."""
     return [
         Toggle("Sound react (A)", "audio"),
+        # Sens scales the audio modulation, which is zero while Sound react
+        # is off — the row only appears while the mic is actually driving
+        # the picture (panelspec.visible).
         _slider_spec("Sens", "sens", "How strongly sound drives the visuals.",
-                     apply="keep", gap=4),
+                     apply="keep", gap=4,
+                     show_when=lambda s: bool(getattr(s, "audio", False))),
         Toggle("Record (R)", "record", save=False,
                label_fn=lambda v: "Stop recording (R)" if v else "Record (R)"),
         Toggle("Mirror", "mirror", on_text="on", save=False, gap=4),
@@ -268,6 +338,9 @@ class OverlayUI:
         # dither-quality controls (DESIGN.md §4.1): defaults match CircuitBent's
         # shipped behaviour (3-bit, gamma-correct, auto bias)
         self.sig_bits, self.sig_gamma, self.sig_bias_idx = 3.0, True, 0
+        # dither block size in output pixels; 0 = auto (the mode's own
+        # working resolution via signal_dither_rows — sync_signal)
+        self.sig_px = 0.0
         self.scanlines = True
         self.attract_speed = 4.5   # captured Param — no panel control yet
         self.res_options = list(RES_OPTIONS)
@@ -340,6 +413,12 @@ class OverlayUI:
         # spec-order list of nudgeable widgets (Sliders + Cycles). Rebinding
         # the spec (mode switch) resets it to the first control.
         self.nudge_idx = 0
+        # ...and the ANCHOR that index is re-derived from. The nudgeable list
+        # is filtered by panelspec.visible, so it changes shape the moment a
+        # master toggle (Glitch/Flock/Video bg) flips. An index alone would
+        # then point at whatever row slid into that slot — see the shell's
+        # nudge wiring.
+        self.nudge_attr = None
         self._toggles = {}    # hit key -> Toggle
         self._cycles = {}     # hit key -> Cycle
         self._sliders = {}    # attr -> Slider
@@ -626,6 +705,10 @@ class OverlayUI:
         rows advance S(28+gap) in one rounding, sliders/cycles advance their own
         height then add S(gap) — exactly the shipped two-step literals)."""
         g = self._gui
+        if not visible(self, wdg):
+            # gated off (panelspec.visible): no row, no pixels, no hit rect —
+            # the control's value is untouched and still captures into looks
+            return y
         if isinstance(wdg, Slider):
             val = getattr(self, wdg.attr)
             # display_fmt, not wdg.fmt: a stored legacy fraction on an
