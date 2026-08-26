@@ -119,10 +119,23 @@ def test_weave_zero_is_the_legacy_engine():
 
 # ---------- P2: evolve churns a still scene ----------
 
-def test_evolve_reorganizes_a_still_scene():
-    """The churn floor: with evolve up, the blurred trail at a long lag must
-    decorrelate clearly harder than with evolve 0. dt is stretched so the
-    13-41 s modulation periods fit in test time."""
+def test_the_picture_never_settles():
+    """Equilibrium is the enemy (memory/knowledge/decisions/2026-08-24-
+    lighteater-magic-over-control.md: "getting stuck / static equilibrium is
+    the enemy of aliveness"). At a long lag on a STILL scene the blurred
+    trail must still have moved, at every evolve setting.
+
+    This used to assert that evolve 1 decorrelates 1.3x harder than evolve 0,
+    and it no longer can — not because evolve got weaker, but because the
+    floor came up underneath it. Three species pushing on each other means
+    the field is never at rest even with evolve at 0, so there is little
+    headroom left to measure. Both engines now land at a churn ratio near
+    1.0 with the old metric, across seeds.
+
+    Evolve's own contribution moved to the SPATIAL axis (the mosaic), where
+    it is large and measurable — tests/test_physarum_mosaic.py is its floor.
+    What belongs here is the absolute claim: it never stops moving.
+    """
     def churn(evolve):
         host, mode = _boot(weave=0.5, evolve=evolve)
         f = _scene(*GRID)
@@ -139,10 +152,10 @@ def test_evolve_reorganizes_a_still_scene():
                      / np.sqrt((ca * ca).sum() * (cb * cb).sum()))
         return mad, corr
 
-    mad0, corr0 = churn(0.0)
-    mad1, corr1 = churn(1.0)
-    assert mad1 >= 1.3 * mad0, (mad0, mad1)
-    assert corr1 <= corr0 - 0.10, (corr0, corr1)
+    for evolve in (0.0, 1.0):
+        mad, corr = churn(evolve)
+        assert mad >= 0.08, (evolve, mad)
+        assert corr <= 0.90, (evolve, corr)
 
 
 # ---------- P3: react carves locally ----------
@@ -256,15 +269,26 @@ def test_physarum_scales_signal_dither_rows():
 # ---------- P6: quality tiers ----------
 
 def test_quality_tier_resolutions():
-    """The render-quality control's sizing contract."""
-    assert PhysarumMode.QUALITY == {
-        "perform": ((1280, 736), 2_000_000),
-        "balance": ((1920, 1104), 3_000_000),
-        "quality": ((2560, 1472), 4_000_000),
-    }
+    """The render-quality control's sizing contract.
+
+    The load-bearing number is agents per grid cell, not the agent count. At
+    the old ~2.1/cell every cell carried trail, there was no dark for a vein
+    to be a vein against, and every look collapsed onto the same mesh. Jones
+    reticulation wants well under 1; these tiers hold ~0.5, and a tier that
+    drifts out of the band is the bug this pins.
+    """
     assert PhysarumMode.QUALITY_NAMES == ["perform", "balance", "quality"]
     assert PhysarumMode.QUALITY["perform"] == (PhysarumMode.GL_GRID,
                                                PhysarumMode.GL_N)
+    seen = []
+    for name in PhysarumMode.QUALITY_NAMES:
+        (gw, gh), n = PhysarumMode.QUALITY[name]
+        density = n / float(gw * gh)
+        assert 0.35 <= density <= 0.75, f"{name}: {density:.2f} agents/cell"
+        seen.append((gw * gh, n))
+    # each tier is strictly bigger than the last, in both grid and pool
+    assert seen == sorted(seen)
+    assert [c for c, _ in seen] == sorted({c for c, _ in seen})
 
 
 def test_quality_cycle_ignored_on_cpu_and_explicit_grid():
@@ -298,6 +322,6 @@ def test_quality_switch_rebuilds_gl_field():
     assert mode.grid == (1280, 736)
     host.ui.ph_quality_idx = 2
     mode.step(frame, None, 1 / 30)
-    assert mode.grid == (2560, 1472) and mode.n == 4_000_000
+    assert (mode.grid, mode.n) == PhysarumMode.QUALITY["quality"]
     assert mode.pf.gw == 2560 and mode.pf.gh == 1472
     mode.stop()

@@ -51,7 +51,7 @@ import os
 
 import numpy as np
 
-from .physarum import POINTS
+from .physarum import POINTS, SPATIAL_REGIMES, ZONE_REGIME_COUNT
 
 # Agent texture width. One texel per agent; the height is ceil(n / width).
 # 2048 x 16384 (the GL_MAX_TEXTURE_SIZE floor on anything that runs this)
@@ -60,6 +60,9 @@ AGENT_TEX_W = 2048
 
 # Stride of the statistics subsample (percentile + mean readback).
 STATS_STRIDE = 4
+# Exposure-reference smoothing. The p95 the picture is normalized by is an
+# estimate off a strided subsample; tracking it frame-to-frame pumps.
+NORM_EMA = 0.85
 
 SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders", "physarum")
 SHADER_FILES = ("fullscreen.vert", "update.frag", "deposit.vert", "deposit.frag",
@@ -107,8 +110,8 @@ class PhysarumFieldGL:
     def __init__(self, n=1_000_000, gw=1280, gh=736, seed=0,
                  point_bg="veins", point_fg="fingers",
                  decay=0.94, diffuse=1, food=0.35, exposure=3.5,
-                 grain=0.5, reseed_frac=0.004, gain=1.0,
-                 sat=0.0, jitter=0.0, hetero=0.0):
+                 grain=0.2, reseed_frac=0.004, gain=1.0,
+                 sat=0.0, jitter=0.0, hetero=0.0, species=3, cross=0.0):
         if n <= 0:
             raise ValueError(f"n must be > 0, got {n}")
         if gw <= 0 or gh <= 0:
@@ -130,6 +133,11 @@ class PhysarumFieldGL:
         self.sat = sat            # sensor saturation (x trail bright end); 0 = off
         self.jitter = jitter      # per-step heading wobble, rad
         self.hetero = hetero      # 0..1 sub-population sense split
+        self.species = max(1, min(3, int(species)))   # populations, 1..3
+        self.cross = float(cross)  # off-diagonal strength of the species matrix
+        self.sharpen = 0.0         # lateral inhibition in the diffusion pass
+        self.mosaic = 0.0          # 0..1 spatial parameter mosaic strength
+        self.zones = 7.0           # zone lattice density across the grid
         # slow structural modulation multipliers (see PhysarumField)
         self.mod_sense = 1.0
         self.mod_turn = 1.0
@@ -190,17 +198,23 @@ class PhysarumFieldGL:
         init[:self.n, 0] = rng.uniform(0, gw, self.n)
         init[:self.n, 1] = rng.uniform(0, gh, self.n)
         init[:self.n, 2] = rng.uniform(0, 2 * np.pi, self.n)
+        # .w is the species, drawn once at spawn and carried for life
+        init[:self.n, 3] = rng.integers(0, self.species, self.n)
         self.tex_agents_a = ftex((aw, ah), 4, init.tobytes())
         self.tex_agents_b = ftex((aw, ah), 4)
         self.fbo_agents_a = ctx.framebuffer(color_attachments=[self.tex_agents_a])
         self.fbo_agents_b = ctx.framebuffer(color_attachments=[self.tex_agents_b])
 
-        # the shaders read/write .r only, so the trail-sized targets are R32F
-        # here; the browser backs the same GLSL with RGBA16F/32F
-        self.tex_trail_a = ftex((gw, gh), 1)
-        self.tex_trail_b = ftex((gw, gh), 1)
-        self.tex_tmp = ftex((gw, gh), 1)
-        self.tex_laid = ftex((gw, gh), 1)
+        # Three species channels (RGB) + an unused alpha. Each species lays
+        # into its own channel and senses all three through a signed matrix,
+        # so one species can be REPELLED by another's trail — the mechanism
+        # behind exclusion membranes and travelling fronts, and the one thing
+        # a single-channel attract-only field cannot express at any setting.
+        # The browser backs the same GLSL with RGBA16F/32F.
+        self.tex_trail_a = ftex((gw, gh), 4)
+        self.tex_trail_b = ftex((gw, gh), 4)
+        self.tex_tmp = ftex((gw, gh), 4)
+        self.tex_laid = ftex((gw, gh), 4)
         self.fbo_trail_a = ctx.framebuffer(color_attachments=[self.tex_trail_a])
         self.fbo_trail_b = ctx.framebuffer(color_attachments=[self.tex_trail_b])
         self.fbo_tmp = ctx.framebuffer(color_attachments=[self.tex_tmp])
@@ -226,12 +240,18 @@ class PhysarumFieldGL:
         for p in (self.p_update, self.p_deposit, self.p_blur, self.p_stats,
                   self.p_impulse):
             p["u_grid"].value = (gw, gh)
+        # the spatial regime table is constant for the field's life
+        reg = [SPATIAL_REGIMES[k] for k in SPATIAL_REGIMES]
+        self.p_update["u_zreg"].value = [
+            (r["sense"], r["turn"], r["spread"], r["step"]) for r in reg]
+        self.p_update["u_zcross"].value = [r["cross"] for r in reg]
         self.p_update["u_agents"].value = 0
         self.p_update["u_trail"].value = 1
         self.p_update["u_matte"].value = 2
         self.p_update["u_gray"].value = 3
         self.p_deposit["u_agents"].value = 0
         self.p_deposit["u_matte"].value = 2
+        self.p_deposit["u_nspec"].value = float(self.species)
         self.p_blur["u_src"].value = 0
         self.p_blur["u_add"].value = 1
         self.p_blur["u_keep"].value = 2
@@ -252,6 +272,41 @@ class PhysarumFieldGL:
     def _salt_value(self):
         return int(self._salt.integers(0, 2**32, dtype=np.uint32))
 
+    def interaction_matrix(self):
+        """Row-major 3x3 species matrix, flattened.
+
+        This is the SPEC, not the transport. The shader builds one row at a
+        time from `u_cross` (update.frag's `food`), because the zone an agent
+        is standing in re-scales the off-diagonals per agent and a single
+        uploaded matrix could not express that. Both the CPU field and the
+        browser port implement this arrangement; keep them agreeing with it.
+
+        Diagonal is self-attraction (1). Off-diagonals are `cross`, arranged
+        rock-paper-scissors: each species is REPELLED by the next and mildly
+        drawn to the previous. Symmetric mutual repulsion alone gives static
+        territories with dead walls; the asymmetry is what makes the walls
+        travel, chase and spiral, which is the difference between a picture
+        that has settled and one that is still happening.
+
+        With species == 1 this is the identity row and the field behaves
+        exactly like the old single-channel model.
+        """
+        c = max(float(self.cross), 0.0)
+        if self.species <= 1 or c <= 0.0:
+            return (1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0)
+        back = 0.35 * c
+        return (1.0, -c, back,
+                back, 1.0, -c,
+                -c, back, 1.0)
+
+    def _food_norm(self):
+        """Trail-unit scale for `food` and friends: the trail's own bright end
+        (last frame's 95th percentile). 1.0 before the first stats pass, when
+        the trail is empty and food is the only signal there is anyway."""
+        return self._last_norm if self._last_norm > 0.0 else 1.0
+
     # ----- parameter blending -----
     def _points(self):
         return POINTS[self.point_bg], POINTS[self.point_fg]
@@ -269,6 +324,7 @@ class PhysarumFieldGL:
         self.tex_agents_a.use(0)
         self.tex_matte.use(2)
         self.p_deposit["u_deposit"].value = (dep_bg, dep_fg)
+        self.p_deposit["u_nspec"].value = float(self.species)
         self.vao_deposit.render(gl.POINTS, vertices=self.n)
         ctx.disable(gl.BLEND)
 
@@ -278,6 +334,7 @@ class PhysarumFieldGL:
         k = 2 * r + 1
         p = self.p_blur
         p["u_radius"].value = r
+        p["u_wide"].value = max(3 * r, r + 2)
         # H: trail + laid -> tmp
         self.fbo_tmp.use()
         self.tex_trail_a.use(0)
@@ -285,6 +342,14 @@ class PhysarumFieldGL:
         p["u_use_add"].value = 1
         p["u_use_keep"].value = 0
         p["u_decay"].value = 1.0
+        # Inhibition is SPLIT across the two axes, half on each. On one axis
+        # only it is a directional operator, and the picture laminates along
+        # it — visibly so on the narrower CPU grid, where the same integer
+        # blur radius is 2.2x coarser relative to the frame. Half and half is
+        # isotropic. (Full strength on BOTH axes is not: that doubles the
+        # operator and collapses the image into a pixel-scale Turing dot
+        # pattern. Ask me how I know.)
+        p["u_sharpen"].value = max(float(self.sharpen), 0.0) * 0.5
         p["u_dir"].value = (1, 0)
         p["u_scale"].value = 1.0 / k
         self.vao_blur.render(gl.TRIANGLES, vertices=3)
@@ -294,6 +359,7 @@ class PhysarumFieldGL:
         self.tex_keep.use(2)
         p["u_use_add"].value = 0
         p["u_use_keep"].value = 1 if use_keep else 0
+        p["u_sharpen"].value = max(float(self.sharpen), 0.0) * 0.5
         p["u_decay"].value = float(self.decay)
         p["u_dir"].value = (0, 1)
         p["u_scale"].value = 1.0 / k
@@ -337,7 +403,13 @@ class PhysarumFieldGL:
             p["u_turn"].value = (a["turn"] * mt, b["turn"] * mt)
             p["u_step"].value = (a["step"] * mst, b["step"] * mst)
             p["u_gain"].value = float(self.gain)
-            p["u_food"].value = max(float(self.food), 0.0)
+            # food is in TRAIL units, not [0,1] units. The sensors read raw
+            # trail (mean ~33, p95 ~120 at equilibrium), so an unscaled
+            # `food * gray` with gray in [0,1] is a ~1% perturbation and the
+            # camera stops steering the mold the moment any trail exists.
+            # Scale it by the trail's own bright end, exactly as `sat` is
+            # below, so food=0.35 means "light is worth 35% of the bright end".
+            p["u_food"].value = max(float(self.food), 0.0) * self._food_norm()
             p["u_reseed"].value = float(self.reseed_frac)
             # rejection-sampling bound for the respawn weight matte*clip(gray):
             # an upper bound keeps the draw exact; <= 0 means "nothing lit" and
@@ -352,6 +424,12 @@ class PhysarumFieldGL:
             p["u_satcap"].value = float(self.sat) * self._last_norm
             p["u_jitter"].value = max(float(self.jitter), 0.0)
             p["u_hetero"].value = min(max(float(self.hetero), 0.0), 1.0)
+            p["u_nspec"].value = float(self.species)
+            p["u_cross"].value = max(float(self.cross), 0.0)
+            p["u_mosaic"].value = min(max(float(self.mosaic), 0.0), 1.0)
+            p["u_zones"].value = max(float(self.zones), 1.0)
+            p["u_sense_max"].value = 0.10 * float(min(self.gw, self.gh))
+            p["u_time"].value = self.frame * (1.0 / 60.0)
 
             self.fbo_agents_b.use()
             self.tex_agents_a.use(0)
@@ -442,7 +520,14 @@ class PhysarumFieldGL:
         calls (the test_field_survives_a_foreign_context failure mode)."""
         gl = self._gl
         norm, lmean = self._stats()
-        self._last_norm = norm      # feedback for the `sat` sensing cap
+        # Smooth the exposure reference. A raw per-frame p95 renormalizes the
+        # picture against its own noise every frame, which reads as a slow
+        # pump and costs the image its crispness (the browser port already
+        # EMAs this; the desktop did not). It also feeds `sat` and `food`, so
+        # a stable reference keeps the sensing scale steady too.
+        if self._last_norm > 0.0 and norm > 0.0:
+            norm = self._last_norm * NORM_EMA + norm * (1.0 - NORM_EMA)
+        self._last_norm = norm      # feedback for the `sat` + `food` scales
         if norm <= 0:
             self.fbo_lum.use()
             self.ctx.clear(0.0, 0.0, 0.0, 1.0)
@@ -488,8 +573,22 @@ class PhysarumFieldGL:
 
     @property
     def trail(self):
-        """The full float trail, read back from the GPU (gh, gw) float32."""
-        return self._read_f4(self.fbo_trail_a, 1).reshape(self.gh, self.gw)
+        """The full float trail, read back from the GPU (gh, gw) float32 —
+        the whole organism, i.e. the sum of the species channels, which is
+        what the picture and the statistics are taken over."""
+        rgba = self._read_f4(self.fbo_trail_a, 4).reshape(self.gh, self.gw, 4)
+        return rgba[..., :3].sum(axis=2)
+
+    @property
+    def trail_species(self):
+        """Per-species trail, (gh, gw, 3) float32 — diagnostics and tests."""
+        rgba = self._read_f4(self.fbo_trail_a, 4).reshape(self.gh, self.gw, 4)
+        return rgba[..., :3].copy()
+
+    def species_of(self):
+        """Per-agent species index, int32 length n."""
+        a = self._read_f4(self.fbo_agents_a, 4).reshape(self.ah * self.aw, 4)[:self.n]
+        return a[:, 3].astype(np.int32)
 
     def agents(self):
         """(px, py, heading) float32 arrays of length n, read back."""

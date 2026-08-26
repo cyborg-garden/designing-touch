@@ -18,7 +18,9 @@ layout(location = 0) out vec4 f_color;
 
 void main() {
     ivec2 c = ivec2(gl_FragCoord.xy);
-    float x = texelFetch(u_trail, c, 0).r * u_inv_norm
-            + u_grain * texelFetch(u_laid, c, 0).r * u_inv_gnorm;
+    vec3 tr = texelFetch(u_trail, c, 0).rgb;
+    vec3 la = texelFetch(u_laid, c, 0).rgb;
+    float x = (tr.r + tr.g + tr.b) * u_inv_norm
+            + u_grain * (la.r + la.g + la.b) * u_inv_gnorm;
     f_color = vec4(vec3(1.0 - exp(-u_exposure * x)), 1.0);
 }
