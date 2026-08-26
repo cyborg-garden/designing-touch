@@ -33,6 +33,7 @@ uniform float u_nspec;     // active species count (1..3); 1 = legacy single
 uniform float u_mosaic;    // 0..1 how differently the zones behave; 0 = uniform
 uniform float u_zones;     // zone lattice density, cells across the grid
 uniform float u_sense_max; // absolute ceiling on sensor distance, px
+uniform float u_ballistic; // 0..1 steering suppression (the wave's shockwave)
 uniform float u_time;      // seconds, drives the zones' slow drift
 uniform vec4 u_zreg[6];    // per-zone-regime multipliers: sense, turn, spread, step
 uniform float u_zcross[6]; // per-zone-regime multiplier on u_cross
@@ -215,6 +216,14 @@ void main() {
     // past the point where any local structure can survive.
     sense = min(sense, u_sense_max);
 
+    // The wave points every heading outward, and in a field this lively the
+    // very next frame steers most of them back — the gesture used to spend
+    // itself in about one frame. For a beat afterwards the organism goes
+    // BALLISTIC instead: steering and wobble are suppressed, so the outward
+    // front actually travels and reads as a shockwave rather than a flicker.
+    // It decays, so the mold does not simply fly apart.
+    turn *= 1.0 - u_ballistic;
+
     // Jones steering: hold when ahead wins; coin flip when ahead loses to
     // both sides; otherwise turn toward the stronger side.
     float fc = food(p + vec2(cos(h), sin(h)) * sense, sp, repel);
@@ -227,7 +236,7 @@ void main() {
     h += dir * turn;
     // per-step heading wobble: highways stop being perfectly straight
     // attractors and the mold keeps probing sideways
-    if (u_jitter > 0.0) h += (rnd(s) * 2.0 - 1.0) * u_jitter;
+    if (u_jitter > 0.0) h += (rnd(s) * 2.0 - 1.0) * u_jitter * (1.0 - u_ballistic);
 
     p += vec2(cos(h), sin(h)) * stp;
     p = mod(p, vec2(u_grid));

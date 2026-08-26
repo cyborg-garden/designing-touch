@@ -106,3 +106,46 @@ def test_species_reduce_to_the_single_channel_model():
         assert m[8] == 1.0 and m[6] < 0 and m[7] > 0
     finally:
         f.release()
+
+
+def test_the_wave_holds_its_front_open():
+    """A radial impulse alone is one frame of new headings, and in a field
+    with three species pushing on each other the very next step steers most
+    of them back — the browser's own perceptibility check measured the wave
+    at 1.7-2.2x ambient churn against a 3x bar, not because the cast got
+    weaker but because the field got livelier. The ballistic phase is what
+    makes it a gesture: steering suppressed while it decays, so the ring
+    travels. This pins that it arms, that it decays, and that it lets go.
+    """
+    from dtouch.physarum import BALLISTIC_DECAY
+    try:
+        f = PhysarumFieldGL(n=1000, gw=64, gh=64, seed=1)
+    except PhysarumGLUnavailable as e:
+        pytest.skip(f"no GL context available (CI): {e}")
+    try:
+        assert f.ballistic == 0.0, "steering is suppressed before any wave"
+        f.wave(32.0, 32.0)
+        assert f.ballistic == 1.0
+        matte = np.zeros((64, 64), np.float32)
+        gray = np.zeros((64, 64), np.float32)
+        f.update(matte, gray)
+        assert f.ballistic == pytest.approx(BALLISTIC_DECAY)
+        for _ in range(60):
+            f.update(matte, gray)
+        assert f.ballistic < 0.01, "the mold never got its steering back"
+    finally:
+        f.release()
+
+
+def test_a_burst_does_not_arm_the_ballistic_phase():
+    """Burst teleports agents; it is not a shockwave and must not freeze
+    everyone's steering on its way through."""
+    try:
+        f = PhysarumFieldGL(n=1000, gw=64, gh=64, seed=1)
+    except PhysarumGLUnavailable as e:
+        pytest.skip(f"no GL context available (CI): {e}")
+    try:
+        f.spawn_burst(32.0, 32.0)
+        assert f.ballistic == 0.0
+    finally:
+        f.release()

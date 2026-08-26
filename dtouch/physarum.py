@@ -67,6 +67,10 @@ POINT_NAMES = list(POINTS)
 # constant-turn random walk rather than a Jones walker — and it is the default
 # body point. `haze` sensed inside its own blur kernel. tests/test_physarum.py
 # pins these; widen a point rather than quietly reintroducing a blind one.
+# Per-frame decay of the wave's ballistic phase (~0.55 s at 60 fps).
+# Shared by both engines; physarum_gl re-exports the same constant.
+BALLISTIC_DECAY = 0.90
+
 PX_SCALE = 1280.0 / 576.0        # working grid -> GL grid, see modes.physarum
 SENSE_SIGMA_PX = 3.33            # accumulated trail smoothing, GL px
 
@@ -205,6 +209,7 @@ class PhysarumField:
         # where gain alone only re-scales its tempo
         self.mod_sense = 1.0
         self.mod_turn = 1.0
+        self.ballistic = 0.0   # steering suppression, decays after a wave
         self.mod_spread = 1.0
         self.mod_step = 1.0
         self.mod_deposit = 1.0
@@ -494,12 +499,16 @@ class PhysarumField:
             (f_c > f_l) & (f_c > f_r), 0.0,
             np.where((f_c < f_l) & (f_c < f_r), rand_sign,
                      np.where(f_l > f_r, -1.0, 1.0))).astype(np.float32)
-        h += turn * turn_a
+        # The wave's ballistic phase: for a beat after a wave, steering and
+        # wobble are suppressed so the outward front actually travels instead
+        # of being steered back within a frame or two. Decays every update.
+        b = np.float32(1.0 - min(max(self.ballistic, 0.0), 1.0))
+        h += turn * (turn_a * b)
         if self.jitter > 0:
             # per-step heading wobble: highways stop being perfectly straight
             # attractors and the mold keeps probing sideways
             h += ((self._rng.random(n, dtype=np.float32) * 2.0 - 1.0)
-                  * np.float32(self.jitter))
+                  * np.float32(self.jitter) * b)
 
         px += np.cos(h) * step_d
         py += np.sin(h) * step_d
@@ -563,6 +572,7 @@ class PhysarumField:
             self.heading[pick] = self._rng.uniform(0, 2 * np.pi, budget).astype(np.float32)
             # species is NOT redrawn: a reseed relocates a lineage, it does
             # not replace it (update.frag carries a.w through untouched)
+        self.ballistic *= BALLISTIC_DECAY
         self.frame += 1
 
     def _sample_weighted(self, weight, k):
@@ -591,9 +601,15 @@ class PhysarumField:
         self.heading[pick] = self._rng.uniform(0, 2 * np.pi, k).astype(np.float32)
 
     def wave(self, x, y):
-        """Point every agent's heading away from (x, y) — one radial impulse
-        that ripples the whole organism outward, then the mold reknits."""
+        """Point every agent's heading away from (x, y), and hold it there.
+
+        The impulse alone is one frame of new headings, and steering takes
+        most of them back before the front has gone anywhere. Arming the
+        ballistic phase suppresses steering while it decays, so the ring
+        actually travels; then the mold reknits.
+        """
         self.heading = np.arctan2(self.py - y, self.px - x).astype(np.float32)
+        self.ballistic = 1.0
 
     def gather(self, x, y, frac=0.5, radius=60.0):
         """Rush agents already within `radius` of (x, y) into a tight knot

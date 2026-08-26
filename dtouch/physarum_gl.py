@@ -51,7 +51,8 @@ import os
 
 import numpy as np
 
-from .physarum import POINTS, SPATIAL_REGIMES, ZONE_REGIME_COUNT
+from .physarum import (BALLISTIC_DECAY, POINTS, SPATIAL_REGIMES,
+                       ZONE_REGIME_COUNT)
 
 # Agent texture width. One texel per agent; the height is ceil(n / width).
 # 2048 x 16384 (the GL_MAX_TEXTURE_SIZE floor on anything that runs this)
@@ -136,6 +137,7 @@ class PhysarumFieldGL:
         self.species = max(1, min(3, int(species)))   # populations, 1..3
         self.cross = float(cross)  # off-diagonal strength of the species matrix
         self.sharpen = 0.0         # lateral inhibition in the diffusion pass
+        self.ballistic = 0.0       # steering suppression, decays after a wave
         self.mosaic = 0.0          # 0..1 spatial parameter mosaic strength
         self.zones = 7.0           # zone lattice density across the grid
         # slow structural modulation multipliers (see PhysarumField)
@@ -429,6 +431,9 @@ class PhysarumFieldGL:
             p["u_mosaic"].value = min(max(float(self.mosaic), 0.0), 1.0)
             p["u_zones"].value = max(float(self.zones), 1.0)
             p["u_sense_max"].value = 0.10 * float(min(self.gw, self.gh))
+            p["u_ballistic"].value = min(max(float(self.ballistic), 0.0), 1.0)
+            # ~0.55 s at 60 fps, then steering is fully back
+            self.ballistic *= BALLISTIC_DECAY
             p["u_time"].value = self.frame * (1.0 / 60.0)
 
             self.fbo_agents_b.use()
@@ -467,8 +472,15 @@ class PhysarumFieldGL:
         self._impulse(1, x, y, frac, radius)
 
     def wave(self, x, y):
-        """Point every agent's heading away from (x, y) — one radial impulse."""
+        """Point every agent's heading away from (x, y), and hold it there.
+
+        The impulse alone is one frame of new headings, and steering takes
+        most of them back before the front has gone anywhere — visible for
+        about a frame, which is not a gesture. Arming the ballistic phase
+        suppresses steering while it decays, so the ring actually travels.
+        """
         self._impulse(2, x, y)
+        self.ballistic = 1.0
 
     def gather(self, x, y, frac=0.5, radius=60.0):
         """Rush agents already within `radius` of (x, y) into a tight knot
