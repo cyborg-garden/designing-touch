@@ -88,11 +88,12 @@ class Autopilot:
     def _dwell(self):
         return float(self._rng.uniform(*DWELL))
 
-    def tick(self, dt, mode_id, looks, mode_ids=()):
+    def tick(self, dt, mode_id, looks, mode_ids=(), current=None):
         """Advance the clock and return this frame's intents (usually none).
 
-        `looks` are the current mode's recallable look names; `mode_ids` the
-        modes it may hop between. dt is clamped: a stalled frame (a mode
+        `looks` are the current mode's recallable look names, `current` the
+        one on screen (never re-picked), and `mode_ids` the modes it may hop
+        between. dt is clamped: a stalled frame (a mode
         rebuild, a window drag, a laptop lid) must not fire a re-cast the
         instant it resumes, which is the wall-clock bug the browser build had.
         """
@@ -116,7 +117,12 @@ class Autopilot:
             return out
 
         self._until_mode_hop -= 1
-        pool = [l for l in looks if l]
+        # Never re-cast to the look already on screen. Uniform picking put one
+        # re-cast in five back where it started (measured 20.4% over 40 seeds),
+        # so every fifth dwell the picture simply did not change for 50-110 s —
+        # the exact "this control does nothing" reading FIRST_DWELL exists to
+        # prevent. Falls through when there is only one look to pick.
+        pool = [l for l in looks if l and l != current] or [l for l in looks if l]
         if pool:
             pick = pool[int(self._rng.integers(len(pool)))]
             self.last_reason = pick

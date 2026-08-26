@@ -132,8 +132,18 @@ Phase 1 — restore the physics (shared shaders; local and web both):
 4. Decouple weave from jitter and reseed; cap both hard.
 5. Bilinear sensing.
 6. Re-spread POINTS so no point is steering-blind; add a test asserting
-   `2*sense*sin(spread) >= 3*sigma_blur` and `step < sense`.
-7. Tonemap: EMA the norm, add a black floor and an output gamma, drop grain.
+   `sense*scale >= sigma_blur`, `2*sense*scale*sin(spread) >= 1.5*sigma_blur`
+   and `step < sense`, FOR BOTH ENGINES. (The first draft of this line said
+   3*sigma. Nothing in the shipped table clears that — `veins` misses it on
+   the GL grid — so the criterion is 1.5, and the number here was wrong rather
+   than the points. The engine-pair matters more than the constant: checking
+   only the GL scale let `fingers` ship at 2.36 px of separation on the CPU
+   fallback, worse than the 2.21 px this document calls blind.)
+7. Tonemap: EMA the norm; cut grain. (A black floor and an output gamma were
+   planned here and NOT built — cutting density fixed the tonality they were
+   meant to rescue, so the curve was left alone. Grain went 0.5 -> 0.2 on both
+   engines, not to zero: at the new density it reads as spore dust rather than
+   full-frame static.)
 
 Phase 2 — aliveness:
 8. Multi-species: RGB trail, species assigned once at spawn in `a.w`, signed 3x3
@@ -208,9 +218,16 @@ change together and still read as one texture everywhere.
 
 **Lateral inhibition.** The diffusion pass is centre-surround now: a strong
 vein suppresses its own neighbourhood. That sharpens the vein and digs the
-dark halo around it. Applied once per frame, on the vertical axis only —
-running it on both axes turns the picture into a pixel-scale Turing dot
-pattern, which is worth knowing before someone "simplifies" it.
+dark halo around it.
+
+It is SPLIT ACROSS BOTH AXES, half strength on each, in both engines. The
+three ways to get this wrong, in the order I got them wrong: full strength on
+both axes doubles the operator and collapses the picture into a pixel-scale
+Turing dot pattern; one axis only is a directional operator and the picture
+laminates along it; and — the one that survived longest — GL doing one thing
+while the CPU port did the other, with the comments in both files asserting
+the version that was no longer true. An earlier draft of this document said
+"on the vertical axis only", which by then described neither engine.
 
 ## What the knobs do now
 

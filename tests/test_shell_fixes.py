@@ -81,12 +81,14 @@ def _booted(tmp_path, **kw):
 
 
 def _free_a_bank_slot(host):
-    """Clear one built-in off the bank so a user look has somewhere to land.
+    """Clear one built-in off the bank, for tests that need a KNOWN slot free.
 
-    Dither ships nine built-ins and the bank is nine slots, so a fresh
-    instance boots with NO free slot and `_assign_slot` correctly refuses with
-    "bank full (1-9)". Tests about assigning a slot have to make one, and the
-    documented way is a second badge click on an already-banked look.
+    This used to be load-bearing: Dither's nine built-ins once filled all nine
+    slots, so a fresh instance had nowhere to save a first look and
+    `_assign_slot` refused with "bank full (1-9)". The seed now stops at
+    BANK_SEED_MAX and holds two slots open, so nothing depends on this any
+    more — it stays because a test that wants to pin WHICH slot a look lands
+    in still has to control the bank rather than hope.
     """
     ui = host.ui
     slot = max(ui.bank, key=int)
@@ -682,7 +684,7 @@ def test_every_store_mailbox_survives_a_full_disk(tmp_path, monkeypatch,
     host.ui.renaming = None
     name = next(iter(host.ui.user_presets))
     if mailbox == "pending_slot":
-        _free_a_bank_slot(host)              # else the assign never reaches disk
+        _free_a_bank_slot(host)              # pin which slot the look lands in
     _full_disk(monkeypatch, call)
     setattr(host.ui, mailbox, value(name))
     host._pump_preset_mailboxes()                    # must not raise

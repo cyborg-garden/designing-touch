@@ -51,8 +51,8 @@ import os
 
 import numpy as np
 
-from .physarum import (BALLISTIC_DECAY, POINTS, SPATIAL_REGIMES,
-                       ZONE_REGIME_COUNT)
+from .physarum import (BALLISTIC_DECAY, NORM_EMA, POINTS, SPATIAL_REGIMES,
+                       ZONE_REGIME_COUNT, species_matrix)
 
 # Agent texture width. One texel per agent; the height is ceil(n / width).
 # 2048 x 16384 (the GL_MAX_TEXTURE_SIZE floor on anything that runs this)
@@ -61,9 +61,7 @@ AGENT_TEX_W = 2048
 
 # Stride of the statistics subsample (percentile + mean readback).
 STATS_STRIDE = 4
-# Exposure-reference smoothing. The p95 the picture is normalized by is an
-# estimate off a strided subsample; tracking it frame-to-frame pumps.
-NORM_EMA = 0.85
+
 
 SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders", "physarum")
 SHADER_FILES = ("fullscreen.vert", "update.frag", "deposit.vert", "deposit.frag",
@@ -275,33 +273,14 @@ class PhysarumFieldGL:
         return int(self._salt.integers(0, 2**32, dtype=np.uint32))
 
     def interaction_matrix(self):
-        """Row-major 3x3 species matrix, flattened.
+        """This field's species matrix — see dtouch.physarum.species_matrix.
 
-        This is the SPEC, not the transport. The shader builds one row at a
-        time from `u_cross` (update.frag's `food`), because the zone an agent
-        is standing in re-scales the off-diagonals per agent and a single
-        uploaded matrix could not express that. Both the CPU field and the
-        browser port implement this arrangement; keep them agreeing with it.
-
-        Diagonal is self-attraction (1). Off-diagonals are `cross`, arranged
-        rock-paper-scissors: each species is REPELLED by the next and mildly
-        drawn to the previous. Symmetric mutual repulsion alone gives static
-        territories with dead walls; the asymmetry is what makes the walls
-        travel, chase and spiral, which is the difference between a picture
-        that has settled and one that is still happening.
-
-        With species == 1 this is the identity row and the field behaves
-        exactly like the old single-channel model.
+        The SPEC, not the transport: update.frag builds one row at a time from
+        `u_cross`, because the zone an agent stands in rescales the
+        off-diagonals per agent and a single uploaded matrix could not express
+        that. Both must agree; tests/test_physarum_mosaic.py pins it.
         """
-        c = max(float(self.cross), 0.0)
-        if self.species <= 1 or c <= 0.0:
-            return (1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0)
-        back = 0.35 * c
-        return (1.0, -c, back,
-                back, 1.0, -c,
-                -c, back, 1.0)
+        return species_matrix(self.species, self.cross)
 
     def _food_norm(self):
         """Trail-unit scale for `food` and friends: the trail's own bright end
@@ -598,7 +577,12 @@ class PhysarumFieldGL:
         return rgba[..., :3].copy()
 
     def species_of(self):
-        """Per-agent species index, int32 length n."""
+        """Per-agent species index, int32 length n.
+
+        Diagnostics only — nothing in the render path calls this. Kept because
+        "which species is where" is the first question when the mosaic or the
+        cross-terms misbehave, and reconstructing it from the trail is lossy.
+        """
         a = self._read_f4(self.fbo_agents_a, 4).reshape(self.ah * self.aw, 4)[:self.n]
         return a[:, 3].astype(np.int32)
 

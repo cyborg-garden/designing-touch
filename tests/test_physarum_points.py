@@ -17,26 +17,37 @@ import math
 
 import pytest
 
-from dtouch.physarum import POINTS, POINT_NAMES, PX_SCALE, SENSE_SIGMA_PX
+from dtouch.physarum import (CPU_SCALE, POINTS, POINT_NAMES, PX_SCALE,
+                             SENSE_SIGMA_PX)
+
+# Both engines, and the CPU one binds: the blur radius is the same integer on
+# each, so the smoothing is the same number of pixels, but the CPU grid is
+# 2.22x narrower. Checking only the GL scale let `fingers` ship at 2.36 px of
+# separation on the fallback engine — worse than the 2.21 px this whole
+# diagnosis calls blind, on the path every GPU-less machine runs.
+SCALES = (("cpu", CPU_SCALE), ("gl", PX_SCALE))
 
 
 @pytest.mark.parametrize("name", POINT_NAMES)
-def test_point_senses_past_its_own_blur(name):
+@pytest.mark.parametrize("engine,scale", SCALES)
+def test_point_senses_past_its_own_blur(name, engine, scale):
     """The sensors must reach beyond the smoothing, or they all read one blob."""
-    reach = POINTS[name]["sense"] * PX_SCALE
+    reach = POINTS[name]["sense"] * scale
     assert reach >= SENSE_SIGMA_PX, (
-        f"{name}: sensor reach {reach:.2f} px is inside the {SENSE_SIGMA_PX} px "
-        f"blur — its three sensors sample one smoothed value")
+        f"{name} on {engine}: sensor reach {reach:.2f} px is inside the "
+        f"{SENSE_SIGMA_PX} px blur — its three sensors sample one smoothed value")
 
 
 @pytest.mark.parametrize("name", POINT_NAMES)
-def test_point_resolves_a_lateral_gradient(name):
+@pytest.mark.parametrize("engine,scale", SCALES)
+def test_point_resolves_a_lateral_gradient(name, engine, scale):
     """Left and right sensors must be far enough apart to disagree."""
     p = POINTS[name]
-    sep = 2.0 * p["sense"] * PX_SCALE * math.sin(p["spread"])
+    sep = 2.0 * p["sense"] * scale * math.sin(p["spread"])
     assert sep >= 1.5 * SENSE_SIGMA_PX, (
-        f"{name}: left/right separation {sep:.2f} px against {SENSE_SIGMA_PX} px "
-        f"of smoothing — fl == fr, so the tie-break turns one way every step")
+        f"{name} on {engine}: left/right separation {sep:.2f} px against "
+        f"{SENSE_SIGMA_PX} px of smoothing — fl == fr, so the tie-break turns "
+        f"one way every step")
 
 
 @pytest.mark.parametrize("name", POINT_NAMES)

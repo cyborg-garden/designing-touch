@@ -47,8 +47,8 @@ import numpy as np
 POINTS = {
     "veins":   dict(sense=9.0,  spread=0.39, turn=0.79, step=1.4, deposit=1.0),
     "cells":   dict(sense=14.0, spread=1.10, turn=0.30, step=0.8, deposit=1.0),
-    "fingers": dict(sense=4.0,  spread=0.30, turn=0.70, step=3.4, deposit=2.0),
-    "haze":    dict(sense=1.8,  spread=1.50, turn=0.08, step=0.35, deposit=0.25),
+    "fingers": dict(sense=4.5,  spread=0.62, turn=0.70, step=3.4, deposit=2.0),
+    "haze":    dict(sense=3.6,  spread=1.50, turn=0.08, step=0.35, deposit=0.25),
     "web":     dict(sense=34.0, spread=0.50, turn=1.10, step=1.8, deposit=0.6),
     "storm":   dict(sense=10.0, spread=1.55, turn=1.70, step=3.2, deposit=1.4),
 }
@@ -56,11 +56,20 @@ POINT_NAMES = list(POINTS)
 
 # A point can only steer on what the trail still resolves. The trail is box
 # blurred every frame over a `1/(1-decay)`-frame memory, which accumulates to
-# roughly SENSE_SIGMA_PX of smoothing at the shipped diffuse radius, so:
+# roughly SENSE_SIGMA_PX of smoothing at the shipped diffuse radius, so, with
+# `scale` the engine's grid-px-per-table-unit:
 #
-#   sense * PX_SCALE           >= SENSE_SIGMA_PX          reach past the blur
-#   2*sense*PX_SCALE*sin(spr)  >= 1.5 * SENSE_SIGMA_PX    resolve a gradient
+#   sense * scale              >= SENSE_SIGMA_PX          reach past the blur
+#   2*sense*scale*sin(spread)  >= 1.5 * SENSE_SIGMA_PX    resolve a gradient
 #   step                       <  sense                   don't leap past it
+#
+# BOTH engines, and the CPU one binds. The blur radius is the same integer on
+# each, so the smoothing is the same number of PIXELS — but the CPU grid is
+# 2.22x narrower, so a point has 2.22x less reach there in the units that
+# matter. Checking only PX_SCALE (the GL figure) let `fingers` ship at 2.36 px
+# of separation on the fallback engine — WORSE than the 2.21 px this whole
+# diagnosis calls blind, on the path every machine without a GPU actually
+# runs. tests/test_physarum_points.py checks both.
 #
 # `fingers` used to violate all three (2.21 px of sensor separation on a field
 # smoothed to 3.33 px, and a stride longer than its own reach), which made it a
@@ -71,7 +80,13 @@ POINT_NAMES = list(POINTS)
 # Shared by both engines; physarum_gl re-exports the same constant.
 BALLISTIC_DECAY = 0.90
 
+# Exposure-reference smoothing, shared by both engines (physarum_gl re-exports
+# this). The p95 the picture is normalized by is an estimate off a strided
+# subsample; tracking it frame-to-frame pumps.
+NORM_EMA = 0.85
+
 PX_SCALE = 1280.0 / 576.0        # working grid -> GL grid, see modes.physarum
+CPU_SCALE = 1.0                  # the CPU field runs at gain 1.0 on its own grid
 SENSE_SIGMA_PX = 3.33            # accumulated trail smoothing, GL px
 
 # ----- the spatial mosaic --------------------------------------------------
@@ -129,6 +144,38 @@ SENSE_MAX_FRAC = 0.10
 # Mirrors update.frag's `float back = 0.35 * cross;`.
 CROSS_BACK = 0.35
 
+
+def species_matrix(species, cross):
+    """Row-major 3x3 species interaction matrix — the ONE definition.
+
+    Both engines and the browser port implement this arrangement, and it used
+    to be written out three times, which is how the GL field and the CPU
+    field came to disagree about what cross 0 means.
+
+    Diagonal is self-attraction (1). The off-diagonals BLEND from +1 at cross
+    0 toward rock-paper-scissors at cross 1: each species repelled outright by
+    the next, mildly drawn to the previous.
+
+    All-ones is the load-bearing end. Three populations depositing into three
+    channels and sensing their SUM is arithmetically the same field as one
+    population depositing into one, so cross 0 really is the legacy
+    single-channel model — which is what the bottom of `weave` promises. An
+    identity row there instead gives three mutually invisible organisms at a
+    third of the density each: a different picture wearing the same label,
+    and measurably so (channel correlation 0.04 where the legacy field has
+    them locked together).
+    """
+    if int(species) <= 1:
+        return (1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0)
+    c = max(float(cross), 0.0)
+    wn = 1.0 - 2.0 * c                      # the next species: +1 -> -1
+    wp = 1.0 - (1.0 - CROSS_BACK) * c       # the previous one: +1 -> +0.35
+    return (1.0, wn, wp,
+            wp, 1.0, wn,
+            wn, wp, 1.0)
+
 _PARAM_KEYS = ("sense", "spread", "turn", "step", "deposit")
 
 # Signed keep map semantics (both engines): keep > 0 raises the effective
@@ -150,7 +197,7 @@ class PhysarumField:
     def __init__(self, n=250_000, gw=480, gh=270, seed=0,
                  point_bg="veins", point_fg="fingers",
                  decay=0.94, diffuse=1, food=0.35, exposure=3.5,
-                 grain=0.5, reseed_frac=0.004, gain=1.0,
+                 grain=0.2, reseed_frac=0.004, gain=1.0,
                  sat=0.0, jitter=0.0, hetero=0.0, species=3, cross=0.0,
                  sharpen=0.0, mosaic=0.0, zones=7.0):
         if n <= 0:
@@ -246,22 +293,8 @@ class PhysarumField:
         return self._species.copy()
 
     def interaction_matrix(self):
-        """Row-major 3x3 species matrix — the same table PhysarumFieldGL
-        uploads, and the authoritative arrangement this field senses through.
-
-        Diagonal is self-attraction (1). Off-diagonals are `cross`, arranged
-        rock-paper-scissors: each species is REPELLED by the next and mildly
-        drawn to the previous. With species == 1 or cross <= 0 it is the
-        identity and the field reduces to the single-channel model."""
-        c = max(float(self.cross), 0.0)
-        if self.species <= 1 or c <= 0.0:
-            return (1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0)
-        back = CROSS_BACK * c
-        return (1.0, -c, back,
-                back, 1.0, -c,
-                -c, back, 1.0)
+        """This field's species matrix — see `species_matrix`."""
+        return species_matrix(self.species, self.cross)
 
     # ----- the spatial mosaic -----
     def _zone_mults(self):
@@ -449,16 +482,25 @@ class PhysarumField:
         # ----- what the sensors read -----
         # Species s reads dot(row_s, trail[p]): its own channel attracts, the
         # others pull with the signed weights of interaction_matrix(). Written
-        # as own + cross * (0.35*previous - next), which is the same row with
-        # the two channel permutations folded into one plane, so a sample is
+        # as total - cross * (0.65*previous + 2*next), which is that row
+        # rearranged: at cross 0 it collapses to the plain channel SUM, i.e.
+        # the legacy single-channel field. Folding the two channel
+        # permutations into one plane means a sample is
         # two gathers instead of a 3x3 mix of the whole grid.
         tr_f = self.trail.reshape(-1)                # index cell*3 + species
         sp = self._species
-        use_cross = cross_base > 0.0
-        mix_f = None
+        # `multi` decides WHICH field is read, `use_cross` only whether the
+        # repulsion term is worth computing. They are not the same switch: at
+        # cross 0 a three-species field still reads the channel SUM (the
+        # legacy single-channel model), never its own channel alone.
+        multi = self.species > 1
+        use_cross = multi and cross_base > 0.0
+        mix_f = tot_f = None
+        if multi:
+            tot_f = self.trail.sum(axis=2, dtype=np.float32).reshape(-1)
         if use_cross:
-            mix_f = (np.float32(CROSS_BACK) * self.trail[..., [2, 0, 1]]
-                     - self.trail[..., [1, 2, 0]]).reshape(-1)
+            mix_f = (np.float32(1.0 - CROSS_BACK) * self.trail[..., [2, 0, 1]]
+                     + np.float32(2.0) * self.trail[..., [1, 2, 0]]).reshape(-1)
         # `sat` softly caps the sensed trail at sat x its own bright end, so a
         # saturated fat vein reads the same as a merely strong thin one — the
         # single strongest anti-thoroughfare lever. The dot product is SIGNED
@@ -477,9 +519,12 @@ class PhysarumField:
             sy = py + np.sin(h + angle_off) * sense_d
             c = (sy.astype(np.int32) % gh) * gw + (sx.astype(np.int32) % gw)
             i3 = c * 3 + sp
-            v = tr_f[i3]
             if use_cross:
-                v = v + cross * mix_f[i3]
+                v = tot_f[c] - cross * mix_f[i3]
+            elif multi:
+                v = tot_f[c]
+            else:
+                v = tr_f[i3]
             if cap > 0:
                 a = np.abs(v)
                 np.exp(a * np.float32(-1.0 / cap), out=a)
@@ -532,23 +577,30 @@ class PhysarumField:
         # neighbourhood — sharpening the vein and digging the dark halo around
         # it. Those halos are most of what reads as carved rather than smoked.
         #
-        # The inhibition rides the SECOND (vertical) axis ONLY, exactly as
-        # physarum_gl._blur_decay zeroes u_sharpen on the H pass. Applying it
-        # on both axes makes a pixel-scale Turing dot pattern that destroys
-        # the picture.
+        # The inhibition is SPLIT across the two axes, HALF STRENGTH ON EACH,
+        # matching physarum_gl._blur_decay, which sets u_sharpen to
+        # sharpen*0.5 on both the H and the V pass. On one axis only it is a
+        # directional operator and the picture laminates along it; at full
+        # strength on both it doubles the operator and collapses into a
+        # pixel-scale Turing dot pattern. Half and half is the isotropic one.
         r = int(self.diffuse) if self.diffuse > 0 else 0
         sh = max(float(self.sharpen), 0.0)
         if r > 0 or sh > 0:
             k = 2 * r + 1
             if sh > 0:
                 rw = max(3 * r, r + 2)
-                tmp = (self.trail if k == 1
-                       else cv2.boxFilter(self.trail, -1, (k, 1)))
-                blurred = tmp if k == 1 else cv2.boxFilter(tmp, -1, (1, k))
-                surround = cv2.boxFilter(tmp, -1, (1, 2 * rw + 1))
-                self.trail = np.maximum(
-                    blurred - np.float32(sh) * (surround - blurred),
-                    np.float32(0.0))
+                w = 2 * rw + 1
+                half = np.float32(sh * 0.5)
+
+                def centre_surround(img, ksz, wsz):
+                    blurred = cv2.boxFilter(img, -1, ksz)
+                    surround = cv2.boxFilter(img, -1, wsz)
+                    return np.maximum(blurred - half * (surround - blurred),
+                                      np.float32(0.0))
+
+                # cv2 ksize is (width, height): (k, 1) is the H pass.
+                tmp = centre_surround(self.trail, (k, 1), (w, 1))
+                self.trail = centre_surround(tmp, (1, k), (1, w))
             else:
                 self.trail = cv2.boxFilter(self.trail, -1, (k, k))
         if keep is None:
@@ -650,6 +702,15 @@ class PhysarumField:
         tr = self.trail
         total = tr[..., 0] + tr[..., 1] + tr[..., 2]
         norm = float(np.percentile(total, 95.0))
+        # Smooth it, exactly as PhysarumFieldGL does with NORM_EMA. A raw
+        # per-frame p95 renormalizes the picture against its own noise every
+        # frame, which reads as a slow pump — and it also feeds the `sat` and
+        # `food` scales, so an unsmoothed reference makes the SENSING wobble
+        # too. The two engines used different references here until this
+        # comment was written, which is precisely the kind of quiet divergence
+        # "both engines implement the same model" is supposed to exclude.
+        if self._norm > 0.0 and norm > 0.0:
+            norm = self._norm * NORM_EMA + norm * (1.0 - NORM_EMA)
         self._norm = norm               # feedback for the `sat` sensing cap
         if norm <= 0:
             return np.zeros((self.gh, self.gw), np.float32)

@@ -74,6 +74,17 @@ REGIMES = {
 }
 REGIME_NAMES = list(REGIMES)
 REGIME_KEYS = ("sense", "turn", "spread", "step", "deposit", "gain", "food")
+# Perceptual curve on the three MOLD feel sliders. The contract
+# (tests/test_physarum_alive.py) is that each is perceptible within 5 seconds
+# AT 0.3, not merely at 1.0 — the bottom third of a slider has to be where
+# most of the playing happens, or the control is a switch with decoration.
+#
+# It was 0.6. After the species and mosaic work the response went back-loaded:
+# weave measured 0.044 at 0.3 against a 0.06 floor while reaching 0.448 at
+# 1.0, and evolve 0.065 against 0.08 while reaching 0.138. The mechanisms got
+# far stronger at the top and the curve no longer compensated at the bottom.
+FEEL_CURVE = 0.35
+
 REGIME_FADE = 3.0                # crossfade, seconds — decisive, not a jump cut
 REGIME_DWELL = (15.0, 45.0)      # dwell range, seconds, order randomized
 
@@ -555,7 +566,7 @@ class PhysarumMode:
         # MOLD slider read as nothing): the sliders' bottom third has to
         # already be clearly audible, so the levers ride value**0.6 —
         # 0.3 -> 0.49, 0.6 -> 0.74, 1.0 -> 1.0 (wild) — instead of linear.
-        e = evolve ** 0.6
+        e = evolve ** FEEL_CURVE
 
         # evolve: the mold hops between REGIMES — decisive crossfaded
         # transitions (REGIME_FADE seconds) between distinct growth
@@ -620,7 +631,7 @@ class PhysarumMode:
         # visibly — and is computed in float from the unrounded base so the
         # trim bites identically at every quality tier (rounding the base
         # first made 'quality' veins relatively thinner than 'perform').
-        w = weave ** 0.6
+        w = weave ** FEEL_CURVE
         # sat is a MULTIPLE of the trail's own bright end. It must sit ABOVE
         # that end: capping at 0.22x p95 (the old 0.30*w) compressed the whole
         # field into a 3-unit band, so agents inside the network were steering
@@ -651,10 +662,10 @@ class PhysarumMode:
         # stops being one texture everywhere — territories, fronts, dark walls.
         # This is the lever that makes weave visible in under a second, which
         # the old satcap/jitter/reseed bundle never managed.
-        pf.cross = 0.68 * w
+        pf.cross = w
         pf.sharpen = 0.18 * w
         pf.diffuse = max(1, round(self._base_diffuse
-                                  * (1.0 - 0.45 * weave_base ** 0.6)))
+                                  * (1.0 - 0.45 * weave_base ** FEEL_CURVE)))
 
         pf.decay = decay
         pf.food = food
@@ -732,7 +743,7 @@ class PhysarumMode:
 
         self._burst_cool = max(getattr(self, "_burst_cool", 0.0) - dt, 0.0)
         self._melt_pulse = max(0.0, self._melt_pulse - dt / 2.5)
-        r = react ** 0.6             # perceptual mapping, same as the others
+        r = react ** FEEL_CURVE      # perceptual mapping, same as the others
         keep_pos = None
         if react > 0:
             gray = gray + (5.0 * r) * self._motion

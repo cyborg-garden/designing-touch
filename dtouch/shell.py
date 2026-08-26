@@ -615,6 +615,12 @@ class Host:
     def _menu_commit(self, mode_id, from_boot):
         """One card committed from the menu (key, Enter, Esc-at-boot, click).
 
+        Releases the autopilot. The keyboard release check in `_route_key`
+        cannot see this: the open menu consumes every key and returns before
+        it, so picking a mode card — which is about as deliberate an act as
+        the instrument has — used to leave AUTO running, and it would recall
+        a look over the top of your choice a minute later.
+
         A commit from the BOOT menu that lands on the mode already running is
         not a switch — that mode was started behind the menu so the screen
         would be live, and it is what the selection defaulted to. Routing it
@@ -623,6 +629,8 @@ class Host:
         It gets the mode-title flash a real entry gets, and the three-doors
         hint is posted HERE rather than at boot, so it lands on the mode
         instead of on top of the menu's own hint line."""
+        if self.auto.interrupt():
+            self.hud.toasts.hint("auto off - you took over")
         if from_boot:
             # the resume hint is a pointer at Enter, and Enter has just been
             # pressed. Its 4 s ttl outlives that by ~3 s, so without this it
@@ -749,6 +757,13 @@ class Host:
                     self._menu_commit(mode_id, from_boot)
             return
         if self.ui is not None:
+            if event == cv2.EVENT_LBUTTONDOWN and self.auto.interrupt():
+                # The panel is the other half of the instrument's input
+                # surface, and none of it goes through _route_key — a slider
+                # drag or a preset-row click never touched AUTO_RELEASE_KEYS.
+                # dtouch.auto promises ANY scene-changing human input releases
+                # it; a click on the panel is exactly that.
+                self.hud.toasts.hint("auto off - you took over")
             self.ui.on_mouse(event, x, y, flags, param)
 
     def _route_key(self, key):
@@ -798,7 +813,10 @@ class Host:
             return
         looks = list(self.all_presets.keys())
         modes = [m.id for m in REGISTRY]
-        for kind, value in self.auto.tick(dt, self.mode.id, looks, modes):
+        current = self.ui.preset_name if self.ui.preset_idx < len(
+            self.ui.presets) else None
+        for kind, value in self.auto.tick(dt, self.mode.id, looks, modes,
+                                          current=current):
             if kind == "preset":
                 self.ui.pending_preset = value
             elif kind == "mode":

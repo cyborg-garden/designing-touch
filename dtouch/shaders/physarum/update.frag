@@ -141,10 +141,19 @@ vec3 trail_at(vec2 p) {
 // `repel`, not `cross`: cross() is a GLSL built-in, and shadowing it is legal
 // but not something to bet a driver on.
 float food(vec2 p, int sp, float repel) {
-    float back = 0.35 * repel;
-    vec3 row = (sp == 0) ? vec3(1.0, -repel, back)
-             : (sp == 1) ? vec3(back, 1.0, -repel)
-                         : vec3(-repel, back, 1.0);
+    // The row BLENDS from all-ones toward rock-paper-scissors. At repel 0
+    // every species reads the total trail, which is exactly the old
+    // single-channel model: three populations depositing into three channels
+    // and sensing their sum is arithmetically identical to one population
+    // depositing into one. That matters — the bottom of `weave` is supposed
+    // to BE the legacy bold-canal engine, and an identity row instead gave
+    // three mutually invisible organisms at a third of the density each,
+    // which is a different picture wearing the same label.
+    float wn = 1.0 - 2.0 * repel;          // the next species: +1 -> -1
+    float wp = 1.0 - 0.65 * repel;         // the previous one: +1 -> +0.35
+    vec3 row = (sp == 0) ? vec3(1.0, wn, wp)
+             : (sp == 1) ? vec3(wp, 1.0, wn)
+                         : vec3(wn, wp, 1.0);
     if (u_nspec <= 1.0) row = vec3(1.0, 0.0, 0.0);
     float t = dot(row, trail_at(p));
     // Sensor saturation, signed. The cap softly compresses what a sensor can
@@ -208,6 +217,7 @@ void main() {
         spread *= mix(1.0, r.z, u_mosaic);
         stp    *= mix(1.0, r.w, u_mosaic);
         repel  *= mix(1.0, rc, u_mosaic);
+        repel = min(repel, 1.5);   // zones scale it; do not let it run away
     }
     // Sensing further than a tenth of the frame is sensing globally: the
     // three sensors stop reporting on a neighbourhood and the mold dissolves

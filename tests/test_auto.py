@@ -7,10 +7,11 @@ LOOKS = ["veinwork", "amoeba", "ghost", "lightning", "breath"]
 MODES = ["particles", "dithergirl", "physarum"]
 
 
-def _run(a, seconds, dt=1 / 30, mode="physarum", looks=LOOKS, modes=MODES):
+def _run(a, seconds, dt=1 / 30, mode="physarum", looks=LOOKS, modes=MODES,
+         current=None):
     out = []
     for _ in range(int(seconds / dt)):
-        out += a.tick(dt, mode, looks, modes)
+        out += a.tick(dt, mode, looks, modes, current=current)
     return out
 
 
@@ -127,3 +128,33 @@ def test_casts_do_not_release_but_scene_keys_do():
         assert ord(ch) not in AUTO_RELEASE_KEYS, ch
     for ch in "1590[],.-=xpdo":        # looks, nudges, swap, mode switches
         assert ord(ch) in AUTO_RELEASE_KEYS, ch
+
+
+def test_it_never_recasts_to_the_look_already_on_screen():
+    """Uniform picking put one re-cast in five back where it started —
+    measured 20.4% over 40 seeds — so every fifth dwell the picture did not
+    change for 50-110 s. That is the exact "this control does nothing"
+    reading FIRST_DWELL exists to prevent."""
+    repeats = total = 0
+    for seed in range(40):
+        a = Autopilot(seed=seed)
+        a.set(True)
+        showing = LOOKS[0]
+        for _ in range(int(4000 / (1 / 30))):
+            for kind, value in a.tick(1 / 30, "physarum", LOOKS, MODES,
+                                      current=showing):
+                if kind == "preset":
+                    total += 1
+                    repeats += (value == showing)
+                    showing = value
+    assert total > 100, total
+    assert repeats == 0, f"{repeats}/{total} re-casts changed nothing"
+
+
+def test_a_single_look_still_recasts_rather_than_stalling():
+    """The anti-repeat must not become a deadlock when there is nothing else
+    to pick — one look is still a valid setlist."""
+    a = Autopilot(seed=1)
+    a.set(True)
+    got = [v for k, v in _run(a, 600, looks=["only"]) if k == "preset"]
+    assert got and set(got) == {"only"}
