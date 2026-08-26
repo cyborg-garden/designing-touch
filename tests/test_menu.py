@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 
 from dtouch.hud import DIM, TITLE_SAFE, Toasts
-from dtouch.menu import (Card, Menu, draw_menu, hint_baseline, menu_hint,
-                         registry_cards, render_boot_card)
+from dtouch.menu import (AUTO_ID, Card, Menu, draw_menu, hint_baseline,
+                         menu_hint, registry_cards, render_boot_card)
 from dtouch.modes import REGISTRY
 
 
@@ -46,12 +46,32 @@ def _menu4():
 
 # ---------- cards from the registry ----------
 
-def test_registry_cards_cover_registry_plus_reserved_flocking():
+def test_registry_cards_cover_registry_plus_auto_plus_reserved_flocking():
     cards = registry_cards()
-    assert [c.id for c in cards[:-1]] == [m.id for m in REGISTRY]
+    assert [c.id for c in cards[:-2]] == [m.id for m in REGISTRY]
+    auto = cards[-2]
+    assert auto.id == AUTO_ID and auto.enabled and auto.key == "a"
     last = cards[-1]
     assert last.title == "FLOCKING" and last.blurb == "coming soon"
     assert last.enabled is False and last.id is None and last.key is None
+
+
+def test_the_auto_card_commits_to_its_own_verb_not_a_mode_switch():
+    """Autopilot is not a Mode — there is nothing to switch into. If it ever
+    returns ("switch", "auto") the shell will look up a mode that does not
+    exist and hint "unknown mode auto", which is the dead end principle 5
+    forbids, on the one card whose whole job is to be effortless."""
+    m = Menu()
+    m.show("physarum")
+    assert m.key(ord("a")) == ("auto", None)
+    assert not m.open
+
+
+def test_the_auto_card_is_reachable_by_digit_and_click_too():
+    m = Menu()
+    m.show("physarum")
+    i = [c.id for c in m.cards].index(AUTO_ID)
+    assert m.key(ord(str(i + 1))) == ("auto", None)
 
 
 def test_card_strings_are_ascii_only():

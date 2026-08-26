@@ -42,6 +42,14 @@ from .modes import REGISTRY
 
 MENU_SCRIM = 0.65               # DESIGN.md §5: menu scrim 65%
 
+# The autopilot card. It is not a Mode — there is nothing to switch INTO — so
+# it commits to its own verb and the shell toggles dtouch.auto.Autopilot.
+# It sits on the menu because the menu is where you decide what the next
+# stretch of time looks like, and "you decide" and "it decides" belong on the
+# same screen.
+AUTO_ID = "auto"
+AUTO_ACCENT = (120, 230, 255)   # BGR
+
 # Arrow keys as they arrive here: cv2's waitKey code masked with `& 0xFF` by
 # the shell loop. macOS reports 63232..63235, which mask to these four.
 #
@@ -75,6 +83,7 @@ def registry_cards():
     cards = [Card(m.id, m.title, getattr(m, "blurb", ""), m.accent,
                   getattr(m, "key", m.id[:1]))
              for m in REGISTRY]
+    cards.append(Card(AUTO_ID, "AUTO", "it plays itself", AUTO_ACCENT, "a"))
     cards.append(Card(None, "FLOCKING", "coming soon", DIM, None, enabled=False))
     return cards
 
@@ -82,7 +91,9 @@ def registry_cards():
 class Menu:
     """Menu state machine — open flag, selection, key/click routing.
 
-    `key()` returns ("switch", mode_id) when a card is committed,
+    `key()` returns ("switch", mode_id) when a mode card is committed,
+    ("auto", None) when the AUTO card is committed (autopilot is not a mode —
+    see AUTO_ID),
     ("close", None) when the menu dismisses, ("quit", None) when q closes the
     menu and asks the shell to arm the quit confirm (DESIGN.md §3),
     ("soon", title) when the key names the reserved card, ("unknown", None) for
@@ -137,7 +148,12 @@ class Menu:
     def _commit(self, i):
         self.sel = i
         self.close()
-        return "switch", self.cards[i].id
+        card = self.cards[i]
+        if card.id == AUTO_ID:
+            # not a mode switch: the shell hands this to the autopilot, which
+            # then drives the ordinary mode and preset mailboxes from inside
+            return "auto", None
+        return "switch", card.id
 
     def _soon(self, i):
         """Answer for a key that named a card that is on screen but not
