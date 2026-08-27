@@ -25,3 +25,6 @@ dtouch.egg-info/
 
 # git worktrees for parallel branches
 .worktrees/
+
+# macOS
+.DS_Store
